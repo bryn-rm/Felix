@@ -69,24 +69,25 @@ CREATE POLICY "users manage own settings"
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS emails (
-    id              TEXT    NOT NULL,
-    user_id         UUID    NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    thread_id       TEXT,
-    from_email      TEXT,
-    from_name       TEXT,
-    to_email        TEXT,
-    subject         TEXT,
-    body            TEXT,
-    snippet         TEXT,
-    received_at     TIMESTAMPTZ,
+    id                  TEXT    NOT NULL,
+    user_id             UUID    NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    thread_id           TEXT,
+    message_id_header   TEXT,   -- RFC 2822 Message-ID, used for In-Reply-To when sending
+    from_email          TEXT,
+    from_name           TEXT,
+    to_email            TEXT,
+    subject             TEXT,
+    body                TEXT,
+    snippet             TEXT,
+    received_at         TIMESTAMPTZ,
     -- Triage metadata set by Claude
-    category        TEXT,   -- action_required | fyi | waiting_on | newsletter | automated | vip
-    urgency         TEXT,   -- low | medium | high | critical
-    sentiment       TEXT,   -- neutral | positive | stressed | frustrated | urgent
-    topic           TEXT,
-    triage_json     JSONB,  -- full triage response for future use
-    processed_at    TIMESTAMPTZ,
-    draft_generated BOOLEAN NOT NULL DEFAULT FALSE,
+    category            TEXT,   -- action_required | fyi | waiting_on | newsletter | automated | vip
+    urgency             TEXT,   -- low | medium | high | critical
+    sentiment           TEXT,   -- neutral | positive | stressed | frustrated | urgent
+    topic               TEXT,
+    triage_json         JSONB,  -- full triage response for future use
+    processed_at        TIMESTAMPTZ,
+    draft_generated     BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (id, user_id)
 );
 
@@ -124,6 +125,11 @@ ALTER TABLE drafts ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "users manage own drafts"
     ON drafts FOR ALL
     USING (user_id = auth.uid());
+
+-- One draft per (email, user) — enforced here so inbox_sync upserts are safe
+CREATE UNIQUE INDEX IF NOT EXISTS uq_drafts_email_user
+    ON drafts (email_id, user_id)
+    WHERE email_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_drafts_user_email
     ON drafts (user_id, email_id);

@@ -1,15 +1,14 @@
 """
 APScheduler setup — all background jobs registered here.
 
-Jobs are designed to be multi-user from day one: every job calls
-get_active_users() and iterates over all users with a connected Google
-account. Users are completely independent — failures for one user must
-never affect others.
+Every job calls get_active_users() and iterates over all users who have a
+connected Google account. Users are completely independent — an exception for
+one user is caught and logged, never allowed to cancel the run for others.
 """
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, time as dt_time
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -26,7 +25,10 @@ scheduler = AsyncIOScheduler()
 # ---------------------------------------------------------------------------
 
 async def get_active_users() -> list[dict]:
-    """Return all users who have a connected Google account + their settings."""
+    """
+    Return every user who has a connected Google account, along with the
+    settings fields needed for job scheduling.
+    """
     return await db.query(
         "SELECT s.user_id, s.timezone, s.briefing_time "
         "FROM settings s "
@@ -39,21 +41,26 @@ async def get_active_users() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", minutes=2, id="sync_all_inboxes")
-async def sync_all_inboxes():
-    """Poll Gmail for new emails for every connected user."""
+async def sync_all_inboxes() -> None:
+    """Poll Gmail for new emails for every connected user in parallel."""
     try:
         users = await get_active_users()
-        await asyncio.gather(
+        if not users:
+            return
+        results = await asyncio.gather(
             *[_sync_user_inbox(u["user_id"]) for u in users],
             return_exceptions=True,
         )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Inbox sync failed for user %s: %s", user["user_id"], result)
     except Exception:
-        logger.exception("sync_all_inboxes failed")
+        logger.exception("sync_all_inboxes outer error")
 
 
-async def _sync_user_inbox(user_id: str):
-    # TODO Phase 2: import and call inbox_sync.sync_user_inbox
-    pass
+async def _sync_user_inbox(user_id: str) -> None:
+    from app.jobs.inbox_sync import sync_user_inbox
+    await sync_user_inbox(user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -61,44 +68,62 @@ async def _sync_user_inbox(user_id: str):
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", hours=1, id="check_all_follow_ups")
-async def check_all_follow_ups():
+async def check_all_follow_ups() -> None:
     """Alert users about overdue follow-ups."""
     try:
         users = await get_active_users()
-        await asyncio.gather(
+        if not users:
+            return
+        results = await asyncio.gather(
             *[_check_user_follow_ups(u["user_id"]) for u in users],
             return_exceptions=True,
         )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Follow-up check failed for user %s: %s", user["user_id"], result)
     except Exception:
-        logger.exception("check_all_follow_ups failed")
+        logger.exception("check_all_follow_ups outer error")
 
 
-async def _check_user_follow_ups(user_id: str):
-    # TODO Phase 5: import and call follow_up_checker.check_user_follow_ups
+async def _check_user_follow_ups(user_id: str) -> None:
+    # TODO Phase 5: from app.jobs.follow_up_checker import check_user_follow_ups
     pass
 
 
 # ---------------------------------------------------------------------------
-# Morning briefing — check every 5 minutes, fire at user's configured time
+# Morning briefing — check every 5 minutes, fire at each user's configured time
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", minutes=5, id="check_morning_briefings")
-async def check_morning_briefings():
+async def check_morning_briefings() -> None:
     """Trigger morning briefing generation when a user's configured time arrives."""
     try:
         users = await get_active_users()
         for user in users:
             await _maybe_generate_briefing(user)
     except Exception:
-        logger.exception("check_morning_briefings failed")
+        logger.exception("check_morning_briefings outer error")
 
 
-async def _maybe_generate_briefing(user: dict):
-    tz = pytz.timezone(user.get("timezone") or "Europe/London")
+async def _maybe_generate_briefing(user: dict) -> None:
+    tz_name: str = user.get("timezone") or "Europe/London"
+    try:
+        tz = pytz.timezone(tz_name)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+
     user_now = datetime.now(tz)
-    briefing_time = user.get("briefing_time") or "07:30"  # stored as "HH:MM"
 
-    if user_now.strftime("%H:%M") == briefing_time:
+    # briefing_time comes back from asyncpg as a datetime.time object
+    briefing_time = user.get("briefing_time")
+    if isinstance(briefing_time, dt_time):
+        target = briefing_time.strftime("%H:%M")
+    elif briefing_time:
+        target = str(briefing_time)[:5]  # "HH:MM:SS" → "HH:MM"
+    else:
+        target = "07:30"
+
+    if user_now.strftime("%H:%M") == target:
         already_done = await db.query_one(
             "SELECT id FROM briefings WHERE user_id = $1 AND date = CURRENT_DATE",
             user["user_id"],
@@ -107,8 +132,8 @@ async def _maybe_generate_briefing(user: dict):
             asyncio.create_task(_generate_briefing_for_user(user["user_id"]))
 
 
-async def _generate_briefing_for_user(user_id: str):
-    # TODO Phase 4: import and call briefing_service.generate_for_user
+async def _generate_briefing_for_user(user_id: str) -> None:
+    # TODO Phase 4: from app.jobs.briefing_generator import generate_briefing_for_user
     pass
 
 
@@ -117,19 +142,22 @@ async def _generate_briefing_for_user(user_id: str):
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("cron", hour=23, minute=0, id="refresh_all_relationships")
-async def refresh_all_relationships():
+async def refresh_all_relationships() -> None:
     try:
         users = await get_active_users()
-        await asyncio.gather(
+        results = await asyncio.gather(
             *[_refresh_user_relationships(u["user_id"]) for u in users],
             return_exceptions=True,
         )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Relationship refresh failed for user %s: %s", user["user_id"], result)
     except Exception:
-        logger.exception("refresh_all_relationships failed")
+        logger.exception("refresh_all_relationships outer error")
 
 
-async def _refresh_user_relationships(user_id: str):
-    # TODO Phase 6: import and call relationship_engine.refresh_user
+async def _refresh_user_relationships(user_id: str) -> None:
+    # TODO Phase 6: from app.jobs.relationship_updater import refresh_user_relationships
     pass
 
 
@@ -138,15 +166,20 @@ async def _refresh_user_relationships(user_id: str):
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("cron", day_of_week="sun", hour=22, id="refresh_all_style_profiles")
-async def refresh_all_style_profiles():
+async def refresh_all_style_profiles() -> None:
     try:
         users = await get_active_users()
-        for user in users:
-            await _refresh_user_style(user["user_id"])
+        results = await asyncio.gather(
+            *[_refresh_user_style(u["user_id"]) for u in users],
+            return_exceptions=True,
+        )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Style refresh failed for user %s: %s", user["user_id"], result)
     except Exception:
-        logger.exception("refresh_all_style_profiles failed")
+        logger.exception("refresh_all_style_profiles outer error")
 
 
-async def _refresh_user_style(user_id: str):
-    # TODO Phase 2: fetch sent emails + call style_profiler.build_profile + persist
-    pass
+async def _refresh_user_style(user_id: str) -> None:
+    from app.jobs.inbox_sync import refresh_user_style_profile
+    await refresh_user_style_profile(user_id)
