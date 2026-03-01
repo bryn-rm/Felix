@@ -159,8 +159,9 @@ async def refresh_all_relationships() -> None:
 
 
 async def _refresh_user_relationships(user_id: str) -> None:
-    # TODO Phase 6: from app.jobs.relationship_updater import refresh_user_relationships
-    pass
+    from app.jobs.relationship_updater import refresh_user_relationships
+
+    await refresh_user_relationships(user_id)
 
 
 # ---------------------------------------------------------------------------

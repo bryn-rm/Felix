@@ -21,6 +21,7 @@ from app import db
 from app.middleware.auth import get_google_credentials
 from app.services.ai_service import ai_service
 from app.services.gmail_service import GmailService
+from app.services.relationship_engine import relationship_engine
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,17 @@ async def _process_email(
 
         # 3. Apply Gmail labels
         await _apply_gmail_labels(gmail, email_id, category)
+
+        # 3.5 Incrementally refresh relationship profile for this sender.
+        try:
+            await relationship_engine.update_contact(user_id, {
+                "from_email": email.get("from_email", ""),
+                "from_name": email.get("from_name", ""),
+                "topic": triage.get("topic"),
+                "received_at": email.get("received_at"),
+            })
+        except Exception:
+            logger.exception("Relationship update failed for sender %s user %s", email.get("from_email"), user_id)
 
         # 4. Auto-draft for emails that need a reply
         if category in ("action_required", "vip"):
