@@ -86,8 +86,9 @@ async def check_all_follow_ups() -> None:
 
 
 async def _check_user_follow_ups(user_id: str) -> None:
-    # TODO Phase 5: from app.jobs.follow_up_checker import check_user_follow_ups
-    pass
+    from app.jobs.follow_up_checker import check_user_follow_ups
+
+    await check_user_follow_ups(user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +134,9 @@ async def _maybe_generate_briefing(user: dict) -> None:
 
 
 async def _generate_briefing_for_user(user_id: str) -> None:
-    # TODO Phase 4: from app.jobs.briefing_generator import generate_briefing_for_user
-    pass
+    from app.jobs.briefing_generator import generate_briefing_for_user
+
+    await generate_briefing_for_user(user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +159,9 @@ async def refresh_all_relationships() -> None:
 
 
 async def _refresh_user_relationships(user_id: str) -> None:
-    # TODO Phase 6: from app.jobs.relationship_updater import refresh_user_relationships
-    pass
+    from app.jobs.relationship_updater import refresh_user_relationships
+
+    await refresh_user_relationships(user_id)
 
 
 # ---------------------------------------------------------------------------
