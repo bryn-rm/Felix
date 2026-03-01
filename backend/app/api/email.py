@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from app import db
 from app.middleware.auth import get_current_user, get_google_credentials
 from app.services.ai_service import ai_service
+from app.services.follow_up_engine import follow_up_engine
 from app.services.gmail_service import GmailService
 
 logger = logging.getLogger(__name__)
@@ -383,14 +384,31 @@ async def send_email(
         raise HTTPException(status_code=502, detail=f"Gmail send failed: {exc}")
 
     # Mark draft as sent
+    sent_at = datetime.now(timezone.utc)
     await db.execute(
         "UPDATE drafts SET status = 'sent', edited_text = $1, sent_at = $2 "
         "WHERE id = $3 AND user_id = $4",
         send_text,
-        datetime.now(timezone.utc),
+        sent_at,
         draft["id"],
         current_user["id"],
     )
+
+    # Phase 5: detect whether this outbound message should be tracked for follow-up.
+    try:
+        await follow_up_engine.process_sent_email(
+            current_user["id"],
+            {
+                "email_id": email_id,
+                "id": result.get("id"),
+                "to": email["from_email"],
+                "subject": email["subject"] or "",
+                "body": send_text,
+                "sent_at": sent_at,
+            },
+        )
+    except Exception:
+        logger.exception("Follow-up detection failed for sent email %s", email_id)
 
     return {"sent": True, "gmail_message_id": result.get("id")}
 
