@@ -133,8 +133,9 @@ async def _maybe_generate_briefing(user: dict) -> None:
 
 
 async def _generate_briefing_for_user(user_id: str) -> None:
-    # TODO Phase 4: from app.jobs.briefing_generator import generate_briefing_for_user
-    pass
+    from app.jobs.briefing_generator import generate_briefing_for_user
+
+    await generate_briefing_for_user(user_id)
 
 
 # ---------------------------------------------------------------------------
