@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import db
-from app.api import auth, briefing, calendar, contacts, email, follow_ups, settings, voice
+from app.api import auth, briefing, calendar, contacts, email, follow_ups, polish, settings, voice
 from app.config import settings as app_settings
 from app.jobs.scheduler import scheduler
 
@@ -70,6 +70,7 @@ app.include_router(voice.router,       prefix="/voice",       tags=["voice"])
 app.include_router(contacts.router,    prefix="/contacts",    tags=["contacts"])
 app.include_router(follow_ups.router,  prefix="/follow-ups",  tags=["follow-ups"])
 app.include_router(briefing.router,    prefix="/briefing",    tags=["briefing"])
+app.include_router(polish.router,      prefix="/polish",      tags=["polish"])
 app.include_router(settings.router,    prefix="/settings",    tags=["settings"])
 
 
