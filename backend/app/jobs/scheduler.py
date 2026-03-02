@@ -30,7 +30,7 @@ async def get_active_users() -> list[dict]:
     settings fields needed for job scheduling.
     """
     return await db.query(
-        "SELECT s.user_id, s.timezone, s.briefing_time "
+        "SELECT s.user_id, s.timezone, s.briefing_time, s.digest_mode, s.digest_times "
         "FROM settings s "
         "JOIN google_connections g USING (user_id)"
     )
@@ -186,3 +186,73 @@ async def refresh_all_style_profiles() -> None:
 async def _refresh_user_style(user_id: str) -> None:
     from app.jobs.inbox_sync import refresh_user_style_profile
     await refresh_user_style_profile(user_id)
+
+
+# ---------------------------------------------------------------------------
+# Digest mode sender — every 15 minutes (per-user configured digest times)
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("interval", minutes=15, id="send_scheduled_digests")
+async def send_scheduled_digests() -> None:
+    try:
+        users = await get_active_users()
+        if not users:
+            return
+        results = await asyncio.gather(
+            *[_maybe_send_digest_for_user(u) for u in users],
+            return_exceptions=True,
+        )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Digest send failed for user %s: %s", user["user_id"], result)
+    except Exception:
+        logger.exception("send_scheduled_digests outer error")
+
+
+async def _maybe_send_digest_for_user(user: dict) -> None:
+    if not user.get("digest_mode"):
+        return
+
+    times = user.get("digest_times") or []
+    if not times:
+        return
+
+    tz_name: str = user.get("timezone") or "Europe/London"
+    try:
+        tz = pytz.timezone(tz_name)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+
+    now = datetime.now(tz).strftime("%H:%M")
+    targets = [str(t)[:5] for t in times]
+    if now in targets:
+        from app.jobs.digest_sender import send_digest_for_user
+
+        await send_digest_for_user(user["user_id"])
+
+
+# ---------------------------------------------------------------------------
+# Weekly review sender — Sunday evening
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("cron", day_of_week="sun", hour=18, minute=0, id="send_weekly_reviews")
+async def send_weekly_reviews() -> None:
+    try:
+        users = await get_active_users()
+        if not users:
+            return
+        results = await asyncio.gather(
+            *[_send_weekly_review_for_user(u["user_id"]) for u in users],
+            return_exceptions=True,
+        )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Weekly review failed for user %s: %s", user["user_id"], result)
+    except Exception:
+        logger.exception("send_weekly_reviews outer error")
+
+
+async def _send_weekly_review_for_user(user_id: str) -> None:
+    from app.jobs.digest_sender import send_weekly_review_for_user
+
+    await send_weekly_review_for_user(user_id)
