@@ -20,6 +20,32 @@ from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Retry helper for rate-limited calls
+# ---------------------------------------------------------------------------
+
+async def _execute_with_backoff(request, context: str = "", max_retries: int = 3):
+    """
+    Execute a Google API request with exponential back-off on HTTP 429.
+
+    Waits 2^attempt seconds before each retry (2s, 4s, 8s).
+    Raises the HttpError after max_retries exhausted.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return await asyncio.to_thread(request.execute)
+        except HttpError as e:
+            code = e.resp.status if hasattr(e, "resp") else None
+            if code == 429 and attempt < max_retries:
+                wait_seconds = 2 ** (attempt + 1)
+                logger.warning(
+                    "Gmail API 429 rate limit [%s] — retrying in %ds (attempt %d/%d)",
+                    context, wait_seconds, attempt + 1, max_retries,
+                )
+                await asyncio.sleep(wait_seconds)
+                continue
+            raise
+
 
 class GmailService:
     def __init__(self, credentials):
@@ -41,7 +67,11 @@ class GmailService:
         request = self.service.users().messages().list(
             userId="me", maxResults=max_results, q=q
         )
-        results = await asyncio.to_thread(request.execute)
+        try:
+            results = await _execute_with_backoff(request, context="list inbox messages")
+        except HttpError as e:
+            _handle_http_error(e, context="list inbox messages")
+            return []
 
         messages = []
         for msg in results.get("messages", []):
@@ -58,7 +88,11 @@ class GmailService:
         request = self.service.users().messages().list(
             userId="me", maxResults=max_results, q="in:sent"
         )
-        results = await asyncio.to_thread(request.execute)
+        try:
+            results = await _execute_with_backoff(request, context="list sent messages")
+        except HttpError as e:
+            _handle_http_error(e, context="list sent messages")
+            return []
 
         messages = []
         for msg in results.get("messages", []):
@@ -72,7 +106,11 @@ class GmailService:
 
     async def get_message(self, message_id: str) -> dict:
         """Fetch a single message by its Gmail message ID."""
-        full = await self._fetch_full_message(message_id)
+        try:
+            full = await self._fetch_full_message(message_id)
+        except HttpError as e:
+            _handle_http_error(e, context=f"get message {message_id}")
+            raise
         return self._parse_message(full)
 
     async def get_thread(self, thread_id: str) -> list[dict]:
@@ -83,7 +121,11 @@ class GmailService:
         request = self.service.users().threads().get(
             userId="me", id=thread_id, format="full"
         )
-        thread = await asyncio.to_thread(request.execute)
+        try:
+            thread = await _execute_with_backoff(request, context=f"get thread {thread_id}")
+        except HttpError as e:
+            _handle_http_error(e, context=f"get thread {thread_id}")
+            raise
         return [self._parse_message(m) for m in thread.get("messages", [])]
 
     # ------------------------------------------------------------------
@@ -133,7 +175,11 @@ class GmailService:
         Uses a nested path for readability: e.g. "Felix/Action Required".
         """
         request = self.service.users().labels().list(userId="me")
-        result = await asyncio.to_thread(request.execute)
+        try:
+            result = await asyncio.to_thread(request.execute)
+        except HttpError as e:
+            _handle_http_error(e, context=f"list labels (looking for '{name}')")
+            raise
 
         for label in result.get("labels", []):
             if label["name"].lower() == name.lower():
@@ -147,7 +193,11 @@ class GmailService:
                 "messageListVisibility": "show",
             },
         )
-        created = await asyncio.to_thread(create_request.execute)
+        try:
+            created = await asyncio.to_thread(create_request.execute)
+        except HttpError as e:
+            _handle_http_error(e, context=f"create label '{name}'")
+            raise
         return created["id"]
 
     async def apply_labels(self, message_id: str, label_ids: list[str]) -> None:
@@ -157,7 +207,11 @@ class GmailService:
             id=message_id,
             body={"addLabelIds": label_ids},
         )
-        await asyncio.to_thread(request.execute)
+        try:
+            await asyncio.to_thread(request.execute)
+        except HttpError as e:
+            _handle_http_error(e, context=f"apply labels to message {message_id}")
+            raise
 
     async def remove_labels(self, message_id: str, label_ids: list[str]) -> None:
         """Remove one or more labels from a message."""
@@ -166,7 +220,11 @@ class GmailService:
             id=message_id,
             body={"removeLabelIds": label_ids},
         )
-        await asyncio.to_thread(request.execute)
+        try:
+            await asyncio.to_thread(request.execute)
+        except HttpError as e:
+            _handle_http_error(e, context=f"remove labels from message {message_id}")
+            raise
 
     async def mark_read(self, message_id: str) -> None:
         """Remove the UNREAD label from a message."""
@@ -180,7 +238,11 @@ class GmailService:
         request = self.service.users().messages().get(
             userId="me", id=message_id, format="full"
         )
-        return await asyncio.to_thread(request.execute)
+        try:
+            return await asyncio.to_thread(request.execute)
+        except HttpError as e:
+            _handle_http_error(e, context=f"fetch message {message_id}")
+            raise
 
     async def _send_raw(self, message: MIMEText | MIMEMultipart, thread_id: str | None = None) -> dict:
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
@@ -188,7 +250,11 @@ class GmailService:
         if thread_id:
             body["threadId"] = thread_id
         request = self.service.users().messages().send(userId="me", body=body)
-        return await asyncio.to_thread(request.execute)
+        try:
+            return await asyncio.to_thread(request.execute)
+        except HttpError as e:
+            _handle_http_error(e, context="send message")
+            raise
 
     # ------------------------------------------------------------------
     # Parsing
@@ -273,8 +339,31 @@ class GmailService:
 
 
 # ---------------------------------------------------------------------------
-# Utility
+# Utilities
 # ---------------------------------------------------------------------------
+
+def _handle_http_error(error: HttpError, context: str = "") -> None:
+    """
+    Log structured warnings for common Gmail API HttpError codes.
+
+    401 — access token expired / invalid (caller should re-auth).
+    403 — insufficient OAuth scope or quota exceeded.
+    429 — rate limit hit (back off).
+
+    We log and let the caller re-raise so the background job can skip
+    this user gracefully without crashing the whole sync run.
+    """
+    code = error.resp.status if hasattr(error, "resp") else None
+    prefix = f"Gmail API error [{context}]" if context else "Gmail API error"
+    if code == 401:
+        logger.warning("%s: 401 Unauthorized — token expired or revoked. User must re-connect.", prefix)
+    elif code == 403:
+        logger.warning("%s: 403 Forbidden — insufficient scope or quota. Check OAuth consent.", prefix)
+    elif code == 429:
+        logger.warning("%s: 429 Too Many Requests — rate limit hit. Backing off.", prefix)
+    else:
+        logger.warning("%s: HTTP %s — %s", prefix, code, error)
+
 
 def _strip_html(html: str) -> str:
     """Very lightweight HTML stripper — removes tags and collapses whitespace."""

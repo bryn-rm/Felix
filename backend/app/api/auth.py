@@ -13,8 +13,8 @@ Flow:
   5. Redirects to /dashboard
 """
 
-import json
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
@@ -53,10 +53,29 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
     """
     Return the Google OAuth consent URL for the signed-in Felix user.
     The frontend should redirect the user to this URL.
+
+    State parameter format: "<user_id>.<nonce>"
+    The nonce is stored in oauth_nonces table with a 10-minute TTL and
+    verified on callback to prevent CSRF attacks.
     """
-    # Embed the Felix user_id in state so we can look them up on callback.
-    # A real implementation should also include a CSRF nonce here.
-    state = current_user["id"]
+    user_id = current_user["id"]
+
+    # Generate a cryptographically random CSRF nonce
+    nonce = secrets.token_urlsafe(32)
+
+    # Store nonce with expiry (10 minutes) — scoped to this user
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    await db.execute(
+        """
+        INSERT INTO oauth_nonces (user_id, nonce, expires_at)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (user_id) DO UPDATE SET nonce = $2, expires_at = $3
+        """,
+        user_id, nonce, expires_at,
+    )
+
+    # Encode both user_id and nonce in state so callback can verify
+    state = f"{user_id}.{nonce}"
 
     params = {
         "client_id": settings.GOOGLE_CLIENT_ID,
@@ -86,13 +105,42 @@ async def google_callback(
     """
     Google redirects here after the user approves (or denies) access.
     Exchanges the code for tokens and stores them encrypted in google_connections.
+
+    State format: "<user_id>.<nonce>" — nonce is verified against oauth_nonces
+    to prevent CSRF attacks, then deleted (one-time use).
     """
     if error:
         return RedirectResponse(
             url=f"{settings.FRONTEND_URL}/settings?google_error={error}"
         )
 
-    user_id = state  # we stored just the user_id in state during connect
+    # Parse state: "<user_id>.<nonce>"
+    try:
+        user_id, nonce = state.split(".", 1)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state parameter.")
+
+    # Verify nonce — must exist, belong to this user, and not be expired
+    nonce_row = await db.query_one(
+        "SELECT nonce, expires_at FROM oauth_nonces WHERE user_id = $1",
+        user_id,
+    )
+    if not nonce_row:
+        raise HTTPException(status_code=400, detail="OAuth state not found. Please try connecting again.")
+
+    if nonce_row["nonce"] != nonce:
+        raise HTTPException(status_code=400, detail="OAuth state mismatch. Possible CSRF attack.")
+
+    expires_at = nonce_row["expires_at"]
+    # asyncpg returns timezone-aware datetimes; ensure comparison is tz-aware
+    if expires_at.tzinfo is None:
+        from datetime import timezone as _tz
+        expires_at = expires_at.replace(tzinfo=_tz.utc)
+    if datetime.now(timezone.utc) > expires_at:
+        raise HTTPException(status_code=400, detail="OAuth state expired. Please try connecting again.")
+
+    # Consume the nonce — one-time use
+    await db.execute("DELETE FROM oauth_nonces WHERE user_id = $1", user_id)
 
     # Exchange code → tokens
     async with httpx.AsyncClient() as client:
@@ -134,7 +182,6 @@ async def google_callback(
     google_email = userinfo_resp.json().get("email", "") if userinfo_resp.status_code == 200 else ""
 
     # Compute expiry timestamp
-    from datetime import timedelta
     token_expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
 
     # Encrypt + persist — upsert so reconnecting overwrites existing row

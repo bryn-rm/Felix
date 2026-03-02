@@ -1,130 +1,201 @@
 """
 Calendar routes — Phase 4.
 
-Read events, scheduling suggestions, focus block management.
+All endpoints load Google credentials per-request and construct
+CalendarService(creds) — never a singleton.
+
+Endpoints:
+  GET  /calendar/events          — upcoming events (configurable window)
+  GET  /calendar/today           — today's schedule + energy profile context
+  POST /calendar/events          — create a new calendar event
+  GET  /calendar/free-slots      — AI-suggested meeting times
+  POST /calendar/focus-block     — create a focus-block event
 """
 
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+import logging
+from datetime import date
 
-from fastapi import APIRouter, Depends
-
-from app import db
-from app.middleware.auth import get_google_credentials
-from app.middleware.auth import get_current_user
-from app.services.calendar_service import CalendarService
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from app import db
+from app.middleware.auth import get_current_user, get_google_credentials
+from app.services.calendar_service import CalendarService
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# ---------------------------------------------------------------------------
+# Request schemas
+# ---------------------------------------------------------------------------
+
 class CreateEventRequest(BaseModel):
-    summary: str
-    start: str  # ISO datetime, e.g. 2026-01-02T14:00:00+00:00
-    end: str    # ISO datetime
-    description: str | None = None
-    location: str | None = None
-    attendees: list[str] | None = None
+    title: str
+    start: str              # RFC3339 datetime string, e.g. "2026-03-03T10:00:00+00:00"
+    end: str                # RFC3339 datetime string
+    attendees: list[str] = []
+    location: str = ""
+    description: str = ""
+    timezone: str = "UTC"
 
 
-async def _get_user_tz(user_id: str) -> ZoneInfo:
-    settings = await db.query_one("SELECT timezone FROM settings WHERE user_id = $1", user_id)
-    tz_name = (settings or {}).get("timezone")
-    try:
-        return ZoneInfo(tz_name) if tz_name else ZoneInfo("Europe/London")
-    except Exception:
-        return ZoneInfo("Europe/London")
+class FocusBlockRequest(BaseModel):
+    date: str = ""          # "YYYY-MM-DD"; defaults to today if omitted
 
+
+# ---------------------------------------------------------------------------
+# GET /calendar/events
+# ---------------------------------------------------------------------------
 
 @router.get("/events")
 async def list_events(
-    days_ahead: int = 7,
+    days_ahead: int = Query(7, ge=1, le=30),
     current_user: dict = Depends(get_current_user),
 ):
+    """
+    Return upcoming calendar events for the next days_ahead days.
+    Makes a live call to Google Calendar — not cached.
+    """
     creds = await get_google_credentials(current_user["id"])
-    calendar = CalendarService(creds)
+    cal = CalendarService(creds)
 
-    days = max(1, min(days_ahead, 30))
-    now = datetime.now(timezone.utc)
-    time_min = now.isoformat()
-    time_max = (now + timedelta(days=days)).isoformat()
+    try:
+        events = await cal.get_upcoming_events(days_ahead=days_ahead)
+    except Exception as exc:
+        logger.exception("Calendar fetch failed for user %s", current_user["id"])
+        raise HTTPException(status_code=502, detail=f"Calendar API error: {exc}")
 
-    events = await calendar.get_events(time_min=time_min, time_max=time_max)
-    return {
-        "events": events,
-        "time_min": time_min,
-        "time_max": time_max,
-        "days_ahead": days,
-    }
+    return {"events": events, "count": len(events)}
 
+
+# ---------------------------------------------------------------------------
+# GET /calendar/today
+# ---------------------------------------------------------------------------
 
 @router.get("/today")
 async def today_summary(current_user: dict = Depends(get_current_user)):
-    creds = await get_google_credentials(current_user["id"])
-    calendar = CalendarService(creds)
+    """
+    Return today's meetings, any scheduling conflicts, and the user's
+    energy profile (focus windows) so the frontend can annotate the timeline.
+    """
+    user_id = current_user["id"]
 
-    user_tz = await _get_user_tz(current_user["id"])
-    local_now = datetime.now(user_tz)
-    start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_local = start_local + timedelta(days=1)
-
-    events = await calendar.get_events(
-        time_min=start_local.astimezone(timezone.utc).isoformat(),
-        time_max=end_local.astimezone(timezone.utc).isoformat(),
+    # Load timezone + energy_profile from settings
+    settings = await db.query_one(
+        "SELECT timezone, energy_profile FROM settings WHERE user_id = $1",
+        user_id,
     )
+    user_tz: str = (settings or {}).get("timezone") or "UTC"
+    energy_profile: dict = (settings or {}).get("energy_profile") or {}
 
-    # Approximate focus blocks: free gaps of at least 60 min in working day.
-    busy_windows: list[tuple[datetime, datetime]] = []
-    for ev in events:
-        if ev.get("is_all_day"):
-            continue
-        try:
-            s = datetime.fromisoformat(ev["start"])
-            e = datetime.fromisoformat(ev["end"])
-            busy_windows.append((s, e))
-        except Exception:
-            continue
+    creds = await get_google_credentials(user_id)
+    cal = CalendarService(creds)
 
-    busy_windows.sort(key=lambda x: x[0])
-    focus_blocks: list[dict] = []
-    work_start = start_local.replace(hour=9)
-    work_end = start_local.replace(hour=17)
-    cursor = work_start.astimezone(timezone.utc)
-
-    for s, e in busy_windows:
-        if s > cursor and (s - cursor).total_seconds() >= 3600:
-            focus_blocks.append({"start": cursor.isoformat(), "end": s.isoformat()})
-        if e > cursor:
-            cursor = e
-
-    work_end_utc = work_end.astimezone(timezone.utc)
-    if work_end_utc > cursor and (work_end_utc - cursor).total_seconds() >= 3600:
-        focus_blocks.append({"start": cursor.isoformat(), "end": work_end_utc.isoformat()})
+    try:
+        events = await cal.get_today_events(user_timezone=user_tz)
+        conflicts = await cal.detect_conflicts(user_timezone=user_tz)
+    except Exception as exc:
+        logger.exception("Today summary failed for user %s", user_id)
+        raise HTTPException(status_code=502, detail=f"Calendar API error: {exc}")
 
     return {
-        "date": local_now.date().isoformat(),
-        "timezone": str(user_tz),
-        "meeting_count": len(events),
+        "date": date.today().isoformat(),
+        "timezone": user_tz,
         "events": events,
-        "focus_blocks": focus_blocks,
+        "event_count": len(events),
+        "conflicts": conflicts,
+        "energy_profile": energy_profile,
     }
 
 
-@router.post("/events")
+# ---------------------------------------------------------------------------
+# POST /calendar/events
+# ---------------------------------------------------------------------------
+
+@router.post("/events", status_code=201)
 async def create_event(
     body: CreateEventRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    """Create a new event in the user's primary Google Calendar."""
     creds = await get_google_credentials(current_user["id"])
-    calendar = CalendarService(creds)
+    cal = CalendarService(creds)
 
     event_body = {
-        "summary": body.summary,
-        "description": body.description or "",
+        "summary": body.title,
+        "start": {"dateTime": body.start, "timeZone": body.timezone},
+        "end":   {"dateTime": body.end,   "timeZone": body.timezone},
+        "attendees": [{"email": e} for e in body.attendees],
         "location": body.location or "",
-        "start": {"dateTime": body.start},
-        "end": {"dateTime": body.end},
-        "attendees": [{"email": email} for email in (body.attendees or [])],
+        "description": body.description or "",
     }
-    created = await calendar.create_event(event_body)
-    return {"created": True, "event": created}
+
+    try:
+        created = await cal.create_event(event_body)
+    except Exception as exc:
+        logger.exception("Create event failed for user %s", current_user["id"])
+        raise HTTPException(status_code=502, detail=f"Calendar API error: {exc}")
+
+    return {"event": created}
+
+
+# ---------------------------------------------------------------------------
+# GET /calendar/free-slots
+# ---------------------------------------------------------------------------
+
+@router.get("/free-slots")
+async def get_free_slots(
+    duration_minutes: int = Query(30, ge=15, le=480),
+    days_ahead: int = Query(5, ge=1, le=14),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Suggest available meeting slots, respecting the user's focus blocks.
+
+    Reads energy_profile.deep_work windows from settings and excludes them.
+    Only proposes slots inside energy_profile.meetings windows (or 9am–6pm default).
+    """
+    creds = await get_google_credentials(current_user["id"])
+    cal = CalendarService(creds)
+
+    try:
+        slots = await cal.find_free_slots(
+            user_id=current_user["id"],
+            duration_minutes=duration_minutes,
+            days_ahead=days_ahead,
+        )
+    except Exception as exc:
+        logger.exception("Free slots failed for user %s", current_user["id"])
+        raise HTTPException(status_code=502, detail=f"Calendar API error: {exc}")
+
+    return {"slots": slots, "duration_minutes": duration_minutes}
+
+
+# ---------------------------------------------------------------------------
+# POST /calendar/focus-block
+# ---------------------------------------------------------------------------
+
+@router.post("/focus-block", status_code=201)
+async def create_focus_block(
+    body: FocusBlockRequest = FocusBlockRequest(),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Create focus-block events for the user's configured deep_work windows on a given date.
+    Defaults to today if no date is provided.
+    """
+    date_str = body.date or date.today().isoformat()
+    creds = await get_google_credentials(current_user["id"])
+    cal = CalendarService(creds)
+
+    try:
+        result = await cal.protect_focus_block(
+            user_id=current_user["id"],
+            date_str=date_str,
+        )
+    except Exception as exc:
+        logger.exception("Focus block creation failed for user %s", current_user["id"])
+        raise HTTPException(status_code=502, detail=f"Calendar API error: {exc}")
+
+    return {"date": date_str, "blocks_created": result.get("created", 0)}

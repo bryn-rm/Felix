@@ -11,8 +11,8 @@ Two concerns live here:
    google.oauth2.credentials.Credentials object ready to use.
 """
 
+import asyncio
 import base64
-import os
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
@@ -113,16 +113,28 @@ async def get_google_credentials(user_id: str) -> Credentials:
             detail="Google account not connected. Visit /auth/google/connect to link it.",
         )
 
+    # Parse stored expiry (TIMESTAMPTZ comes back as datetime from asyncpg, or as an
+    # ISO string from older inserts). Pass it to Credentials so .expired works correctly.
+    raw_expiry = row.get("token_expiry")
+    if isinstance(raw_expiry, datetime):
+        expiry = raw_expiry
+    elif raw_expiry:
+        expiry = datetime.fromisoformat(str(raw_expiry))
+    else:
+        expiry = None
+
     creds = Credentials(
         token=decrypt_token(row["access_token"]),
         refresh_token=decrypt_token(row["refresh_token"]),
         token_uri="https://oauth2.googleapis.com/token",
         client_id=settings.GOOGLE_CLIENT_ID,
         client_secret=settings.GOOGLE_CLIENT_SECRET,
+        expiry=expiry,
     )
 
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        # creds.refresh() is a synchronous blocking HTTP call — run in a thread.
+        await asyncio.to_thread(creds.refresh, Request())
         await db.update(
             "google_connections",
             {

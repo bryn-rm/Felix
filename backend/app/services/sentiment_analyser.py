@@ -2,8 +2,20 @@
 Email sentiment analysis — Phase 2 (basic) / Phase 6 (trend tracking).
 """
 
+import logging
+
 from app import db
 from app.services.ai_service import ai_service
+
+logger = logging.getLogger(__name__)
+
+_SENTIMENT_SCORE = {
+    "positive":   1,
+    "neutral":    0,
+    "stressed":  -1,
+    "urgent":    -1,
+    "frustrated":-2,
+}
 
 
 class SentimentAnalyser:
@@ -13,7 +25,16 @@ class SentimentAnalyser:
         return await ai_service.analyse_sentiment(email)
 
     async def update_contact_trend(self, user_id: str, contact_email: str) -> None:
-        """Compute and persist sentiment trend from recent incoming emails."""
+        """
+        Compute a sentiment trend for a contact from their last 10 inbound emails
+        and update contacts.sentiment_trend.
+
+        Trend logic: compare the average sentiment of the most-recent half of
+        emails against the older half.
+          • recent avg > older avg by >0.4 → "improving"
+          • recent avg < older avg by >0.4 → "deteriorating"
+          • otherwise                       → "stable"
+        """
         rows = await db.query(
             """
             SELECT sentiment
@@ -22,46 +43,36 @@ class SentimentAnalyser:
               AND from_email = $2
               AND sentiment IS NOT NULL
             ORDER BY received_at DESC
-            LIMIT 20
+            LIMIT 10
             """,
-            user_id,
-            contact_email,
+            user_id, contact_email,
         )
-        if len(rows) < 4:
+
+        if not rows:
             return
 
-        scores = []
-        for row in rows:
-            sentiment = (row.get("sentiment") or "").lower()
-            if sentiment == "positive":
-                scores.append(1.0)
-            elif sentiment in ("neutral",):
-                scores.append(0.0)
-            elif sentiment in ("stressed", "urgent"):
-                scores.append(-0.5)
-            elif sentiment == "frustrated":
-                scores.append(-1.0)
+        scores = [_SENTIMENT_SCORE.get(r["sentiment"], 0) for r in rows]
 
-        if len(scores) < 4:
-            return
-
-        split = max(1, len(scores) // 2)
-        recent_avg = sum(scores[:split]) / split
-        prior_avg = sum(scores[split:]) / len(scores[split:])
-        delta = recent_avg - prior_avg
-
-        if delta >= 0.2:
-            trend = "improving"
-        elif delta <= -0.2:
-            trend = "deteriorating"
-        else:
+        if len(scores) < 2:
             trend = "stable"
+        else:
+            mid = len(scores) // 2
+            recent_avg = sum(scores[:mid]) / mid
+            older_avg = sum(scores[mid:]) / (len(scores) - mid)
+            diff = recent_avg - older_avg
+            if diff > 0.4:
+                trend = "improving"
+            elif diff < -0.4:
+                trend = "deteriorating"
+            else:
+                trend = "stable"
 
         await db.execute(
-            "UPDATE contacts SET sentiment_trend = $1, updated_at = NOW() WHERE user_id = $2 AND email = $3",
-            trend,
-            user_id,
-            contact_email,
+            "UPDATE contacts SET sentiment_trend = $1 WHERE email = $2 AND user_id = $3",
+            trend, contact_email, user_id,
+        )
+        logger.debug(
+            "Sentiment trend for %s / user %s → %s", contact_email, user_id, trend
         )
 
 

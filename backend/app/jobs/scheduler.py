@@ -27,7 +27,7 @@ scheduler = AsyncIOScheduler()
 async def get_active_users() -> list[dict]:
     """
     Return every user who has a connected Google account, along with the
-    settings fields needed for job scheduling.
+    settings fields needed for job scheduling (incl. digest_mode/digest_times).
     """
     return await db.query(
         "SELECT s.user_id, s.timezone, s.briefing_time, s.digest_mode, s.digest_times "
@@ -87,7 +87,6 @@ async def check_all_follow_ups() -> None:
 
 async def _check_user_follow_ups(user_id: str) -> None:
     from app.jobs.follow_up_checker import check_user_follow_ups
-
     await check_user_follow_ups(user_id)
 
 
@@ -100,8 +99,17 @@ async def check_morning_briefings() -> None:
     """Trigger morning briefing generation when a user's configured time arrives."""
     try:
         users = await get_active_users()
-        for user in users:
-            await _maybe_generate_briefing(user)
+        if not users:
+            return
+        results = await asyncio.gather(
+            *[_maybe_generate_briefing(u) for u in users],
+            return_exceptions=True,
+        )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error(
+                    "Briefing check failed for user %s: %s", user["user_id"], result
+                )
     except Exception:
         logger.exception("check_morning_briefings outer error")
 
@@ -135,7 +143,6 @@ async def _maybe_generate_briefing(user: dict) -> None:
 
 async def _generate_briefing_for_user(user_id: str) -> None:
     from app.jobs.briefing_generator import generate_briefing_for_user
-
     await generate_briefing_for_user(user_id)
 
 
@@ -160,7 +167,6 @@ async def refresh_all_relationships() -> None:
 
 async def _refresh_user_relationships(user_id: str) -> None:
     from app.jobs.relationship_updater import refresh_user_relationships
-
     await refresh_user_relationships(user_id)
 
 
@@ -189,70 +195,81 @@ async def _refresh_user_style(user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Digest mode sender — every 15 minutes (per-user configured digest times)
+# Digest mode — every 30 minutes
+# Fire for users where digest_mode=True and their local time matches one of
+# their configured digest_times (e.g. ["08:00", "12:00", "18:00"]).
 # ---------------------------------------------------------------------------
 
-@scheduler.scheduled_job("interval", minutes=15, id="send_scheduled_digests")
-async def send_scheduled_digests() -> None:
+@scheduler.scheduled_job("interval", minutes=30, id="check_digest_mode")
+async def check_digest_mode() -> None:
+    """
+    Send an email digest to users who have digest_mode enabled when their
+    configured digest time arrives (compared in their local timezone).
+    """
     try:
         users = await get_active_users()
-        if not users:
+        digest_users = [u for u in users if u.get("digest_mode")]
+        if not digest_users:
             return
         results = await asyncio.gather(
-            *[_maybe_send_digest_for_user(u) for u in users],
+            *[_maybe_send_digest(u) for u in digest_users],
             return_exceptions=True,
         )
-        for user, result in zip(users, results):
+        for user, result in zip(digest_users, results):
             if isinstance(result, Exception):
-                logger.error("Digest send failed for user %s: %s", user["user_id"], result)
+                logger.error("Digest check failed for user %s: %s", user["user_id"], result)
     except Exception:
-        logger.exception("send_scheduled_digests outer error")
+        logger.exception("check_digest_mode outer error")
 
 
-async def _maybe_send_digest_for_user(user: dict) -> None:
-    if not user.get("digest_mode"):
-        return
-
-    times = user.get("digest_times") or []
-    if not times:
-        return
-
+async def _maybe_send_digest(user: dict) -> None:
+    """
+    Check whether any of this user's digest_times matches their current local time
+    (within the 30-minute job window). If so, send a digest notification.
+    """
     tz_name: str = user.get("timezone") or "Europe/London"
     try:
         tz = pytz.timezone(tz_name)
     except pytz.UnknownTimeZoneError:
         tz = pytz.UTC
 
-    now = datetime.now(tz).strftime("%H:%M")
-    targets = [str(t)[:5] for t in times]
-    if now in targets:
-        from app.jobs.digest_sender import send_digest_for_user
+    user_now = datetime.now(tz)
+    current_hhmm = user_now.strftime("%H:%M")
 
-        await send_digest_for_user(user["user_id"])
+    digest_times: list[str] = user.get("digest_times") or []
+    if not digest_times:
+        return
+
+    # Round current time down to the nearest 30-minute mark for comparison
+    # e.g. 08:14 → "08:00", 12:31 → "12:30"
+    rounded_minute = (user_now.minute // 30) * 30
+    rounded_hhmm = f"{user_now.hour:02d}:{rounded_minute:02d}"
+
+    # Check if any configured digest time falls in this 30-minute slot
+    should_send = any(t.strip()[:5] == rounded_hhmm for t in digest_times)
+    if not should_send:
+        return
+
+    logger.info(
+        "Digest time reached for user %s at %s (local: %s)",
+        user["user_id"], rounded_hhmm, current_hhmm,
+    )
+    asyncio.create_task(_send_digest_for_user(user["user_id"]))
 
 
-# ---------------------------------------------------------------------------
-# Weekly review sender — Sunday evening
-# ---------------------------------------------------------------------------
-
-@scheduler.scheduled_job("cron", day_of_week="sun", hour=18, minute=0, id="send_weekly_reviews")
-async def send_weekly_reviews() -> None:
+async def _send_digest_for_user(user_id: str) -> None:
+    """Generate and log a digest for the user. Full notification delivery is Phase 7 polish."""
     try:
-        users = await get_active_users()
-        if not users:
-            return
-        results = await asyncio.gather(
-            *[_send_weekly_review_for_user(u["user_id"]) for u in users],
-            return_exceptions=True,
+        # Import briefing_service to reuse context gathering for the digest
+        from app.services.briefing_service import briefing_service
+        context = await briefing_service.gather_context(user_id)
+        priority_count = context.get("priority_email_count", 0)
+        follow_up_count = context.get("follow_up_count", 0)
+        logger.info(
+            "Digest for user %s: %d priority email(s), %d overdue follow-up(s)",
+            user_id, priority_count, follow_up_count,
         )
-        for user, result in zip(users, results):
-            if isinstance(result, Exception):
-                logger.error("Weekly review failed for user %s: %s", user["user_id"], result)
+        # TODO: deliver push notification or in-app digest once notification
+        # infrastructure is added in Phase 7 polish.
     except Exception:
-        logger.exception("send_weekly_reviews outer error")
-
-
-async def _send_weekly_review_for_user(user_id: str) -> None:
-    from app.jobs.digest_sender import send_weekly_review_for_user
-
-    await send_weekly_review_for_user(user_id)
+        logger.exception("Failed to generate digest for user %s", user_id)

@@ -172,7 +172,11 @@ class AIService:
                 ),
             }],
         )
-        return json.loads(response.content[0].text)
+        try:
+            return json.loads(response.content[0].text)
+        except json.JSONDecodeError:
+            logger.warning("Meeting notes response was not valid JSON")
+            return {"summary": response.content[0].text, "action_items": [], "decisions": [], "open_questions": []}
 
     # ------------------------------------------------------------------
     # Daily briefing — Sonnet
@@ -202,7 +206,11 @@ class AIService:
                 "content": VOICE_INTENT_PROMPT.format(transcript=transcript),
             }],
         )
-        return json.loads(response.content[0].text)
+        try:
+            return json.loads(response.content[0].text)
+        except json.JSONDecodeError:
+            logger.warning("Voice intent response was not valid JSON: %s", response.content[0].text)
+            return {"intent": "general_question", "raw_transcript": transcript}
 
     # ------------------------------------------------------------------
     # Follow-up detection — Haiku

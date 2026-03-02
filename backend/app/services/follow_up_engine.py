@@ -1,120 +1,105 @@
 """
 Follow-up detection + tracking engine — Phase 5.
+
+Two entry points:
+  process_sent_email(user_id, sent_email)
+      Called after a sent email is approved by the user (POST /emails/{id}/send).
+      Uses Claude Haiku to detect whether a follow-up is needed, then inserts a
+      follow_ups row with status='waiting'.
+
+  check_overdue(user_id)
+      Returns follow_ups rows past their follow_up_by deadline.
+      Called by the hourly follow_up_checker job.
+
+All DB writes include user_id — no multi-user assumptions.
 """
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from app import db
-
 from app.services.ai_service import ai_service
+
+logger = logging.getLogger(__name__)
 
 
 class FollowUpEngine:
 
-    async def process_sent_email(self, user_id: str, sent_email: dict) -> dict | None:
-        """Create a follow-up tracking row when a sent email needs monitoring."""
-        detection = await ai_service.detect_follow_ups(sent_email)
-        if not detection:
-            return None
+    async def process_sent_email(
+        self,
+        user_id: str,
+        sent_email: dict,
+    ) -> dict | None:
+        """
+        Analyse a sent email with Claude Haiku and, if a follow-up is warranted,
+        create a follow_ups row.
 
-        days = detection.get("suggested_follow_up_days")
-        try:
-            days_int = int(days)
-        except (TypeError, ValueError):
-            days_int = 3
-        days_int = max(1, min(days_int, 30))
+        sent_email should be the dict representation of the email as stored in
+        the emails table (with keys: id, subject, body, to_email / to, received_at).
 
-        sent_at = sent_email.get("sent_at")
-        if isinstance(sent_at, str):
-            try:
-                sent_dt = datetime.fromisoformat(sent_at)
-            except ValueError:
-                sent_dt = datetime.now(timezone.utc)
-        elif isinstance(sent_at, datetime):
-            sent_dt = sent_at
-        else:
-            sent_dt = datetime.now(timezone.utc)
+        Returns the created follow_ups row, or None if no follow-up is needed.
+        """
+        email_id = sent_email.get("id")
 
-        if sent_dt.tzinfo is None:
-            sent_dt = sent_dt.replace(tzinfo=timezone.utc)
-
-        follow_up_by = sent_dt + timedelta(days=days_int)
-
-        auto_draft = (
-            f"Hi — just following up on {detection.get('topic') or sent_email.get('subject') or 'my earlier email'}. "
-            "Would appreciate a quick update when you have a moment. Thanks!"
-        )
-
-        email_id = sent_email.get("email_id") or sent_email.get("id")
+        # Idempotency — only one follow-up per sent email
         if email_id:
             existing = await db.query_one(
-                "SELECT id FROM follow_ups WHERE user_id = $1 AND email_id = $2 LIMIT 1",
-                user_id,
-                email_id,
+                "SELECT id FROM follow_ups WHERE user_id = $1 AND email_id = $2",
+                user_id, email_id,
             )
             if existing:
                 return None
 
+        # AI detection
+        result = await ai_service.detect_follow_ups(sent_email)
+        if result is None or not result.get("needs_follow_up"):
+            return None
+
+        # Build follow-up deadline
+        days = result.get("suggested_follow_up_days")
+        try:
+            days = int(days) if days is not None else 3
+        except (TypeError, ValueError):
+            days = 3
+        days = max(1, min(days, 30))  # clamp to 1–30 days
+
+        follow_up_by = datetime.now(timezone.utc) + timedelta(days=days)
+
+        # Recipient: for a sent email the "to" is who we sent to; the dict
+        # may carry it as "to_email" or "to" depending on origin.
+        to_email: str = (
+            sent_email.get("to_email")
+            or sent_email.get("to")
+            or ""
+        )
+
         row = await db.insert(
             "follow_ups",
             {
-                "user_id": user_id,
-                "email_id": email_id,
-                "to_email": sent_email.get("to") or sent_email.get("to_email"),
-                "subject": sent_email.get("subject") or "",
-                "topic": detection.get("topic"),
-                "sent_at": sent_dt,
+                "user_id":      user_id,
+                "email_id":     email_id,
+                "to_email":     to_email,
+                "subject":      sent_email.get("subject") or "",
+                "topic":        result.get("topic") or sent_email.get("subject") or "",
+                "sent_at":      sent_email.get("received_at") or datetime.now(timezone.utc),
                 "follow_up_by": follow_up_by,
-                "status": "waiting",
-                "urgency": detection.get("urgency") or "medium",
-                "auto_draft": auto_draft,
+                "urgency":      result.get("urgency") or "medium",
+                "status":       "waiting",
             },
+        )
+
+        logger.info(
+            "Follow-up created for user %s — topic: %s, due: %s",
+            user_id, result.get("topic"), follow_up_by.date()
         )
         return row
 
     async def check_overdue(self, user_id: str) -> list[dict]:
-        """Return overdue follow-ups for a user and mark replied ones as closed."""
-        # If inbound email has arrived from recipient since the original sent_at,
-        # mark as replied so it no longer appears as overdue.
-        waiting = await db.query(
-            """
-            SELECT id, to_email, subject, sent_at
-            FROM follow_ups
-            WHERE user_id = $1 AND status = 'waiting'
-            """,
-            user_id,
-        )
-
-        for item in waiting:
-            if not item.get("to_email") or not item.get("sent_at"):
-                continue
-            replied = await db.query_one(
-                """
-                SELECT id
-                FROM emails
-                WHERE user_id = $1
-                  AND from_email = $2
-                  AND received_at > $3
-                  AND (
-                    subject = $4
-                    OR subject = CONCAT('Re: ', $4)
-                    OR subject = CONCAT('RE: ', $4)
-                  )
-                LIMIT 1
-                """,
-                user_id,
-                item["to_email"],
-                item["sent_at"],
-                item.get("subject") or "",
-            )
-            if replied:
-                await db.execute(
-                    "UPDATE follow_ups SET status = 'replied' WHERE id = $1 AND user_id = $2",
-                    item["id"],
-                    user_id,
-                )
-
-        overdue = await db.query(
+        """
+        Return all follow_ups for this user that are past their deadline
+        and still in 'waiting' status, ordered by most overdue first.
+        """
+        return await db.query(
             """
             SELECT *
             FROM follow_ups
@@ -125,7 +110,89 @@ class FollowUpEngine:
             """,
             user_id,
         )
-        return overdue
+
+    async def mark_replied(self, user_id: str, thread_id: str) -> None:
+        """
+        Called when a new inbound email is processed and it belongs to a thread
+        that has a tracked follow-up. Marks the follow-up as 'replied'.
+
+        thread_id is matched against email_id stored on the follow-up (Gmail
+        thread IDs are stable for the lifetime of a conversation).
+        """
+        if not thread_id:
+            return
+        # Look for follow_ups whose email_id appears in the thread
+        await db.execute(
+            """
+            UPDATE follow_ups
+            SET status = 'replied'
+            WHERE user_id = $1
+              AND status = 'waiting'
+              AND email_id IN (
+                SELECT id FROM emails WHERE user_id = $1 AND thread_id = $2
+              )
+            """,
+            user_id, thread_id,
+        )
+
+    async def draft_follow_up_text(
+        self,
+        user_id: str,
+        follow_up_id: str,
+    ) -> str | None:
+        """
+        Generate a draft follow-up message for an existing follow_ups row.
+        Stores the result in follow_ups.auto_draft.
+
+        Returns the draft text or None on failure.
+        """
+        fu = await db.query_one(
+            "SELECT * FROM follow_ups WHERE id = $1 AND user_id = $2",
+            follow_up_id, user_id,
+        )
+        if not fu:
+            return None
+
+        # Reconstruct a minimal email dict for the AI detection prompt
+        mock_email = {
+            "to":      fu.get("to_email") or "",
+            "subject": fu.get("subject") or "",
+            "body":    f"Following up on: {fu.get('topic') or fu.get('subject') or 'our previous conversation'}",
+        }
+
+        # Use detect_follow_ups as a simple check — but we really just want
+        # a short polite follow-up text. Ask the draft model directly.
+        from app.services.ai_service import ai_service as _ai
+
+        # We reuse the draft_reply stream but feed it a synthesized email
+        full_text = ""
+        try:
+            async for chunk in _ai.draft_reply(
+                email=mock_email,
+                thread_history=[],
+                contact={},
+                style_profile={},
+                user_name="",
+                user_intent=(
+                    f"Write a short, polite follow-up email. "
+                    f"I sent an email to {fu.get('to_email')} about "
+                    f"{fu.get('topic') or fu.get('subject') or 'a previous matter'} "
+                    f"and haven't heard back. Keep it to 2-3 sentences."
+                ),
+            ):
+                full_text += chunk
+        except Exception:
+            logger.exception("Draft follow-up generation failed for follow_up %s", follow_up_id)
+            return None
+
+        if full_text.strip():
+            await db.execute(
+                "UPDATE follow_ups SET auto_draft = $1 WHERE id = $2 AND user_id = $3",
+                full_text.strip(), follow_up_id, user_id,
+            )
+            return full_text.strip()
+
+        return None
 
 
 follow_up_engine = FollowUpEngine()

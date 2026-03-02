@@ -1,0 +1,37 @@
+{
+  "name": "Felix — AI Chief of Staff",
+  "short_name": "Felix",
+  "description": "Your AI email and calendar chief of staff",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0f0f",
+  "theme_color": "#0f0f0f",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "business"],
+  "shortcuts": [
+    {
+      "name": "Inbox",
+      "url": "/inbox",
+      "description": "Open your priority inbox"
+    },
+    {
+      "name": "Morning Briefing",
+      "url": "/briefing",
+      "description": "Listen to today's briefing"
+    }
+  ]
+}

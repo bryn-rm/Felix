@@ -27,7 +27,6 @@ from pydantic import BaseModel
 from app import db
 from app.middleware.auth import get_current_user, get_google_credentials
 from app.services.ai_service import ai_service
-from app.services.follow_up_engine import follow_up_engine
 from app.services.gmail_service import GmailService
 
 logger = logging.getLogger(__name__)
@@ -394,21 +393,22 @@ async def send_email(
         current_user["id"],
     )
 
-    # Phase 5: detect whether this outbound message should be tracked for follow-up.
-    try:
-        await follow_up_engine.process_sent_email(
-            current_user["id"],
-            {
-                "email_id": email_id,
-                "id": result.get("id"),
-                "to": email["from_email"],
-                "subject": email["subject"] or "",
-                "body": send_text,
-                "sent_at": sent_at,
-            },
-        )
-    except Exception:
-        logger.exception("Follow-up detection failed for sent email %s", email_id)
+    # Phase 5 — fire-and-forget follow-up detection on the sent email.
+    # Build a minimal sent-email dict the engine can analyse.
+    import asyncio as _asyncio
+    from app.services.follow_up_engine import follow_up_engine as _fu_engine
+
+    _sent_email_dict = {
+        "id":        email_id,
+        "subject":   email.get("subject") or "",
+        "body":      send_text,
+        "to":        email.get("from_email") or "",  # we're replying to the original sender
+        "to_email":  email.get("from_email") or "",
+        "received_at": datetime.now(timezone.utc),
+    }
+    _asyncio.create_task(
+        _fu_engine.process_sent_email(current_user["id"], _sent_email_dict)
+    )
 
     return {"sent": True, "gmail_message_id": result.get("id")}
 

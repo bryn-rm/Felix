@@ -80,6 +80,11 @@ async def sync_user_inbox(user_id: str) -> None:
 
     logger.info("User %s: processing %d new email(s)", user_id, len(new_emails))
 
+    # Initialise a fresh label-ID cache per sync run, per user.  A module-level
+    # cache would leak label IDs across users (each user's Gmail account uses
+    # different label IDs for the same label name).
+    label_cache: dict[str, str] = {}
+
     for email in new_emails:
         await _process_email(
             email=email,
@@ -88,6 +93,7 @@ async def sync_user_inbox(user_id: str) -> None:
             vip_list=vip_list,
             user_name=user_name,
             style_profile=style_profile,
+            label_cache=label_cache,
         )
 
     await _touch_last_sync(user_id)
@@ -105,6 +111,7 @@ async def _process_email(
     vip_list: list[str],
     user_name: str,
     style_profile: dict,
+    label_cache: dict[str, str],
 ) -> None:
     """Triage, persist, label, and optionally draft a single email."""
     email_id: str = email["id"]
@@ -142,8 +149,8 @@ async def _process_email(
             conflict_columns=["id", "user_id"],
         )
 
-        # 3. Apply Gmail labels
-        await _apply_gmail_labels(gmail, email_id, category)
+        # 3. Apply Gmail labels (pass the per-run, per-user cache)
+        await _apply_gmail_labels(gmail, email_id, category, label_cache)
 
         # 3.5 Incrementally refresh relationship profile for this sender.
         try:
@@ -166,33 +173,52 @@ async def _process_email(
                 user_name=user_name,
             )
 
+        # 5. Phase 6 — update relationship profile for the sender (fire-and-forget)
+        import asyncio as _asyncio
+        from app.services.relationship_engine import relationship_engine as _rel_engine
+        _asyncio.create_task(_rel_engine.update_contact(user_id, email))
+
+        # 6. Phase 5 — auto-close any follow-ups that just got a reply
+        #    If this inbound email is part of a thread we were tracking, mark replied.
+        if email.get("thread_id"):
+            from app.services.follow_up_engine import follow_up_engine as _fu_engine
+            _asyncio.create_task(_fu_engine.mark_replied(user_id, email["thread_id"]))
+
     except Exception:
         logger.exception("Failed to process email %s for user %s", email_id, user_id)
         # Don't re-raise — we still want to continue with other emails
 
 
-async def _apply_gmail_labels(gmail: GmailService, email_id: str, category: str) -> None:
+async def _apply_gmail_labels(
+    gmail: GmailService,
+    email_id: str,
+    category: str,
+    label_cache: dict[str, str],
+) -> None:
     """
     Applies the category label (e.g. "Felix/Action Required") and
     the processing sentinel ("felix-processed") in one API call.
+
+    label_cache is a per-run, per-user dict passed in by the caller so label IDs
+    are never shared across different users' Gmail accounts.
     """
     label_name = CATEGORY_LABEL.get(category, "Felix/FYI")
 
-    label_id, processed_id = await _get_or_create_labels(gmail, label_name)
+    label_id, processed_id = await _get_or_create_labels(gmail, label_name, label_cache)
     await gmail.apply_labels(email_id, [label_id, processed_id])
 
 
-# Cache label IDs within a sync run to avoid redundant API calls
-_label_cache: dict[str, str] = {}
-
-
-async def _get_or_create_labels(gmail: GmailService, category_label_name: str) -> tuple[str, str]:
+async def _get_or_create_labels(
+    gmail: GmailService,
+    category_label_name: str,
+    label_cache: dict[str, str],
+) -> tuple[str, str]:
     """Return (category_label_id, processed_label_id), creating them if needed."""
-    if category_label_name not in _label_cache:
-        _label_cache[category_label_name] = await gmail.get_or_create_label(category_label_name)
-    if PROCESSED_LABEL not in _label_cache:
-        _label_cache[PROCESSED_LABEL] = await gmail.get_or_create_label(PROCESSED_LABEL)
-    return _label_cache[category_label_name], _label_cache[PROCESSED_LABEL]
+    if category_label_name not in label_cache:
+        label_cache[category_label_name] = await gmail.get_or_create_label(category_label_name)
+    if PROCESSED_LABEL not in label_cache:
+        label_cache[PROCESSED_LABEL] = await gmail.get_or_create_label(PROCESSED_LABEL)
+    return label_cache[category_label_name], label_cache[PROCESSED_LABEL]
 
 
 # ---------------------------------------------------------------------------

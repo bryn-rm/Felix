@@ -16,10 +16,14 @@ from elevenlabs.client import ElevenLabs
 from app import db
 from app.config import settings
 
+from supabase import create_client
+
 logger = logging.getLogger(__name__)
 
-# Module-level ElevenLabs client (HTTP, thread-safe)
+# Module-level clients — created once, reused for every request.
+# Both ElevenLabs and Supabase clients are thread-safe for concurrent reads.
 _el_client = ElevenLabs(api_key=settings.ELEVENLABS_API_KEY)
+_supabase_storage = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
@@ -119,16 +123,16 @@ class VoiceService:
 
     @staticmethod
     def _upload_to_storage(file_path: str, audio_bytes: bytes) -> str:
-        """Synchronous Supabase Storage upload. Run via asyncio.to_thread."""
-        from supabase import create_client
+        """Synchronous Supabase Storage upload. Run via asyncio.to_thread.
 
-        supabase = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
-        supabase.storage.from_("felix-audio").upload(
+        Uses the module-level _supabase_storage singleton — no new client per call.
+        """
+        _supabase_storage.storage.from_("felix-audio").upload(
             path=file_path,
             file=audio_bytes,
             file_options={"content-type": "audio/mpeg"},
         )
-        return supabase.storage.from_("felix-audio").get_public_url(file_path)
+        return _supabase_storage.storage.from_("felix-audio").get_public_url(file_path)
 
 
 voice_service = VoiceService()

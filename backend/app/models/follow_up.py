@@ -12,6 +12,8 @@ class FollowUp(BaseModel):
     sent_at: datetime | None = None
     follow_up_by: datetime | None = None
     status: str = "waiting"             # waiting | replied | followed_up | closed
+    # Note: rows inserted by follow_up_engine always use status='waiting'.
+    # The schema default is also 'waiting'. 'pending' is not used in this table.
     urgency: str | None = None
     auto_draft: str | None = None
     reminder_count: int = 0
