@@ -1,3 +1,8 @@
+
+<img width="720" height="720" alt="ChatGPT Image Mar 3, 2026, 09_36_51 PM" src="https://github.com/user-attachments/assets/e75c1791-b55a-463a-8d55-88fae4c42e18" />
+
+
+
 # Felix
 
 An AI email and calendar chief of staff. Felix connects to your Gmail and Google Calendar, triages your inbox, drafts replies in your voice, tracks follow-ups, and gives you a spoken morning briefing. Invite-only, fully self-hosted, every user's data is completely siloed.
