@@ -19,10 +19,26 @@ class StyleProfiler:
 
     async def update_profile(self, user_id: str, new_emails: list[dict]) -> dict:
         """
-        TODO Phase 2: fetch existing profile, merge with new email analysis,
-        store updated profile.
+        Fetch the user's existing style profile, generate an updated profile
+        from new_emails, merge (new wins on conflict), and persist to settings.
         """
-        raise NotImplementedError
+        from app import db as _db
+
+        row = await _db.query_one(
+            "SELECT style_profile FROM settings WHERE user_id = $1", user_id
+        )
+        existing: dict = (row or {}).get("style_profile") or {}
+
+        new_profile = await ai_service.analyse_writing_style(new_emails)
+
+        merged = {**existing, **new_profile}
+
+        await _db.upsert(
+            "settings",
+            {"user_id": user_id, "style_profile": merged},
+            conflict_columns=["user_id"],
+        )
+        return merged
 
 
 style_profiler = StyleProfiler()

@@ -13,6 +13,7 @@ Pipeline for each new email:
   5. Update google_connections.last_sync
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -152,17 +153,6 @@ async def _process_email(
         # 3. Apply Gmail labels (pass the per-run, per-user cache)
         await _apply_gmail_labels(gmail, email_id, category, label_cache)
 
-        # 3.5 Incrementally refresh relationship profile for this sender.
-        try:
-            await relationship_engine.update_contact(user_id, {
-                "from_email": email.get("from_email", ""),
-                "from_name": email.get("from_name", ""),
-                "topic": triage.get("topic"),
-                "received_at": email.get("received_at"),
-            })
-        except Exception:
-            logger.exception("Relationship update failed for sender %s user %s", email.get("from_email"), user_id)
-
         # 4. Auto-draft for emails that need a reply
         if category in ("action_required", "vip"):
             await _generate_and_store_draft(
@@ -173,16 +163,17 @@ async def _process_email(
                 user_name=user_name,
             )
 
-        # 5. Phase 6 — update relationship profile for the sender (fire-and-forget)
-        import asyncio as _asyncio
-        from app.services.relationship_engine import relationship_engine as _rel_engine
-        _asyncio.create_task(_rel_engine.update_contact(user_id, email))
+        # 5. Phase 6 — update relationship profile for the sender (fire-and-forget).
+        #    Pass the full email dict so update_contact gets from_email, from_name,
+        #    and received_at in one call.  (A second partial call was removed here
+        #    because it caused total_emails to be incremented twice per email.)
+        asyncio.create_task(relationship_engine.update_contact(user_id, email))
 
-        # 6. Phase 5 — auto-close any follow-ups that just got a reply
+        # 6. Phase 5 — auto-close any follow-ups that just got a reply.
         #    If this inbound email is part of a thread we were tracking, mark replied.
         if email.get("thread_id"):
             from app.services.follow_up_engine import follow_up_engine as _fu_engine
-            _asyncio.create_task(_fu_engine.mark_replied(user_id, email["thread_id"]))
+            asyncio.create_task(_fu_engine.mark_replied(user_id, email["thread_id"]))
 
     except Exception:
         logger.exception("Failed to process email %s for user %s", email_id, user_id)

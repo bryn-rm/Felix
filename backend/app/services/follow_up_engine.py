@@ -155,6 +155,7 @@ class FollowUpEngine:
 
         # Reconstruct a minimal email dict for the AI detection prompt
         mock_email = {
+            "from":    fu.get("to_email") or "",
             "to":      fu.get("to_email") or "",
             "subject": fu.get("subject") or "",
             "body":    f"Following up on: {fu.get('topic') or fu.get('subject') or 'our previous conversation'}",

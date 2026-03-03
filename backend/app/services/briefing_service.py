@@ -8,15 +8,14 @@ Pipeline per user:
   4. Upsert into briefings table (idempotent on user_id + date)
 """
 
-import json
 import logging
 from datetime import date, datetime, timezone
 
 from app import db
+from app.middleware.auth import get_google_credentials
 from app.services.ai_service import ai_service
 from app.services.calendar_service import CalendarService
 from app.services.voice_service import voice_service
-from app.middleware.auth import get_google_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +101,6 @@ class BriefingService:
         # 4. Today's calendar events (live Google Calendar call)
         calendar_events: list[dict] = []
         try:
-            from app.middleware.auth import get_google_credentials
-            from app.services.calendar_service import CalendarService
-
             creds = await get_google_credentials(user_id)
             cal = CalendarService(creds)
             calendar_events = await cal.get_today_events(user_tz)
@@ -213,9 +209,9 @@ class BriefingService:
                 "date": today.isoformat(),
                 "text": briefing_text,
                 "audio_url": audio_url or None,
-                "priority_emails": json.dumps(context.get("_priority_emails", [])),
-                "calendar_summary": json.dumps(context.get("_calendar_events", [])),
-                "follow_ups_summary": json.dumps(context.get("_follow_ups", [])),
+                "priority_emails": context.get("_priority_emails", []),
+                "calendar_summary": context.get("_calendar_events", []),
+                "follow_ups_summary": context.get("_follow_ups", []),
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             },
             conflict_columns=["user_id", "date"],

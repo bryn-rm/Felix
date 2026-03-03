@@ -104,13 +104,31 @@ async def send_follow_up(
 
     subject = fu.get("subject") or ""
     reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    send_text = body.edited_text or fu["auto_draft"]
+
+    # Fetch original email for thread context if available
+    email_row = None
+    if fu.get("email_id"):
+        email_row = await db.query_one(
+            "SELECT thread_id, message_id_header FROM emails WHERE id = $1 AND user_id = $2",
+            fu["email_id"], user_id,
+        )
 
     try:
-        await gmail.send_email(
-            to=fu["to_email"],
-            subject=reply_subject,
-            body=fu["auto_draft"],
-        )
+        if email_row and email_row.get("thread_id"):
+            await gmail.send_reply(
+                to=fu["to_email"],
+                subject=reply_subject,
+                body=send_text,
+                thread_id=email_row["thread_id"],
+                original_message_id=email_row.get("message_id_header") or "",
+            )
+        else:
+            await gmail.send_email(
+                to=fu["to_email"],
+                subject=reply_subject,
+                body=send_text,
+            )
     except Exception as exc:
         logger.exception("Gmail send failed for follow_up %s", follow_up_id)
         raise HTTPException(status_code=502, detail=f"Gmail send failed: {exc}")

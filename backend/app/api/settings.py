@@ -6,10 +6,12 @@ briefing_time and upserts them here. The settings page also reads and
 updates these values.
 """
 
+import re
 from datetime import datetime, timezone
 
+import pytz
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app import db
 from app.middleware.auth import get_current_user
@@ -21,6 +23,9 @@ router = APIRouter()
 # Pydantic schemas
 # ---------------------------------------------------------------------------
 
+_DIGEST_TIME_RE = re.compile(r"^([01]\d|2[0-3]):(00|30)$")
+
+
 class SettingsUpdate(BaseModel):
     display_name: str | None = None
     timezone: str | None = None
@@ -29,6 +34,27 @@ class SettingsUpdate(BaseModel):
     digest_times: list[str] | None = None
     energy_profile: dict | None = None
     felix_voice_id: str | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: str | None) -> str | None:
+        if v is not None and v not in pytz.all_timezones:
+            raise ValueError(
+                f"Unknown timezone '{v}'. Use a valid IANA timezone name (e.g. 'Europe/London')."
+            )
+        return v
+
+    @field_validator("digest_times")
+    @classmethod
+    def validate_digest_times(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        for t in v:
+            if not _DIGEST_TIME_RE.match(t.strip()):
+                raise ValueError(
+                    f"Invalid digest time '{t}'. Must be HH:00 or HH:30 (e.g. '08:00', '14:30')."
+                )
+        return v
 
 
 class VIPUpdate(BaseModel):

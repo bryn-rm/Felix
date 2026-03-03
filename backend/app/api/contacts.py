@@ -11,6 +11,7 @@ Endpoints:
 """
 
 import logging
+from datetime import datetime, timezone
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -168,7 +169,6 @@ async def update_contact(
         values.append(val)
 
     # Add updated_at
-    from datetime import datetime, timezone
     set_parts.append(f"updated_at = ${len(values) + 1}")
     values.append(datetime.now(timezone.utc))
 
@@ -182,6 +182,5 @@ async def update_contact(
         f"RETURNING *"
     )
 
-    from app import db as _db
-    updated = await _db.query_one(sql, *values)
+    updated = await db.query_one(sql, *values)
     return {"updated": True, "contact": updated}

@@ -38,6 +38,12 @@ def _get_supabase() -> Client:
     return _supabase
 
 
+# Public alias so other modules (e.g. voice.py) don't have to import a private name.
+def get_supabase_client() -> Client:
+    """Return the shared Supabase service-key client (singleton)."""
+    return _get_supabase()
+
+
 # ---------------------------------------------------------------------------
 # Token encryption helpers
 # ---------------------------------------------------------------------------
@@ -79,7 +85,9 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
         raise HTTPException(status_code=401, detail="Missing auth token")
 
     try:
-        result = _get_supabase().auth.get_user(token)
+        # get_user() makes a synchronous HTTP call to Supabase — run in a thread
+        # so it never blocks the asyncio event loop.
+        result = await asyncio.to_thread(_get_supabase().auth.get_user, token)
         if not result or not result.user:
             raise HTTPException(status_code=401, detail="Invalid token")
         return {

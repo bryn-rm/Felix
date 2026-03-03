@@ -258,18 +258,43 @@ async def _maybe_send_digest(user: dict) -> None:
 
 
 async def _send_digest_for_user(user_id: str) -> None:
-    """Generate and log a digest for the user. Full notification delivery is Phase 7 polish."""
+    """Send an email digest to the user via Gmail (digest_sender)."""
     try:
-        # Import briefing_service to reuse context gathering for the digest
-        from app.services.briefing_service import briefing_service
-        context = await briefing_service.gather_context(user_id)
-        priority_count = context.get("priority_email_count", 0)
-        follow_up_count = context.get("follow_up_count", 0)
-        logger.info(
-            "Digest for user %s: %d priority email(s), %d overdue follow-up(s)",
-            user_id, priority_count, follow_up_count,
-        )
-        # TODO: deliver push notification or in-app digest once notification
-        # infrastructure is added in Phase 7 polish.
+        from app.jobs.digest_sender import send_digest_for_user
+        await send_digest_for_user(user_id)
+        logger.info("Digest sent for user %s", user_id)
     except Exception:
-        logger.exception("Failed to generate digest for user %s", user_id)
+        logger.exception("Failed to send digest for user %s", user_id)
+
+
+# ---------------------------------------------------------------------------
+# Weekly review email — Sunday at 6pm in UTC (each user's own TZ varies but
+# the review window is a rolling 7 days so exact timing is not critical).
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("cron", day_of_week="sun", hour=18, minute=0, id="send_weekly_reviews")
+async def send_weekly_reviews() -> None:
+    """Send weekly review emails to all active users."""
+    try:
+        users = await get_active_users()
+        if not users:
+            return
+        results = await asyncio.gather(
+            *[_send_weekly_review_for_user(u["user_id"]) for u in users],
+            return_exceptions=True,
+        )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Weekly review failed for user %s: %s", user["user_id"], result)
+    except Exception:
+        logger.exception("send_weekly_reviews outer error")
+
+
+async def _send_weekly_review_for_user(user_id: str) -> None:
+    """Send a weekly review email for a single user."""
+    try:
+        from app.jobs.digest_sender import send_weekly_review_for_user
+        await send_weekly_review_for_user(user_id)
+        logger.info("Weekly review sent for user %s", user_id)
+    except Exception:
+        logger.exception("Failed to send weekly review for user %s", user_id)

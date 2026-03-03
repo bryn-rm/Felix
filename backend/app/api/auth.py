@@ -13,6 +13,7 @@ Flow:
   5. Redirects to /dashboard
 """
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -20,6 +21,8 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, RedirectResponse
+
+logger = logging.getLogger(__name__)
 
 from app import db
 from app.config import settings
@@ -156,12 +159,24 @@ async def google_callback(
         )
 
     if token_response.status_code != 200:
+        logger.error(
+            "Google token exchange failed [status=%d]: %s",
+            token_response.status_code,
+            token_response.text,
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Google token exchange failed: {token_response.text}",
+            detail="Google token exchange failed. Please try connecting again.",
         )
 
-    tokens = token_response.json()
+    try:
+        tokens = token_response.json()
+    except Exception:
+        logger.error("Google token exchange returned non-JSON: %s", token_response.text)
+        raise HTTPException(
+            status_code=502,
+            detail="Google token exchange returned an unexpected response.",
+        )
     access_token = tokens["access_token"]
     refresh_token = tokens.get("refresh_token")
     expires_in = tokens.get("expires_in", 3600)
@@ -179,7 +194,18 @@ async def google_callback(
             GOOGLE_USERINFO_URL,
             headers={"Authorization": f"Bearer {access_token}"},
         )
-    google_email = userinfo_resp.json().get("email", "") if userinfo_resp.status_code == 200 else ""
+    if userinfo_resp.status_code == 200:
+        try:
+            google_email = userinfo_resp.json().get("email", "")
+        except Exception:
+            google_email = ""
+    else:
+        google_email = ""
+    if not google_email:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not retrieve your Google email address. Please try connecting again.",
+        )
 
     # Compute expiry timestamp
     token_expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()

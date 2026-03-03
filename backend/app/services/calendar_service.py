@@ -7,13 +7,14 @@ Mirrors the GmailService pattern exactly:
 - HttpError 401/403/429 handled and logged via _handle_http_error()
 """
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
 import pytz
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+from app.services.google_api import execute_with_backoff as _execute_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class CalendarService:
             maxResults=100,
         )
         try:
-            result = await asyncio.to_thread(request.execute)
+            result = await _execute_with_backoff(request, context="list calendar events")
         except HttpError as e:
             _handle_http_error(e, context="list calendar events")
             return []
@@ -107,7 +108,7 @@ class CalendarService:
             sendUpdates="all",  # send invite emails to attendees
         )
         try:
-            created = await asyncio.to_thread(request.execute)
+            created = await _execute_with_backoff(request, context="create calendar event")
         except HttpError as e:
             _handle_http_error(e, context="create calendar event")
             raise
@@ -134,7 +135,7 @@ class CalendarService:
         }
         request = self.service.freebusy().query(body=body)
         try:
-            result = await asyncio.to_thread(request.execute)
+            result = await _execute_with_backoff(request, context="freebusy query")
         except HttpError as e:
             _handle_http_error(e, context="freebusy query")
             return []
@@ -182,7 +183,10 @@ class CalendarService:
             time_max=window_end.isoformat(),
         )
         busy_intervals = [
-            (datetime.fromisoformat(b["start"]), datetime.fromisoformat(b["end"]))
+            (
+                datetime.fromisoformat(b["start"].replace("Z", "+00:00")),
+                datetime.fromisoformat(b["end"].replace("Z", "+00:00")),
+            )
             for b in busy
         ]
 

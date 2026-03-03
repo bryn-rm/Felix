@@ -39,7 +39,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app import db
 from app.config import settings
-from app.middleware.auth import _get_supabase, get_google_credentials
+from app.middleware.auth import get_supabase_client, get_google_credentials
 from app.services.ai_service import ai_service
 from app.services.gmail_service import GmailService
 from app.services.voice_router import route_intent
@@ -292,7 +292,8 @@ async def _authenticate_ws(websocket: WebSocket) -> dict | None:
         return None
 
     try:
-        result = _get_supabase().auth.get_user(token)
+        # get_user() is synchronous HTTP — run in a thread to avoid blocking the event loop.
+        result = await asyncio.to_thread(get_supabase_client().auth.get_user, token)
         if not result or not result.user:
             raise ValueError("No user returned")
         return {"id": result.user.id, "email": result.user.email}

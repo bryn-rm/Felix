@@ -7,16 +7,39 @@ clause — RLS is a safety net for the frontend anon-key path, not a substitute
 for correct backend scoping.
 """
 
+import json as _json
+
 import asyncpg
 from app.config import settings
 
 _pool: asyncpg.Pool | None = None
 
 
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Register JSON/JSONB codecs so Python dicts/lists are auto-serialised."""
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=_json.dumps,
+        decoder=_json.loads,
+        schema="pg_catalog",
+    )
+    await conn.set_type_codec(
+        "json",
+        encoder=_json.dumps,
+        decoder=_json.loads,
+        schema="pg_catalog",
+    )
+
+
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(settings.DATABASE_URL, min_size=2, max_size=10)
+        _pool = await asyncpg.create_pool(
+            settings.DATABASE_URL,
+            min_size=2,
+            max_size=10,
+            init=_init_connection,
+        )
     return _pool
 
 

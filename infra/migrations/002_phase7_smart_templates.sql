@@ -2,6 +2,9 @@
 -- Smart template library: per-user email templates, not shared between users.
 -- Run in Supabase SQL Editor after 001_phase2_email_fields.sql.
 
+-- Required for GIN index on a mixed (uuid, text[]) column set
+CREATE EXTENSION IF NOT EXISTS btree_gin;
+
 CREATE TABLE IF NOT EXISTS smart_templates (
     id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id        UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,

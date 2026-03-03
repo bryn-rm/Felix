@@ -16,6 +16,7 @@ Endpoints:
   DELETE /emails/{id}/draft           — discard draft
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from pydantic import BaseModel
 from app import db
 from app.middleware.auth import get_current_user, get_google_credentials
 from app.services.ai_service import ai_service
+from app.services.follow_up_engine import follow_up_engine as _fu_engine
 from app.services.gmail_service import GmailService
 
 logger = logging.getLogger(__name__)
@@ -395,9 +397,6 @@ async def send_email(
 
     # Phase 5 — fire-and-forget follow-up detection on the sent email.
     # Build a minimal sent-email dict the engine can analyse.
-    import asyncio as _asyncio
-    from app.services.follow_up_engine import follow_up_engine as _fu_engine
-
     _sent_email_dict = {
         "id":        email_id,
         "subject":   email.get("subject") or "",
@@ -406,7 +405,7 @@ async def send_email(
         "to_email":  email.get("from_email") or "",
         "received_at": datetime.now(timezone.utc),
     }
-    _asyncio.create_task(
+    asyncio.create_task(
         _fu_engine.process_sent_email(current_user["id"], _sent_email_dict)
     )
 
