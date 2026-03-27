@@ -9,10 +9,11 @@ Pipeline per user:
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from app import db
 from app.middleware.auth import get_google_credentials
+from app.services.timezone_utils import local_date_for_user
 from app.services.ai_service import ai_service
 from app.services.calendar_service import CalendarService
 from app.services.voice_service import voice_service
@@ -174,6 +175,7 @@ class BriefingService:
             "_priority_emails": priority_emails,
             "_calendar_events": calendar_events,
             "_follow_ups": follow_ups,
+            "_user_tz": user_tz,
         }
 
     async def generate_for_user(self, user_id: str) -> dict:
@@ -201,7 +203,7 @@ class BriefingService:
             )
 
         # Upsert into briefings (UNIQUE on user_id + date → safe to call multiple times)
-        today = date.today()
+        today = local_date_for_user(context.get("_user_tz") or "UTC")
         row = await db.upsert(
             "briefings",
             {

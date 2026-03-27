@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app import db
 from app.middleware.auth import get_current_user
 from app.services.briefing_service import briefing_service
+from app.services.timezone_utils import local_date_for_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,9 +33,15 @@ async def get_today_briefing(current_user: dict = Depends(get_current_user)):
     Return today's briefing (text + audio_url) for this user.
     Returns 404 if no briefing has been generated yet today.
     """
-    row = await db.query_one(
-        "SELECT * FROM briefings WHERE user_id = $1 AND date = CURRENT_DATE",
+    settings = await db.query_one(
+        "SELECT timezone FROM settings WHERE user_id = $1",
         current_user["id"],
+    )
+    local_today = local_date_for_user((settings or {}).get("timezone") or "UTC")
+    row = await db.query_one(
+        "SELECT * FROM briefings WHERE user_id = $1 AND date = $2",
+        current_user["id"],
+        local_today,
     )
     if not row:
         return {

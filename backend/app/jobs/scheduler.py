@@ -11,6 +11,8 @@ import logging
 from datetime import datetime, time as dt_time
 
 import pytz
+
+from app.services.timezone_utils import local_date_for_user
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app import db
@@ -133,9 +135,11 @@ async def _maybe_generate_briefing(user: dict) -> None:
         target = "07:30"
 
     if user_now.strftime("%H:%M") == target:
+        local_today = local_date_for_user(tz_name)
         already_done = await db.query_one(
-            "SELECT id FROM briefings WHERE user_id = $1 AND date = CURRENT_DATE",
+            "SELECT id FROM briefings WHERE user_id = $1 AND date = $2",
             user["user_id"],
+            local_today,
         )
         if not already_done:
             asyncio.create_task(_generate_briefing_for_user(user["user_id"]))
