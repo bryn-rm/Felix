@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --felix-background: #0f172a;
+  --felix-surface: #1e293b;
+  --felix-accent: #4f46e5;
+  --felix-text-primary: #f1f5f9;
+  --felix-text-muted: #94a3b8;
+}
+
+body {
+  background-color: var(--felix-background);
+  color: var(--felix-text-primary);
+}
