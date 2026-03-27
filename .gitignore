@@ -1,0 +1,106 @@
+# =============================================================================
+# Felix — root .gitignore
+# Covers: Next.js 14 frontend + FastAPI Python backend
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Environment / secrets
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.staging
+*.pem
+*.key
+secrets/
+
+# -----------------------------------------------------------------------------
+# Next.js / Node
+# -----------------------------------------------------------------------------
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.cache/
+frontend/dist/
+frontend/.vercel/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+
+# -----------------------------------------------------------------------------
+# Python / FastAPI backend
+# -----------------------------------------------------------------------------
+
+# Virtual environments
+backend/.venv/
+backend/venv/
+backend/env/
+backend/.env/
+
+# Byte-compiled / optimised
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+backend/dist/
+backend/build/
+backend/*.egg-info/
+backend/.eggs/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Mypy / type checker caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# Ruff / linter
+.ruff_cache/
+
+# -----------------------------------------------------------------------------
+# IDEs & editors
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# -----------------------------------------------------------------------------
+# OS
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Docker
+# -----------------------------------------------------------------------------
+*.dockerignore
+
+# -----------------------------------------------------------------------------
+# Logs & temp files
+# -----------------------------------------------------------------------------
+*.log
+*.tmp
+*.bak
+*.orig
+tmp/
+temp/
