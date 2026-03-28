@@ -10,7 +10,6 @@ import {
   Inbox,
   AlertCircle,
   Play,
-  Pause,
   BookOpen,
 } from "lucide-react";
 import { api } from "@/lib/api";
