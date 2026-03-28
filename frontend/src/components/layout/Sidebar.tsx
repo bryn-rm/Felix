@@ -14,9 +14,8 @@ import {
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { VoiceOrb } from "@/components/felix/VoiceOrb";
-import { useVoice } from "@/hooks/useVoice";
 import { useUnreadCounts } from "@/hooks/useUnreadCounts";
-import { useEffect, useState } from "react";
+import type { VoiceState } from "@/hooks/useVoice";
 
 interface NavItem {
   href: string;
@@ -27,27 +26,26 @@ interface NavItem {
 
 interface SidebarProps {
   userEmail: string;
+  /**
+   * Current voice session state — mirrored from the VoiceModal that lives in
+   * AppShell. Drives the orb appearance. Defaults to "idle".
+   */
+  voiceState?: VoiceState;
+  /**
+   * Called when the user clicks the VoiceOrb. AppShell handles opening the
+   * VoiceModal overlay; the actual WebSocket session lives there, not here.
+   */
+  onVoiceClick?: () => void;
 }
 
-export function Sidebar({ userEmail }: SidebarProps) {
+export function Sidebar({
+  userEmail,
+  voiceState = "idle",
+  onVoiceClick,
+}: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { actionRequired, overdueFollowups } = useUnreadCounts();
-  const [token, setToken] = useState<string | null>(null);
-  const { state: voiceState, start, stop } = useVoice(token);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setToken(session?.access_token ?? null);
-    });
-
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setToken(session?.access_token ?? null);
-      },
-    );
-    return () => listener.subscription.unsubscribe();
-  }, []);
 
   const navItems: NavItem[] = [
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -72,14 +70,6 @@ export function Sidebar({ userEmail }: SidebarProps) {
   async function handleSignOut() {
     await supabase.auth.signOut();
     router.push("/login");
-  }
-
-  function handleVoiceClick() {
-    if (voiceState === "idle" || voiceState === "error") {
-      start();
-    } else {
-      stop();
-    }
   }
 
   return (
@@ -121,10 +111,15 @@ export function Sidebar({ userEmail }: SidebarProps) {
         </nav>
       </div>
 
-      {/* Bottom section: VoiceOrb + user info */}
+      {/* Bottom section: VoiceOrb (above) + user info (below) */}
       <div className="px-5">
+        {/* VoiceOrb — positioned at the bottom of nav links, above user info */}
         <div className="mb-6 flex justify-center">
-          <VoiceOrb state={voiceState} onClick={handleVoiceClick} size={64} />
+          <VoiceOrb
+            state={voiceState}
+            onClick={onVoiceClick ?? (() => {})}
+            size={64}
+          />
         </div>
 
         <div className="flex items-center justify-between gap-2 border-t border-slate-700 pt-4">

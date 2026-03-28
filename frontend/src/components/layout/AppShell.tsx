@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import {
@@ -16,6 +16,9 @@ import {
   X,
 } from "lucide-react";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { VoiceModal } from "@/components/felix/VoiceModal";
+import { supabase } from "@/lib/supabase";
+import type { VoiceState } from "@/hooks/useVoice";
 
 interface AppShellProps {
   userEmail: string;
@@ -31,6 +34,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/contacts": "Contacts",
   "/templates": "Templates",
   "/settings": "Settings",
+  "/briefing": "Briefing",
 };
 
 const MOBILE_NAV = [
@@ -65,6 +69,58 @@ export function AppShell({ userEmail, displayName, children }: AppShellProps) {
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // ------------------------------------------------------------------
+  // Voice — token, modal open state, orb state (mirrored from VoiceModal)
+  // ------------------------------------------------------------------
+
+  const [token, setToken] = useState<string | null>(null);
+  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+  // Mirrors the VoiceModal's internal state so the Sidebar orb reflects it
+  const [orbVoiceState, setOrbVoiceState] = useState<VoiceState>("idle");
+
+  // Load Supabase access token (was previously in Sidebar — centralised here
+  // so it's available for VoiceModal and the keyboard shortcut)
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setToken(session?.access_token ?? null);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setToken(session?.access_token ?? null);
+      },
+    );
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  const openVoiceModal = useCallback(() => {
+    if (token) setVoiceModalOpen(true);
+  }, [token]);
+
+  const closeVoiceModal = useCallback(() => {
+    setVoiceModalOpen(false);
+    setOrbVoiceState("idle"); // reset sidebar orb when modal closes
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Keyboard shortcut: Cmd+Shift+F (Mac) / Ctrl+Shift+F (Windows/Linux)
+  // Opens the VoiceModal from anywhere in the app.
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "F") {
+        e.preventDefault();
+        openVoiceModal();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [openVoiceModal]);
+
+  // ------------------------------------------------------------------
+  // Render
+  // ------------------------------------------------------------------
+
   const title = getPageTitle(pathname);
   const avatarText = initials(displayName, userEmail);
 
@@ -74,7 +130,11 @@ export function AppShell({ userEmail, displayName, children }: AppShellProps) {
       {/* Desktop sidebar                                                      */}
       {/* ------------------------------------------------------------------ */}
       <aside className="hidden w-64 shrink-0 bg-[#1e293b] md:flex md:flex-col">
-        <Sidebar userEmail={userEmail} />
+        <Sidebar
+          userEmail={userEmail}
+          voiceState={orbVoiceState}
+          onVoiceClick={openVoiceModal}
+        />
       </aside>
 
       {/* ------------------------------------------------------------------ */}
@@ -97,7 +157,14 @@ export function AppShell({ userEmail, displayName, children }: AppShellProps) {
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <Sidebar userEmail={userEmail} />
+            <Sidebar
+              userEmail={userEmail}
+              voiceState={orbVoiceState}
+              onVoiceClick={() => {
+                setSidebarOpen(false);
+                openVoiceModal();
+              }}
+            />
           </aside>
         </div>
       )}
@@ -172,6 +239,18 @@ export function AppShell({ userEmail, displayName, children }: AppShellProps) {
           <span>More</span>
         </button>
       </nav>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* VoiceModal — rendered at app-shell level so it overlays everything. */}
+      {/* Only mounted when open AND token is available.                      */}
+      {/* ------------------------------------------------------------------ */}
+      {voiceModalOpen && token && (
+        <VoiceModal
+          token={token}
+          onClose={closeVoiceModal}
+          onStateChange={setOrbVoiceState}
+        />
+      )}
     </div>
   );
 }

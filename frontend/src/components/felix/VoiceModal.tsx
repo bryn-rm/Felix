@@ -6,29 +6,40 @@
  *   - Live interim transcript (greyed, streaming)
  *   - VoiceOrb (tap to start / stop)
  *   - Interrupt button (visible while Felix is speaking)
+ *   - Error message + Retry button (when state === "error")
  *   - Escape key or × button closes the modal
  *
  * Props:
- *   token    — Supabase access token (string from useSession / getSession)
- *   onClose  — called when the user ends the session
+ *   token          — Supabase access token
+ *   onClose        — called when the user ends the session
+ *   onStateChange  — optional; fires whenever the internal voice state changes
+ *                    so the parent (AppShell) can mirror the state for the
+ *                    Sidebar orb without a second WebSocket session.
  */
 
 "use client";
 
 import { useEffect } from "react";
 
-import { useVoice } from "@/hooks/useVoice";
+import { useVoice, type VoiceState } from "@/hooks/useVoice";
 import { TranscriptDisplay } from "./TranscriptDisplay";
 import { VoiceOrb } from "./VoiceOrb";
 
 interface VoiceModalProps {
   token: string;
   onClose: () => void;
+  /** Mirror internal voice state to the parent (e.g. for Sidebar orb). */
+  onStateChange?: (state: VoiceState) => void;
 }
 
-export function VoiceModal({ token, onClose }: VoiceModalProps) {
+export function VoiceModal({ token, onClose, onStateChange }: VoiceModalProps) {
   const { state, interimTranscript, messages, error, start, stop, interrupt } =
     useVoice(token);
+
+  // Notify parent of every state transition
+  useEffect(() => {
+    onStateChange?.(state);
+  }, [state, onStateChange]);
 
   // Close on Escape
   useEffect(() => {
@@ -104,11 +115,25 @@ export function VoiceModal({ token, onClose }: VoiceModalProps) {
           </p>
         )}
 
-        {/* Error message */}
-        {error && (
-          <p className="mt-2 px-1 text-sm text-red-400">
-            {error}
-          </p>
+        {/* ── Error state — message + retry button ── */}
+        {state === "error" && error && (
+          <div className="mt-3 flex flex-col items-center gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-4 text-center">
+            <p className="text-sm text-red-400">{error}</p>
+            <button
+              onClick={() => start()}
+              className={[
+                "rounded-full border border-red-500/50 px-5 py-1.5 text-xs font-medium",
+                "text-red-300 transition-colors hover:border-red-400 hover:text-red-200",
+              ].join(" ")}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Non-fatal error hint (e.g. transient message while still connected) */}
+        {state !== "error" && error && (
+          <p className="mt-2 px-1 text-sm text-red-400">{error}</p>
         )}
       </div>
 
@@ -141,9 +166,14 @@ export function VoiceModal({ token, onClose }: VoiceModalProps) {
           </button>
         )}
 
-        {/* Keyboard hint */}
-        {!isActive && state === "idle" && (
-          <p className="text-xs text-zinc-700">Press Esc to close</p>
+        {/* Keyboard hints */}
+        {state === "idle" && (
+          <p className="text-xs text-zinc-700">
+            Tap orb to start · Esc to close
+          </p>
+        )}
+        {state === "connecting" && (
+          <p className="text-xs text-zinc-700">Connecting…</p>
         )}
       </div>
     </div>
