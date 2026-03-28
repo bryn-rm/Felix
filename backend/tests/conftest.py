@@ -1,5 +1,30 @@
 """Shared pytest fixtures for the Felix backend test suite."""
+import os
 from unittest.mock import AsyncMock, MagicMock
+
+# ---------------------------------------------------------------------------
+# Inject stub environment variables so app.config.Settings() can instantiate
+# during test collection without a real .env file.
+# os.environ.setdefault only sets a key when it isn't already present, so
+# real credentials in the environment are never overwritten.
+# ---------------------------------------------------------------------------
+_TEST_ENV = {
+    "GOOGLE_CLIENT_ID":      "test-google-client-id",
+    "GOOGLE_CLIENT_SECRET":  "test-google-client-secret",
+    "GOOGLE_REDIRECT_URI":   "http://localhost:8000/auth/google/callback",
+    "GCP_PROJECT_ID":        "test-gcp-project",
+    "ANTHROPIC_API_KEY":     "test-anthropic-key",
+    "ELEVENLABS_API_KEY":    "test-elevenlabs-key",
+    "FELIX_VOICE_ID":        "test-voice-id",
+    "SUPABASE_URL":          "https://test.supabase.co",
+    "SUPABASE_SERVICE_KEY":  "test-service-key",
+    "DATABASE_URL":          "postgresql://test:test@localhost/testdb",
+    # Must be a valid 64-char hex string for Fernet key derivation
+    "TOKEN_ENCRYPTION_KEY":  "a" * 64,
+    "BACKEND_SECRET_KEY":    "test-backend-secret",
+}
+for _key, _val in _TEST_ENV.items():
+    os.environ.setdefault(_key, _val)
 
 import pytest
 
