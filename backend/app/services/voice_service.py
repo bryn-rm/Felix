@@ -1,7 +1,14 @@
 """
 Voice service — Phase 3.
 
-TTS via ElevenLabs Turbo v2.5, streamed sentence-by-sentence.
+TTS via ElevenLabs HTTP streaming endpoint:
+  - eleven_flash_v2_5 for voice command responses (speed first)
+  - eleven_v3         for briefing audio          (quality first)
+
+Use the WebSocket TTS endpoint only if text is being streamed in chunks from
+Claude simultaneously; here text is always available upfront so the HTTP
+streaming endpoint gives lower latency.
+
 generate_and_store() uploads full-audio briefings to Supabase Storage.
 """
 
@@ -11,7 +18,7 @@ import re
 import uuid
 from typing import AsyncGenerator
 
-from elevenlabs.client import ElevenLabs
+import httpx
 
 from app import db
 from app.config import settings
@@ -20,12 +27,16 @@ from supabase import create_client
 
 logger = logging.getLogger(__name__)
 
-# Module-level clients — created once, reused for every request.
-# Both ElevenLabs and Supabase clients are thread-safe for concurrent reads.
-_el_client = ElevenLabs(api_key=settings.ELEVENLABS_API_KEY)
+# Supabase client — created once, reused for every request.
 _supabase_storage = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+# ElevenLabs model constants
+VOICE_MODEL          = "eleven_flash_v2_5"  # voice command responses — speed first
+BRIEFING_VOICE_MODEL = "eleven_v3"          # briefing audio — quality first
+
+_EL_TTS_STREAM_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -34,29 +45,27 @@ def _split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _generate_sentence_sync(sentence: str, voice_id: str) -> bytes:
+def _http_tts_sync(text: str, voice_id: str, model: str) -> bytes:
     """
-    Generate TTS for a single sentence synchronously.
+    Call ElevenLabs HTTP streaming TTS endpoint synchronously and return MP3 bytes.
     Called via asyncio.to_thread so it doesn't block the event loop.
+
+    Using the /stream endpoint is lower latency than the WebSocket endpoint when
+    the full text is available upfront.
     """
-    audio = _el_client.generate(
-        text=sentence,
-        voice=voice_id,
-        model="eleven_turbo_v2_5",
-        # stream=False (default) → returns bytes directly
-    )
-    # audio is bytes when stream=False
-    return audio if isinstance(audio, bytes) else b"".join(audio)
-
-
-def _generate_full_sync(text: str, voice_id: str) -> bytes:
-    """Generate full TTS in one call. Used by generate_and_store."""
-    audio = _el_client.generate(
-        text=text,
-        voice=voice_id,
-        model="eleven_turbo_v2_5",
-    )
-    return audio if isinstance(audio, bytes) else b"".join(audio)
+    url = _EL_TTS_STREAM_URL.format(voice_id=voice_id)
+    headers = {
+        "xi-api-key": settings.ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": text,
+        "model_id": model,
+    }
+    with httpx.Client(timeout=30.0) as client:
+        with client.stream("POST", url, headers=headers, json=payload) as response:
+            response.raise_for_status()
+            return response.read()
 
 
 class VoiceService:
@@ -68,8 +77,10 @@ class VoiceService:
         cancel_event: asyncio.Event | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """
-        Stream TTS sentence-by-sentence from ElevenLabs.
+        Stream TTS sentence-by-sentence via ElevenLabs HTTP streaming endpoint.
         Yields raw MP3 bytes for each sentence.
+
+        Uses eleven_flash_v2_5 for lowest latency on voice command responses.
 
         cancel_event: if set between sentences, generation stops early
         (used for interruption handling).
@@ -85,7 +96,9 @@ class VoiceService:
                 logger.debug("TTS cancelled mid-stream (cancel_event set)")
                 return
             try:
-                audio_bytes = await asyncio.to_thread(_generate_sentence_sync, sentence, vid)
+                audio_bytes = await asyncio.to_thread(
+                    _http_tts_sync, sentence, vid, VOICE_MODEL
+                )
                 yield audio_bytes
             except Exception:
                 logger.exception("ElevenLabs TTS failed for sentence: %.60s…", sentence)
@@ -96,12 +109,15 @@ class VoiceService:
         Generate full TTS audio, upload to Supabase Storage bucket 'felix-audio',
         and return the public URL.
 
-        Used for morning briefing audio files. Raises on failure.
+        Uses eleven_v3 for higher quality briefing audio.
+        Raises on failure.
         """
         voice_id = await self._get_user_voice_id(user_id)
 
-        # Generate full audio in a thread
-        audio_bytes = await asyncio.to_thread(_generate_full_sync, text, voice_id)
+        # Generate full audio in a thread via HTTP streaming endpoint
+        audio_bytes = await asyncio.to_thread(
+            _http_tts_sync, text, voice_id, BRIEFING_VOICE_MODEL
+        )
 
         # Upload to Supabase Storage (supabase-py is synchronous → run in thread)
         file_path = f"{user_id}/briefing_{uuid.uuid4().hex}.mp3"

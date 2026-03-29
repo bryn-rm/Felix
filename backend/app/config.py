@@ -18,6 +18,9 @@ class Settings(BaseSettings):
 
     # ElevenLabs
     ELEVENLABS_API_KEY: str
+    # Voice must support both eleven_flash_v2_5 (voice commands) and eleven_v3
+    # (briefing audio). Most voices in the ElevenLabs library do; custom clones
+    # may need verification in the ElevenLabs voice library settings.
     FELIX_VOICE_ID: str
 
     # Supabase
