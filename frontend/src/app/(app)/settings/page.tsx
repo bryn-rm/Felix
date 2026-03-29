@@ -253,7 +253,7 @@ interface StyleProfile {
 
 interface GoogleStatus {
   connected: boolean;
-  email?: string;
+  google_email?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +398,7 @@ export default function SettingsPage() {
   async function saveVipContacts(updated: string[]) {
     setSavingVip(true);
     try {
-      await api.patch("/settings", { vip_contacts: updated });
+      await api.put("/settings/vip-contacts", { vip_contacts: updated });
       await mutateSettings();
     } catch (err) {
       showToast(
@@ -439,7 +439,7 @@ export default function SettingsPage() {
   async function handleDisconnect() {
     setDisconnecting(true);
     try {
-      await api.del("/auth/google");
+      await api.del("/auth/google/disconnect");
       await mutateGoogle();
       showToast("Google account disconnected.");
     } catch (err) {
@@ -651,9 +651,9 @@ export default function SettingsPage() {
                   <p className="text-sm font-medium text-slate-200">
                     Connected
                   </p>
-                  {googleStatus.email && (
+                  {googleStatus.google_email && (
                     <p className="text-xs text-slate-500">
-                      {googleStatus.email}
+                      {googleStatus.google_email}
                     </p>
                   )}
                 </div>

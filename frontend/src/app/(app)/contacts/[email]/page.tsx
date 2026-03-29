@@ -185,24 +185,24 @@ export default function ContactProfilePage() {
   // ---- Data fetching ----
 
   const {
-    data: contact,
+    data,
     isLoading,
     error,
     mutate: mutateContact,
-  } = useSWR<ContactProfile>(
+  } = useSWR<{
+    contact: ContactProfile;
+    recent_emails: Email[];
+    recent_meetings: Meeting[];
+  }>(
     `/contacts/${encodeURIComponent(email)}`,
-    (url: string) => api.get<ContactProfile>(url),
+    (url: string) => api.get<{
+      contact: ContactProfile;
+      recent_emails: Email[];
+      recent_meetings: Meeting[];
+    }>(url),
   );
 
-  const { data: emailsData } = useSWR<{ emails: Email[] }>(
-    `/emails/?contact=${encodeURIComponent(email)}&limit=10`,
-    (url: string) => api.get<{ emails: Email[] }>(url),
-  );
-
-  const { data: meetings } = useSWR<Meeting[]>(
-    `/meetings/?contact=${encodeURIComponent(email)}`,
-    (url: string) => api.get<Meeting[]>(url),
-  );
+  const contact = data?.contact;
 
   // ---- VIP toggle (optimistic) ----
 
@@ -282,8 +282,8 @@ export default function ContactProfilePage() {
   const { label: strengthLbl, color: strengthClr } = strengthLabel(
     contact.relationship_strength,
   );
-  const recentEmails = emailsData?.emails ?? [];
-  const recentMeetings = (meetings ?? []).slice(0, 3);
+  const recentEmails = data?.recent_emails ?? [];
+  const recentMeetings = (data?.recent_meetings ?? []).slice(0, 3);
 
   return (
     <div className="flex h-full flex-col gap-5 overflow-y-auto p-6 pb-12">
@@ -472,7 +472,7 @@ export default function ContactProfilePage() {
       </div>
 
       {/* ---- Meeting notes ---- */}
-      {(recentMeetings.length > 0 || meetings === undefined) && (
+      {(recentMeetings.length > 0 || !data) && (
         <div className="rounded-xl border border-slate-700/50 bg-slate-800/40 p-4">
           <div className="mb-3 flex items-center gap-2">
             <MessageSquare className="h-4 w-4 text-slate-500" />

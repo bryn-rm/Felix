@@ -10,6 +10,7 @@ Endpoints:
 """
 
 import logging
+from datetime import date as date_type
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -31,7 +32,8 @@ class SendFollowUpRequest(BaseModel):
 
 
 class FollowUpPatch(BaseModel):
-    auto_draft: str
+    auto_draft: str | None = None
+    follow_up_by: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +193,21 @@ async def update_follow_up(
     if not fu:
         raise HTTPException(status_code=404, detail="Follow-up not found")
 
+    updates: dict = {}
+    if body.auto_draft is not None:
+        updates["auto_draft"] = body.auto_draft
+    if body.follow_up_by is not None:
+        updates["follow_up_by"] = date_type.fromisoformat(body.follow_up_by)
+
+    if not updates:
+        return {"updated": False}
+
+    set_clause = ", ".join(f"{k} = ${i + 1}" for i, k in enumerate(updates))
+    values = list(updates.values()) + [follow_up_id, user_id]
+    n = len(updates)
     await db.execute(
-        "UPDATE follow_ups SET auto_draft = $1 WHERE id = $2 AND user_id = $3",
-        body.auto_draft, follow_up_id, user_id,
+        f"UPDATE follow_ups SET {set_clause} WHERE id = ${n + 1} AND user_id = ${n + 2}",
+        *values,
     )
     return {"updated": True}
 

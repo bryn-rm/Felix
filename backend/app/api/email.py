@@ -90,6 +90,16 @@ async def list_emails(
 
     where = " AND ".join(conditions)
 
+    # Total count (before adding limit/offset to args)
+    count_sql = f"""
+        SELECT COUNT(*) AS total
+        FROM emails e
+        LEFT JOIN drafts d ON d.email_id = e.id AND d.user_id = e.user_id
+        WHERE {where}
+    """
+    count_row = await db.query_one(count_sql, *args)
+    total_count: int = count_row["total"] if count_row else 0
+
     # LEFT JOIN drafts so we get the draft status in one query
     sql = f"""
         SELECT
@@ -107,7 +117,7 @@ async def list_emails(
     args.extend([limit, offset])
 
     rows = await db.query(sql, *args)
-    return {"emails": rows, "limit": limit, "offset": offset}
+    return {"emails": rows, "total": total_count, "limit": limit, "offset": offset}
 
 
 # ---------------------------------------------------------------------------

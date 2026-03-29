@@ -78,7 +78,7 @@ export function FollowUpCard({ followUp, onUpdate }: FollowUpCardProps) {
     setPending("close");
     setError(null);
     try {
-      await api.patch(`/follow-ups/${followUp.id}`, { status: "closed" });
+      await api.post(`/follow-ups/${followUp.id}/close`);
       setSuccessMsg("Closed");
       setPanel("idle");
       onUpdate();

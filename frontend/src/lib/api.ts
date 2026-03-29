@@ -56,7 +56,12 @@ async function request<T>(
     } catch {
       // keep statusText
     }
-    throw new ApiError(res.status, message);
+    const err = new ApiError(res.status, message);
+    if (typeof window !== "undefined") {
+      if (res.status === 401) window.location.href = "/login";
+      else if (res.status === 403) window.location.href = "/connect";
+    }
+    throw err;
   }
 
   // 204 No Content
@@ -71,6 +76,7 @@ async function request<T>(
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
+  put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   del: <T>(path: string) => request<T>("DELETE", path),
 
@@ -78,7 +84,7 @@ export const api = {
   streamDraft: async (emailId: string): Promise<ReadableStream<Uint8Array>> => {
     const authorization = await getAuthHeader();
 
-    const res = await fetch(`${API_BASE}/emails/${emailId}/draft/stream`, {
+    const res = await fetch(`${API_BASE}/emails/${emailId}/draft`, {
       method: "POST",
       headers: {
         Authorization: authorization,

@@ -92,10 +92,9 @@ function FreeSlotModal({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const today = new Date().toISOString().slice(0, 10);
     api
-      .get<FreeSlot[]>(`/calendar/free-slots?date=${today}&duration=30`)
-      .then(setSlots)
+      .get<{ slots: FreeSlot[] }>(`/calendar/free-slots?duration_minutes=30&days_ahead=1`)
+      .then((r) => setSlots(r.slots))
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
   }, []);

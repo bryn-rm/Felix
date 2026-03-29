@@ -14,17 +14,14 @@ function isoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-export function useCalendar(weekStart: Date) {
-  const start = isoDate(weekStart);
-  const end = isoDate(addDays(weekStart, 6));
-
-  const { data, error, isLoading } = useSWR<CalendarEvent[]>(
-    `/calendar/events?start=${start}&end=${end}`,
-    (url: string) => api.get<CalendarEvent[]>(url),
+export function useCalendar(_weekStart: Date) {
+  const { data, error, isLoading } = useSWR<{ events: CalendarEvent[]; count: number }>(
+    `/calendar/events?days_ahead=14`,
+    (url: string) => api.get<{ events: CalendarEvent[]; count: number }>(url),
   );
 
   return {
-    events: data ?? [],
+    events: data?.events ?? [],
     isLoading,
     error: error as Error | undefined,
   };

@@ -81,12 +81,12 @@ type EditorState = "closed" | "new" | Template;
 
 export default function TemplatesPage() {
   const {
-    data: templates,
+    data,
     isLoading,
     error,
     mutate,
-  } = useSWR<Template[]>("/templates/", (url: string) =>
-    api.get<Template[]>(url),
+  } = useSWR<{ templates: Template[] }>("/templates/", (url: string) =>
+    api.get<{ templates: Template[] }>(url),
   );
 
   const [editorState, setEditorState] = useState<EditorState>("closed");
@@ -147,7 +147,7 @@ export default function TemplatesPage() {
       )}
 
       {/* Empty state */}
-      {!isLoading && !error && (!templates || templates.length === 0) && (
+      {!isLoading && !error && (!data?.templates || data.templates.length === 0) && (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
           <FileText className="h-12 w-12 text-slate-700" />
           <p className="text-base font-medium text-slate-300">
@@ -167,9 +167,9 @@ export default function TemplatesPage() {
       )}
 
       {/* Template list */}
-      {!isLoading && templates && templates.length > 0 && (
+      {!isLoading && data?.templates && data.templates.length > 0 && (
         <div className="space-y-3 pb-6">
-          {templates.map((tpl) => {
+          {data.templates.map((tpl) => {
             const catKey = tpl.category ?? "other";
             const catColor = CATEGORY_COLOR[catKey] ?? CATEGORY_COLOR.other;
             const bodyPreview =

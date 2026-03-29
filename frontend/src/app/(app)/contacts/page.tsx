@@ -128,13 +128,13 @@ export default function ContactsPage() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>("strength");
 
-  const { data, isLoading, error } = useSWR<Contact[]>(
+  const { data, isLoading, error } = useSWR<{ contacts: Contact[]; count: number }>(
     "/contacts/",
-    (url: string) => api.get<Contact[]>(url),
+    (url: string) => api.get<{ contacts: Contact[]; count: number }>(url),
   );
 
   const contacts = useMemo(() => {
-    let list = data ?? [];
+    let list = data?.contacts ?? [];
 
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -167,7 +167,7 @@ export default function ContactsPage() {
         <h1 className="text-xl font-semibold text-slate-100">Contacts</h1>
         {data && (
           <span className="text-sm text-slate-500">
-            {data.length} contact{data.length !== 1 ? "s" : ""}
+            {data.count} contact{data.count !== 1 ? "s" : ""}
           </span>
         )}
       </div>

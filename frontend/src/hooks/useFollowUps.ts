@@ -20,13 +20,13 @@ function isOverdue(fu: FollowUp): boolean {
 }
 
 export function useFollowUps(filter: FollowUpFilter = "all") {
-  const { data, error, isLoading, mutate } = useSWR<FollowUp[]>(
+  const { data, error, isLoading, mutate } = useSWR<{ follow_ups: FollowUp[]; count: number }>(
     "/follow-ups/",
-    (url: string) => api.get<FollowUp[]>(url),
+    (url: string) => api.get<{ follow_ups: FollowUp[]; count: number }>(url),
     { refreshInterval: 5 * 60 * 1000 },
   );
 
-  const all = data ?? [];
+  const all = data?.follow_ups ?? [];
 
   const followUps =
     filter === "all"

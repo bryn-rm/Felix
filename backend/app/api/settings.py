@@ -10,11 +10,13 @@ import re
 from datetime import datetime, timezone
 
 import pytz
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
 from app import db
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, get_google_credentials
+from app.services.ai_service import ai_service
+from app.services.gmail_service import GmailService
 
 router = APIRouter()
 
@@ -101,6 +103,28 @@ async def update_settings(
 
     row = await db.upsert("settings", updates, conflict_columns=["user_id"])
     return row
+
+
+@router.post("/analyse-style")
+async def analyse_writing_style(
+    current_user: dict = Depends(get_current_user),
+):
+    """Analyse the user's last 100 sent emails and save a style profile."""
+    user_id = current_user["id"]
+    creds = await get_google_credentials(user_id)
+    gmail = GmailService(creds)
+    sent_emails = await gmail.get_sent_emails(max_results=100)
+    result = await ai_service.analyse_writing_style(sent_emails)
+    await db.upsert(
+        "settings",
+        {
+            "user_id": user_id,
+            "style_profile": result,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        conflict_columns=["user_id"],
+    )
+    return {"status": "ok", "profile": result}
 
 
 @router.put("/vip-contacts")

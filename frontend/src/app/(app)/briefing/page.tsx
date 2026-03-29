@@ -230,16 +230,17 @@ function HistoryItem({ briefing }: { briefing: Briefing }) {
 export default function BriefingPage() {
   // ---- Data ----
   const {
-    data: todayBriefing,
+    data: todayData,
     isLoading: loadingToday,
     mutate: mutateToday,
-  } = useSWR<Briefing | null>("/briefing/today", (url: string) =>
-    api.get<Briefing | null>(url),
+  } = useSWR<{ briefing: Briefing | null }>("/briefing/today", (url: string) =>
+    api.get<{ briefing: Briefing | null }>(url),
   );
+  const todayBriefing = todayData?.briefing;
 
-  const { data: history, isLoading: loadingHistory, mutate: mutateHistory } =
-    useSWR<Briefing[]>("/briefing/history", (url: string) =>
-      api.get<Briefing[]>(url),
+  const { data: historyData, isLoading: loadingHistory, mutate: mutateHistory } =
+    useSWR<{ briefings: Briefing[] }>("/briefing/history", (url: string) =>
+      api.get<{ briefings: Briefing[] }>(url),
     );
 
   const { data: settings } = useSWR<Settings>("/settings", (url: string) =>
@@ -396,7 +397,7 @@ export default function BriefingPage() {
       )}
 
       {/* ---- Briefing history ---- */}
-      {(loadingHistory || (history && history.length > 0)) && (
+      {(loadingHistory || (historyData?.briefings && historyData.briefings.length > 0)) && (
         <div className="space-y-3">
           <h2 className="text-sm font-semibold text-slate-400">
             Previous briefings
@@ -413,9 +414,9 @@ export default function BriefingPage() {
             </div>
           )}
 
-          {!loadingHistory && history && (
+          {!loadingHistory && historyData?.briefings && (
             <div className="space-y-2">
-              {history.slice(0, 7).map((b) => (
+              {historyData.briefings.slice(0, 7).map((b) => (
                 <HistoryItem key={b.id} briefing={b} />
               ))}
             </div>

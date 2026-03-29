@@ -97,11 +97,12 @@ function Widget({
 // ---------------------------------------------------------------------------
 
 function MorningBriefingCard() {
-  const { data: briefing, isLoading } = useSWR<Briefing | null>(
+  const { data: briefingData, isLoading } = useSWR<{ briefing: Briefing | null }>(
     "briefing-today",
-    () => api.get<Briefing | null>("/briefing/today"),
+    () => api.get<{ briefing: Briefing | null }>("/briefing/today"),
     { refreshInterval: 5 * 60 * 1000 },
   );
+  const briefing = briefingData?.briefing;
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   if (isLoading) {
@@ -252,15 +253,15 @@ function PriorityInboxWidget() {
 // ---------------------------------------------------------------------------
 
 function TodaysScheduleWidget() {
-  const { data: events, isLoading, error } = useSWR<CalendarEvent[]>(
+  const { data: calendarData, isLoading, error } = useSWR<{ events: CalendarEvent[] }>(
     "calendar-today",
-    () => api.get<CalendarEvent[]>("/calendar/today"),
+    () => api.get<{ events: CalendarEvent[] }>("/calendar/today"),
     { refreshInterval: 5 * 60 * 1000 },
   );
 
   // Filter to upcoming/in-progress (show next 3)
   const now = new Date();
-  const upcoming = (events ?? [])
+  const upcoming = (calendarData?.events ?? [])
     .filter((e) => new Date(e.end) > now)
     .slice(0, 3);
 

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import type { Draft } from "@/lib/types";
+import type { Draft, Email } from "@/lib/types";
 
 export type DraftState =
   | "loading"    // initial fetch in progress
@@ -71,9 +71,10 @@ export function useDraft(emailId: string): UseDraftReturn {
 
     async function init() {
       try {
-        const existing = await api.get<Draft>(`/emails/${emailId}/draft`);
+        const res = await api.get<{ email: Email; draft: Draft | null }>(`/emails/${emailId}`);
         if (cancelled) return;
 
+        const existing = res.draft;
         if (existing && existing.draft_text) {
           setDraft(existing);
           const text = existing.edited_text ?? existing.draft_text;
@@ -86,7 +87,7 @@ export function useDraft(emailId: string): UseDraftReturn {
         }
       } catch (err) {
         if (cancelled) return;
-        // 404 → no draft yet, generate one
+        // 404 → email not found (shouldn't happen), generate anyway
         if (err instanceof ApiError && err.status === 404) {
           startStream();
         } else {
@@ -142,7 +143,7 @@ export function useDraft(emailId: string): UseDraftReturn {
   const discard = useCallback(async () => {
     if (!draft) return;
     try {
-      await api.del(`/drafts/${draft.id}`);
+      await api.del(`/emails/${emailId}/draft`);
       setDraft(null);
       setDraftText("");
       setState("ready"); // leave page logic to the component
