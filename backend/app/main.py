@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Felix backend starting up")
+    # Eagerly initialise the DB pool and verify connectivity at startup so a
+    # misconfigured DATABASE_URL fails fast rather than on the first request.
+    pool = await db.get_pool()
+    await pool.fetchval("SELECT 1")
+    logger.info("Database connection verified")
     scheduler.start()
     logger.info("APScheduler started")
     yield
@@ -55,8 +60,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[app_settings.FRONTEND_URL],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

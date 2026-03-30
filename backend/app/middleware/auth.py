@@ -127,7 +127,14 @@ async def get_google_credentials(user_id: str) -> Credentials:
     if isinstance(raw_expiry, datetime):
         expiry = raw_expiry
     elif raw_expiry:
-        expiry = datetime.fromisoformat(str(raw_expiry))
+        try:
+            expiry = datetime.fromisoformat(str(raw_expiry))
+        except ValueError:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Malformed token_expiry for user %s: %r — treating as expired", user_id, raw_expiry
+            )
+            expiry = None
     else:
         expiry = None
 
@@ -142,7 +149,17 @@ async def get_google_credentials(user_id: str) -> Credentials:
 
     if creds.expired and creds.refresh_token:
         # creds.refresh() is a synchronous blocking HTTP call — run in a thread.
-        await asyncio.to_thread(creds.refresh, Request())
+        try:
+            await asyncio.to_thread(creds.refresh, Request())
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Google token refresh failed for user %s: %s", user_id, exc
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Google access has expired. Please reconnect your account at /settings.",
+            )
         await db.update(
             "google_connections",
             {

@@ -2,6 +2,9 @@ import { supabase } from "@/lib/supabase";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
+// Guard against multiple simultaneous 401/403 responses each trying to redirect
+let _redirecting = false;
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -57,9 +60,14 @@ async function request<T>(
       // keep statusText
     }
     const err = new ApiError(res.status, message);
-    if (typeof window !== "undefined") {
-      if (res.status === 401) window.location.href = "/login";
-      else if (res.status === 403) window.location.href = "/connect";
+    if (typeof window !== "undefined" && !_redirecting) {
+      if (res.status === 401) {
+        _redirecting = true;
+        window.location.href = "/login";
+      } else if (res.status === 403) {
+        _redirecting = true;
+        window.location.href = "/connect";
+      }
     }
     throw err;
   }

@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     BACKEND_SECRET_KEY: str
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # Admin (optional — required to access /admin routes)
+    ADMIN_EMAIL: str | None = None
+
     class Config:
         env_file = ".env"
 

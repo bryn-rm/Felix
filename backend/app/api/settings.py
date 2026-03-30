@@ -26,6 +26,8 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 _DIGEST_TIME_RE = re.compile(r"^([01]\d|2[0-3]):(00|30)$")
+_BRIEFING_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class SettingsUpdate(BaseModel):
@@ -46,6 +48,15 @@ class SettingsUpdate(BaseModel):
             )
         return v
 
+    @field_validator("briefing_time")
+    @classmethod
+    def validate_briefing_time(cls, v: str | None) -> str | None:
+        if v is not None and not _BRIEFING_TIME_RE.match(v.strip()):
+            raise ValueError(
+                f"Invalid briefing time '{v}'. Must be HH:MM format (e.g. '07:30')."
+            )
+        return v
+
     @field_validator("digest_times")
     @classmethod
     def validate_digest_times(cls, v: list[str] | None) -> list[str] | None:
@@ -61,6 +72,14 @@ class SettingsUpdate(BaseModel):
 
 class VIPUpdate(BaseModel):
     vip_contacts: list[str]            # list of email addresses
+
+    @field_validator("vip_contacts")
+    @classmethod
+    def validate_vip_emails(cls, v: list[str]) -> list[str]:
+        for addr in v:
+            if not _EMAIL_RE.match(addr.strip()):
+                raise ValueError(f"Invalid email address in VIP list: {addr!r}")
+        return v
 
 
 # ---------------------------------------------------------------------------

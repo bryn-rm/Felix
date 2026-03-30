@@ -95,7 +95,7 @@ function FreeSlotModal({ onClose }: { onClose: () => void }) {
     api
       .get<{ slots: FreeSlot[] }>(`/calendar/free-slots?duration_minutes=30&days_ahead=1`)
       .then((r) => setSlots(r.slots))
-      .catch((err: Error) => setError(err.message))
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed to find free slots."))
       .finally(() => setLoading(false));
   }, []);
 

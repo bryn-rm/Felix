@@ -19,5 +19,6 @@ Write a natural spoken briefing. Start with a greeting appropriate for the time 
 End with an open question or offer to help with something specific. \
 Do not use bullet points — write in flowing speech. \
 Do not include headers or structure markers. \
-Target length: 100-150 words.
+Target length: 100-150 words. \
+Return only the spoken briefing text — no JSON, no markdown, no preamble.
 """

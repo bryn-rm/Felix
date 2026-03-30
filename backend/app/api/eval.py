@@ -12,13 +12,13 @@ Endpoints (mounted at /admin):
 Admin access is gated by the ADMIN_EMAIL environment variable.
 """
 
-import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app import db
+from app.config import settings
 from app.middleware.auth import get_current_user
 
 router = APIRouter()        # mounted at /eval   in main.py
@@ -32,7 +32,7 @@ admin_router = APIRouter()  # mounted at /admin  in main.py
 
 def _require_admin(current_user: dict) -> None:
     """Raise 403 unless the current user matches ADMIN_EMAIL."""
-    admin_email = os.environ.get("ADMIN_EMAIL", "")
+    admin_email = settings.ADMIN_EMAIL or ""
     if not admin_email or current_user["email"] != admin_email:
         raise HTTPException(status_code=403, detail="Admin access required")
 
@@ -62,7 +62,7 @@ async def submit_feedback(
 ):
     """Store a user rating for an AI-generated response (best-effort)."""
     row = await db.insert(
-        "eval_feedback",
+        "ai_feedback",
         {
             "user_id": current_user["id"],
             "ai_call_id": body.ai_call_id,
@@ -107,7 +107,7 @@ async def get_feedback_summary(
             SUM(CASE WHEN ef.correction IS NOT NULL  THEN 1 ELSE 0 END)  AS edited_count,
             SUM(CASE WHEN ef.rating = 0              THEN 1 ELSE 0 END)  AS wrong_count
         FROM ai_calls ac
-        LEFT JOIN eval_feedback ef
+        LEFT JOIN ai_feedback ef
                ON ef.ai_call_id = ac.id
               AND ef.user_id = $1
         WHERE ac.created_at >= NOW() - INTERVAL '7 days'

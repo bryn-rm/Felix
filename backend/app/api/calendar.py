@@ -186,6 +186,14 @@ async def create_focus_block(
     Defaults to today if no date is provided.
     """
     date_str = body.date or date.today().isoformat()
+    if body.date:
+        try:
+            date.fromisoformat(body.date)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="date must be in YYYY-MM-DD format.",
+            )
     creds = await get_google_credentials(current_user["id"])
     cal = CalendarService(creds)
 

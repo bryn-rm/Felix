@@ -8,9 +8,19 @@ for correct backend scoping.
 """
 
 import json as _json
+import re
 
 import asyncpg
 from app.config import settings
+
+_SAFE_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def _safe_id(name: str) -> str:
+    """Validate a SQL identifier (table or column name) against an allowlist pattern."""
+    if not _SAFE_IDENTIFIER.match(name):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return name
 
 _pool: asyncpg.Pool | None = None
 
@@ -83,7 +93,10 @@ async def upsert(table: str, data: dict, conflict_columns: list[str] | None = No
     if conflict_columns is None:
         conflict_columns = ["user_id"]
 
+    _safe_id(table)
     columns = list(data.keys())
+    for col in columns:
+        _safe_id(col)
     placeholders = [f"${i + 1}" for i in range(len(columns))]
     update_set = ", ".join(
         f"{col} = EXCLUDED.{col}"
@@ -107,7 +120,10 @@ async def upsert(table: str, data: dict, conflict_columns: list[str] | None = No
 
 async def insert(table: str, data: dict) -> dict | None:
     """INSERT a row and return it."""
+    _safe_id(table)
     columns = list(data.keys())
+    for col in columns:
+        _safe_id(col)
     placeholders = [f"${i + 1}" for i in range(len(columns))]
     sql = (
         f"INSERT INTO {table} ({', '.join(columns)}) "
@@ -122,8 +138,12 @@ async def insert(table: str, data: dict) -> dict | None:
 
 async def update(table: str, data: dict, where_column: str = "user_id") -> dict | None:
     """UPDATE a row identified by where_column and return it."""
+    _safe_id(table)
+    _safe_id(where_column)
     where_value = data[where_column]
     update_data = {k: v for k, v in data.items() if k != where_column}
+    for col in update_data:
+        _safe_id(col)
     set_clauses = [f"{col} = ${i + 1}" for i, col in enumerate(update_data.keys())]
     sql = (
         f"UPDATE {table} SET {', '.join(set_clauses)} "

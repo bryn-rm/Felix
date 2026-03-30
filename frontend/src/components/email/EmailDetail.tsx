@@ -32,16 +32,23 @@ function SafeHtmlBody({ html }: { html: string }) {
 
   useEffect(() => {
     // DOMPurify is browser-only — import dynamically
-    import("dompurify").then(({ default: DOMPurify }) => {
-      const clean = DOMPurify.sanitize(html, {
-        USE_PROFILES: { html: true },
-        FORBID_ATTR: ["style"],
-        FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
+    import("dompurify")
+      .then(({ default: DOMPurify }) => {
+        const clean = DOMPurify.sanitize(html, {
+          USE_PROFILES: { html: true },
+          FORBID_ATTR: ["style"],
+          FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form"],
+        });
+        if (ref.current) {
+          ref.current.innerHTML = clean;
+        }
+      })
+      .catch(() => {
+        // Fallback: render as plain text if DOMPurify fails to load
+        if (ref.current) {
+          ref.current.textContent = html;
+        }
       });
-      if (ref.current) {
-        ref.current.innerHTML = clean;
-      }
-    });
   }, [html]);
 
   return (

@@ -58,7 +58,7 @@ export function TranscriptDisplay({ messages }: TranscriptDisplayProps) {
     >
       {visible.map((msg, i) => (
         <div
-          key={i}
+          key={`${msg.role}-${msg.timestamp.getTime()}-${i}`}
           className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
         >
           {/* Avatar dot for Felix */}

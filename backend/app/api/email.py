@@ -272,29 +272,20 @@ async def generate_draft(
             yield f"data: {json.dumps({'error': 'Draft generation failed'})}\n\n"
             return
 
-        # Upsert so regeneration overwrites the previous draft
-        existing = await db.query_one(
-            "SELECT id FROM drafts WHERE email_id = $1 AND user_id = $2",
-            email_id, current_user["id"],
+        # Atomic upsert — avoids TOCTOU race if background sync generates a
+        # draft at the same moment the user triggers regeneration.
+        row = await db.upsert(
+            "drafts",
+            {
+                "email_id":   email_id,
+                "user_id":    current_user["id"],
+                "draft_text": full_text,
+                "status":     "pending",
+                "edited_text": None,
+            },
+            conflict_columns=["email_id", "user_id"],
         )
-        if existing:
-            await db.execute(
-                "UPDATE drafts SET draft_text = $1, status = 'pending', edited_text = NULL "
-                "WHERE email_id = $2 AND user_id = $3",
-                full_text, email_id, current_user["id"],
-            )
-            draft_id = str(existing["id"])
-        else:
-            row = await db.insert(
-                "drafts",
-                {
-                    "email_id":   email_id,
-                    "user_id":    current_user["id"],
-                    "draft_text": full_text,
-                    "status":     "pending",
-                },
-            )
-            draft_id = str(row["id"]) if row else ""
+        draft_id = str(row["id"]) if row else ""
 
         await db.execute(
             "UPDATE emails SET draft_generated = TRUE WHERE id = $1 AND user_id = $2",
@@ -413,7 +404,7 @@ async def send_email(
         "body":      send_text,
         "to":        email.get("from_email") or "",  # we're replying to the original sender
         "to_email":  email.get("from_email") or "",
-        "received_at": datetime.now(timezone.utc),
+        "received_at": sent_at,   # use the actual send time for deadline calculations
     }
     asyncio.create_task(
         _fu_engine.process_sent_email(current_user["id"], _sent_email_dict)

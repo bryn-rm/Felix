@@ -13,7 +13,9 @@ export default function ServiceWorkerRegistrar() {
       navigator.serviceWorker
         .register("/sw.js")
         .then((reg) => {
-          console.log("[Felix] Service worker registered:", reg.scope);
+          if (process.env.NODE_ENV === "development") {
+            console.log("[Felix] Service worker registered:", reg.scope);
+          }
         })
         .catch((err) => {
           console.warn("[Felix] Service worker registration failed:", err);

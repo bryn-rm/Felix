@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Mail,
   X,
@@ -45,6 +45,13 @@ export function FollowUpCard({ followUp, onUpdate }: FollowUpCardProps) {
 
   // Track last attempted action for the retry button
   const lastAction = useRef<(() => Promise<void>) | null>(null);
+
+  // Auto-dismiss success message after 3 seconds
+  useEffect(() => {
+    if (!successMsg) return;
+    const timer = setTimeout(() => setSuccessMsg(null), 3000);
+    return () => clearTimeout(timer);
+  }, [successMsg]);
 
   const days = daysFromNow(followUp.follow_up_by);
   const overdue = days !== null && days < 0;

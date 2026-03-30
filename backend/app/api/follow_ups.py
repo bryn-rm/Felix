@@ -197,7 +197,13 @@ async def update_follow_up(
     if body.auto_draft is not None:
         updates["auto_draft"] = body.auto_draft
     if body.follow_up_by is not None:
-        updates["follow_up_by"] = date_type.fromisoformat(body.follow_up_by)
+        try:
+            updates["follow_up_by"] = date_type.fromisoformat(body.follow_up_by)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="follow_up_by must be a valid date in YYYY-MM-DD format.",
+            )
 
     if not updates:
         return {"updated": False}
