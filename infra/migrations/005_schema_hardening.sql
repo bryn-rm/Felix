@@ -47,7 +47,7 @@ ALTER TABLE emails
 
 ALTER TABLE drafts
     ADD CONSTRAINT fk_drafts_email
-        FOREIGN KEY (email_id) REFERENCES emails(id) ON DELETE CASCADE,
+        FOREIGN KEY (email_id, user_id) REFERENCES emails(id, user_id) ON DELETE CASCADE,
     ADD CONSTRAINT ck_drafts_status CHECK (
         status IN ('pending', 'approved', 'sent', 'discarded')
     );
@@ -57,7 +57,7 @@ ALTER TABLE drafts
 
 ALTER TABLE follow_ups
     ADD CONSTRAINT fk_follow_ups_email
-        FOREIGN KEY (email_id) REFERENCES emails(id) ON DELETE CASCADE,
+        FOREIGN KEY (email_id, user_id) REFERENCES emails(id, user_id) ON DELETE CASCADE,
     ADD CONSTRAINT ck_follow_ups_status CHECK (
         status IN ('waiting', 'replied', 'followed_up', 'closed')
     );
