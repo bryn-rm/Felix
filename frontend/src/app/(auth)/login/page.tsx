@@ -10,10 +10,13 @@ export default function LoginPage() {
   async function handleSignIn() {
     setLoading(true);
     setError(null);
+    const appUrl =
+      process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ??
+      window.location.origin;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: `https://crispy-carnival-45w9xvwp64ph7756-3000.app.github.dev/auth/exchange`,
+        redirectTo: `${appUrl}/auth/exchange`,
       },
     });
     if (error) {
