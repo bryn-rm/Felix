@@ -193,6 +193,7 @@ Fill in `backend/.env` — every variable is documented in `.env.example`. Key o
 | `GOOGLE_REDIRECT_URI` | `http://localhost:8000/auth/google/callback` for local |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | Supabase → Settings → API |
 | `DATABASE_URL` | Supabase → Settings → Database → Connection string (Session mode) |
+| `FRONTEND_URL` | `http://localhost:3000` for local; in Codespaces set to your current frontend `https://<name>-3000.app.github.dev` URL |
 | `TOKEN_ENCRYPTION_KEY` | `openssl rand -hex 32` |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) |
 | `ELEVENLABS_API_KEY` / `FELIX_VOICE_ID` | [elevenlabs.io](https://elevenlabs.io) |

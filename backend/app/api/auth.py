@@ -232,7 +232,7 @@ async def google_callback(
         conflict_columns=["user_id"],
     )
 
-    return RedirectResponse(url="https://crispy-carnival-45w9xvwp64ph7756-3000.app.github.dev/dashboard")
+    return RedirectResponse(url=f"{settings.FRONTEND_URL}/dashboard")
 
 
 # ---------------------------------------------------------------------------

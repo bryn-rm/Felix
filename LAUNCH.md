@@ -70,7 +70,7 @@ TOKEN_ENCRYPTION_KEY=<run: openssl rand -hex 32>
 BACKEND_SECRET_KEY=<run: openssl rand -hex 32>
 
 # ── App ───────────────────────────────────────────────────────
-FRONTEND_URL=http://localhost:3000   # leave as-is for local dev
+FRONTEND_URL=http://localhost:3000   # for Codespaces, set this to your current frontend https://<name>-3000.app.github.dev URL
 ADMIN_EMAIL=                         # optional — your email to access /admin routes
 ```
 
@@ -83,6 +83,9 @@ cat > frontend/.env.local << 'EOF'
 NEXT_PUBLIC_API_URL=http://localhost:8000
 NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJh...
+# Optional override for OAuth redirects. If omitted, frontend uses window.location.origin.
+# In Codespaces you can set this to your current frontend URL: https://<name>-3000.app.github.dev
+NEXT_PUBLIC_APP_URL=
 EOF
 ```
 
