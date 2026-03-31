@@ -62,20 +62,27 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
     verified on callback to prevent CSRF attacks.
     """
     user_id = current_user["id"]
+    logger.info("[connect] step 1 — user authenticated: user_id=%s", user_id)
 
     # Generate a cryptographically random CSRF nonce
     nonce = secrets.token_urlsafe(32)
+    logger.info("[connect] step 2 — nonce generated: nonce=%s", nonce)
 
     # Store nonce with expiry (10 minutes) — scoped to this user
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-    await db.execute(
-        """
-        INSERT INTO oauth_nonces (user_id, nonce, expires_at)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (user_id) DO UPDATE SET nonce = $2, expires_at = $3
-        """,
-        user_id, nonce, expires_at,
-    )
+    try:
+        result = await db.execute(
+            """
+            INSERT INTO oauth_nonces (user_id, nonce, expires_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id) DO UPDATE SET nonce = $2, expires_at = $3
+            """,
+            user_id, nonce, expires_at,
+        )
+        logger.info("[connect] step 3 — nonce stored in oauth_nonces: db result=%s", result)
+    except Exception as exc:
+        logger.error("[connect] step 3 FAILED — could not insert nonce into oauth_nonces: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to store OAuth nonce. Check server logs.")
 
     # Encode both user_id and nonce in state so callback can verify
     state = f"{user_id}.{nonce}"
@@ -92,6 +99,7 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
     }
 
     auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+    logger.info("[connect] step 4 — returning auth_url to frontend (redirect_uri=%s)", settings.GOOGLE_REDIRECT_URI)
     return {"auth_url": auth_url}
 
 
@@ -224,7 +232,7 @@ async def google_callback(
         conflict_columns=["user_id"],
     )
 
-    return RedirectResponse(url=f"{settings.FRONTEND_URL}/onboarding")
+    return RedirectResponse(url="https://crispy-carnival-45w9xvwp64ph7756-3000.app.github.dev/dashboard")
 
 
 # ---------------------------------------------------------------------------

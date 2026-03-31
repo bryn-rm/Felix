@@ -13,7 +13,7 @@ export default function LoginPage() {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: `${window.location.origin}/auth/callback`,
+        redirectTo: `https://crispy-carnival-45w9xvwp64ph7756-3000.app.github.dev/auth/exchange`,
       },
     });
     if (error) {

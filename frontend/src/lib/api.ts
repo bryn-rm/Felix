@@ -24,13 +24,51 @@ export class ApiError extends Error {
 // ---------------------------------------------------------------------------
 
 async function getAuthHeader(): Promise<string> {
+  // Primary: read session from the Supabase client (localStorage-backed after supabase.ts change)
   const {
     data: { session },
   } = await supabase.auth.getSession();
-  if (!session?.access_token) {
-    throw new ApiError(401, "No active session");
+  if (session?.access_token) {
+    console.log("[api] getAuthHeader: token from getSession(), user =", session.user?.id);
+    return `Bearer ${session.access_token}`;
   }
-  return `Bearer ${session.access_token}`;
+  console.log("[api] getAuthHeader: getSession() returned no token, trying getUser()");
+
+  // Fallback 1: force a round-trip to Supabase to rehydrate the session
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (user) {
+    // getUser() succeeded — session should now be available
+    const { data: { session: refreshed } } = await supabase.auth.getSession();
+    if (refreshed?.access_token) {
+      console.log("[api] getAuthHeader: token from getUser() rehydration, user =", user.id);
+      return `Bearer ${refreshed.access_token}`;
+    }
+  }
+  console.log("[api] getAuthHeader: getUser() also returned no session, trying localStorage");
+
+  // Fallback 2: read directly from localStorage using the Supabase key convention
+  if (typeof window !== "undefined") {
+    const storageKey = `sb-${process.env.NEXT_PUBLIC_SUPABASE_URL?.split("//")[1]?.split(".")[0]}-auth-token`;
+    const stored = localStorage.getItem(storageKey);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (parsed?.access_token) {
+          console.log("[api] getAuthHeader: token from localStorage key =", storageKey);
+          return `Bearer ${parsed.access_token}`;
+        }
+      } catch {
+        console.log("[api] getAuthHeader: localStorage parse failed for key =", storageKey);
+      }
+    } else {
+      console.log("[api] getAuthHeader: nothing in localStorage at key =", storageKey);
+    }
+  }
+
+  console.log("[api] getAuthHeader: all fallbacks exhausted — no token found");
+  throw new ApiError(401, "No active session");
 }
 
 async function request<T>(
