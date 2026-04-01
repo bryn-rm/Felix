@@ -47,6 +47,20 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
+def _frontend_redirect_url(path: str, query_params: dict[str, str] | None = None) -> str:
+    """
+    Build a frontend redirect URL from FRONTEND_URL and a relative path.
+
+    This guarantees success/error redirects always use the same configured host
+    and avoids trailing-slash mismatches in FRONTEND_URL.
+    """
+    base_url = settings.FRONTEND_URL.rstrip("/")
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    if query_params:
+        return f"{base_url}{normalized_path}?{urlencode(query_params)}"
+    return f"{base_url}{normalized_path}"
+
+
 # ---------------------------------------------------------------------------
 # Step 1: initiate Google OAuth
 # ---------------------------------------------------------------------------
@@ -122,7 +136,10 @@ async def google_callback(
     """
     if error:
         return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/settings?google_error={error}"
+            url=_frontend_redirect_url(
+                "/settings",
+                {"google_error": error},
+            )
         )
 
     # Parse state: "<user_id>.<nonce>"
@@ -232,7 +249,7 @@ async def google_callback(
         conflict_columns=["user_id"],
     )
 
-    return RedirectResponse(url=f"{settings.FRONTEND_URL}/dashboard")
+    return RedirectResponse(url=_frontend_redirect_url("/dashboard"))
 
 
 # ---------------------------------------------------------------------------
