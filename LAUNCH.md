@@ -127,7 +127,10 @@ Run them **in order**, one at a time.
 1. Supabase dashboard → **Authentication** → **Providers** → **Google**
 2. Toggle **Enable**
 3. Paste your `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` from Step 1
-4. Copy the **Callback URL** shown — you'll need it in the next step
+4. In **Authentication → URL Configuration**, add your app callback URL exactly:
+   - Local: `http://localhost:3000/auth/callback`
+   - Production: `https://your-frontend-domain/auth/callback`
+5. Copy the **Callback URL** shown — you'll need it in the next step
 
 ---
 
