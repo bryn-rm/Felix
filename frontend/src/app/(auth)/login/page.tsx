@@ -3,6 +3,12 @@
 import { useState } from "react";
 import { supabase } from "@/lib/supabase";
 
+const features = [
+  "Triages your inbox so you focus on what matters",
+  "Drafts replies in your voice",
+  "Briefs you every morning on your day ahead",
+];
+
 export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,81 +30,127 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="min-h-screen flex items-center justify-center bg-[#0f172a]">
-      <div className="flex flex-col items-center gap-8 px-6 py-12 rounded-2xl bg-[#1e293b] shadow-2xl w-full max-w-sm">
-        {/* Felix logo — indigo squircle with white F */}
+    <main className="min-h-screen flex flex-col lg:flex-row bg-[#0f172a]">
+      {/* ── LEFT PANEL ── */}
+      <div className="relative flex flex-col justify-center px-8 py-14 lg:py-0 lg:px-16 lg:w-[60%] overflow-hidden">
+        {/* Soft radial glow — bottom-left */}
+        <div className="pointer-events-none absolute -bottom-40 -left-40 w-[600px] h-[600px] rounded-full bg-indigo-600/10 blur-3xl" />
+        {/* Dot grid */}
         <div
-          className="flex items-center justify-center rounded-[22px] bg-indigo-600 shadow-lg shadow-indigo-500/30"
-          style={{ width: 72, height: 72 }}
-        >
-          <svg
-            viewBox="0 0 40 40"
-            width={36}
-            height={36}
-            fill="none"
-            aria-label="Felix"
-          >
-            <text
-              x="50%"
-              y="50%"
-              dominantBaseline="central"
-              textAnchor="middle"
-              fill="white"
-              fontSize="26"
-              fontWeight="700"
-              fontFamily="system-ui, sans-serif"
-            >
-              F
-            </text>
-          </svg>
-        </div>
+          className="pointer-events-none absolute inset-0 opacity-[0.06]"
+          style={{
+            backgroundImage:
+              "radial-gradient(circle, #818cf8 1px, transparent 1px)",
+            backgroundSize: "28px 28px",
+          }}
+        />
 
-        <div className="text-center">
-          <h1 className="text-2xl font-bold text-[#f1f5f9] tracking-tight">
-            Felix
+        <div className="relative z-10 max-w-lg">
+          {/* Logo + wordmark */}
+          <div className="flex items-center gap-4 mb-10">
+            <img
+              src="/icon-512.png"
+              alt="Felix icon"
+              width={64}
+              height={64}
+              className="rounded-2xl shadow-lg shadow-indigo-500/20 flex-shrink-0"
+            />
+            <span className="text-[2.5rem] font-bold text-[#f1f5f9] tracking-tight leading-none">
+              Felix
+            </span>
+          </div>
+
+          {/* Tagline */}
+          <h1 className="text-3xl lg:text-[2.6rem] font-bold text-[#f1f5f9] leading-tight mb-4">
+            Your AI chief of staff for email and calendar
           </h1>
-          <p className="mt-1 text-sm text-[#94a3b8]">
-            Your AI chief of staff
+          <p className="text-[#94a3b8] text-lg mb-10 leading-relaxed">
+            Stop drowning in email. Start getting things done.
           </p>
+
+          {/* Feature highlights */}
+          <ul className="space-y-5">
+            {features.map((feature) => (
+              <li key={feature} className="flex items-start gap-3.5">
+                <span className="mt-0.5 flex-shrink-0 w-6 h-6 rounded-full bg-indigo-600/20 border border-indigo-500/40 flex items-center justify-center">
+                  <svg
+                    viewBox="0 0 12 12"
+                    width={10}
+                    height={10}
+                    fill="none"
+                    stroke="#818cf8"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden
+                  >
+                    <polyline points="2 6 5 9 10 3" />
+                  </svg>
+                </span>
+                <span className="text-[#cbd5e1] text-base leading-snug">
+                  {feature}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
+      </div>
 
-        {error && (
-          <p className="w-full rounded-lg bg-red-900/40 border border-red-700/50 px-4 py-3 text-sm text-red-300">
-            {error}
-          </p>
-        )}
+      {/* ── RIGHT PANEL ── */}
+      <div className="flex items-center justify-center px-6 py-10 lg:py-0 lg:w-[40%]">
+        <div className="w-full max-w-sm">
+          <div className="rounded-2xl bg-[#1e293b] border border-white/[0.06] shadow-2xl px-8 py-10">
+            <h2 className="text-2xl font-bold text-[#f1f5f9] mb-1">
+              Welcome back
+            </h2>
+            <p className="text-sm text-[#94a3b8] mb-8">
+              Sign in to continue to Felix
+            </p>
 
-        <button
-          onClick={handleSignIn}
-          disabled={loading}
-          className="flex items-center justify-center gap-3 w-full rounded-xl bg-white hover:bg-gray-100 disabled:opacity-60 disabled:cursor-wait transition-colors px-5 py-3 text-sm font-semibold text-gray-800 shadow"
-        >
-          {/* Google "G" icon */}
-          <svg viewBox="0 0 24 24" width={18} height={18} aria-hidden>
-            <path
-              d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-              fill="#4285F4"
-            />
-            <path
-              d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-              fill="#34A853"
-            />
-            <path
-              d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"
-              fill="#FBBC05"
-            />
-            <path
-              d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
-              fill="#EA4335"
-            />
-          </svg>
-          {loading ? "Redirecting…" : "Sign in with Google"}
-        </button>
+            {error && (
+              <p className="mb-6 rounded-lg bg-red-900/40 border border-red-700/50 px-4 py-3 text-sm text-red-300">
+                {error}
+              </p>
+            )}
 
-        <p className="text-xs text-[#94a3b8] text-center">
-          By signing in you agree to let Felix access your Gmail and Calendar to
-          act as your chief of staff.
-        </p>
+            <button
+              onClick={handleSignIn}
+              disabled={loading}
+              className="flex items-center justify-center gap-3 w-full rounded-xl bg-white hover:bg-gray-50 disabled:opacity-60 disabled:cursor-wait px-5 py-3.5 text-sm font-semibold text-gray-800 shadow-md transition-all duration-150 hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0"
+            >
+              <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+                <path
+                  fill="#4285F4"
+                  d="M16.51 8H8.98v3h4.3c-.18 1-.74 1.48-1.6 2.04v2.01h2.6a7.8 7.8 0 0 0 2.38-5.88c0-.57-.05-.66-.15-1.18z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M8.98 17c2.16 0 3.97-.72 5.3-1.94l-2.6-2a4.8 4.8 0 0 1-7.18-2.54H1.83v2.07A8 8 0 0 0 8.98 17z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M4.5 10.52a4.8 4.8 0 0 1 0-3.04V5.41H1.83a8 8 0 0 0 0 7.18l2.67-2.07z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M8.98 4.18c1.17 0 2.23.4 3.06 1.2l2.3-2.3A8 8 0 0 0 1.83 5.4L4.5 7.49a4.77 4.77 0 0 1 4.48-3.31z"
+                />
+              </svg>
+              {loading ? "Redirecting…" : "Continue with Google"}
+            </button>
+
+            <p className="mt-6 text-xs text-[#475569] text-center">
+              By signing in you agree to Felix being awesome
+            </p>
+
+            <div className="mt-6 pt-6 border-t border-white/[0.06]">
+              <p className="text-xs text-[#475569] text-center leading-relaxed">
+                Your data stays private. Felix connects to your Google account
+                with read and send permissions only.
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
   );
