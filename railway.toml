@@ -1,6 +1,11 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install -r backend/requirements.txt"
+
+[build.nixpacksPlan.phases.setup]
+nixPkgs = ["python312", "python312Packages.pip"]
+
+[build.nixpacksPlan.phases.install]
+cmds = ["cd backend && pip install -r requirements.txt"]
 
 [deploy]
-startCommand = "uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT"
+startCommand = "cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
