@@ -1,16 +1,83 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --felix-background: #0f172a;
-  --felix-surface: #1e293b;
-  --felix-accent: #4f46e5;
-  --felix-text-primary: #f1f5f9;
-  --felix-text-muted: #94a3b8;
+  --felix-bg-deep: #080f1e;
+  --felix-bg-panel: #0d1526;
+  --felix-accent: #6366f1;
+  --felix-accent-dim: #4f46e5;
+  --felix-text-bright: #f0f4ff;
+  --felix-text-heading: #e8edf8;
+  --felix-text-muted: #6b7fa3;
+  --felix-text-dim: #3d4f6b;
+  --felix-text-ghost: #2d3a52;
+  --felix-text-footer: #1e2d45;
+  --felix-border: rgba(255, 255, 255, 0.04);
 }
 
 body {
-  background-color: var(--felix-background);
-  color: var(--felix-text-primary);
+  background-color: var(--felix-bg-deep);
+  color: var(--felix-text-bright);
+  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+}
+
+/* ── Mesh gradient animation ── */
+@keyframes meshMove {
+  0% {
+    transform: translate(0%, 0%) rotate(0deg) scale(1);
+  }
+  25% {
+    transform: translate(5%, -8%) rotate(90deg) scale(1.1);
+  }
+  50% {
+    transform: translate(-3%, 5%) rotate(180deg) scale(0.95);
+  }
+  75% {
+    transform: translate(-7%, -3%) rotate(270deg) scale(1.05);
+  }
+  100% {
+    transform: translate(0%, 0%) rotate(360deg) scale(1);
+  }
+}
+
+/* ── Staggered fade-up entrance ── */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.felix-fade-up {
+  opacity: 0;
+  animation: fadeUp 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.felix-delay-0 { animation-delay: 0ms; }
+.felix-delay-1 { animation-delay: 80ms; }
+.felix-delay-2 { animation-delay: 160ms; }
+.felix-delay-3 { animation-delay: 240ms; }
+.felix-delay-4 { animation-delay: 320ms; }
+.felix-delay-5 { animation-delay: 400ms; }
+.felix-delay-6 { animation-delay: 480ms; }
+
+/* ── Google button hover lift ── */
+.felix-google-btn {
+  transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.felix-google-btn:hover:not(:disabled) {
+  transform: scale(1.01);
+  box-shadow: 0 8px 30px rgba(99, 102, 241, 0.12),
+              0 2px 8px rgba(0, 0, 0, 0.3);
+}
+.felix-google-btn:active:not(:disabled) {
+  transform: scale(0.995);
 }
