@@ -206,6 +206,27 @@ NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 ```
 
+### Codespaces OAuth checklist (important)
+
+Codespaces uses different public hosts per port (for example `...-3000.app.github.dev` for frontend and `...-8000.app.github.dev` for backend). A mismatch in any URL below causes OAuth errors or 404s.
+
+1. **Supabase Auth → URL Configuration**
+   - Site URL: your current frontend host (port 3000), e.g. `https://<codespace>-3000.app.github.dev`
+   - Redirect URLs (allow list): include **exactly**:
+     - `https://<codespace>-3000.app.github.dev/auth/callback` (Supabase sign-in callback)
+2. **Do not use `/auth/exchange` in Supabase redirect URLs**
+   - Felix uses `/auth/callback` (see `frontend/src/app/auth/callback/page.tsx`).
+3. **Google Cloud OAuth client (Credentials → Web application)**
+   - Authorized redirect URI must include your backend callback URL:
+     - `https://<codespace>-8000.app.github.dev/auth/google/callback`
+4. **Backend env (`backend/.env`)**
+   - `GOOGLE_REDIRECT_URI` must match the Google OAuth redirect URI above exactly.
+   - `FRONTEND_URL` must match the frontend 3000 host exactly (no trailing slash).
+5. **Frontend env (`frontend/.env.local`)**
+   - `NEXT_PUBLIC_API_URL` must match backend 8000 host exactly.
+6. **After each Codespace restart**
+   - Re-check all URLs above; if hostname changed, update Supabase + GCP + env vars.
+
 ### 4. Run locally
 
 **Backend:**

@@ -16,9 +16,10 @@ export default function LoginPage() {
   async function handleSignIn() {
     setLoading(true);
     setError(null);
-    const appUrl =
-      process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ??
-      window.location.origin;
+    // Always use the live browser origin for OAuth callbacks.
+    // In GitHub Codespaces, hostnames can change between restarts; relying on
+    // a static env var often causes Supabase to redirect to an old hostname.
+    const appUrl = window.location.origin.replace(/\/$/, "");
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
