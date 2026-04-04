@@ -233,7 +233,7 @@ async def google_callback(
         )
 
     # Compute expiry timestamp
-    token_expiry = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
 
     # Encrypt + persist — upsert so reconnecting overwrites existing row
     await db.upsert(
@@ -244,7 +244,7 @@ async def google_callback(
             "access_token": encrypt_token(access_token),
             "refresh_token": encrypt_token(refresh_token),
             "token_expiry": token_expiry,
-            "connected_at": datetime.now(timezone.utc).isoformat(),
+            "connected_at": datetime.now(timezone.utc),
         },
         conflict_columns=["user_id"],
     )
