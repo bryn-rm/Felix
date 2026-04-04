@@ -61,6 +61,10 @@ export interface CalendarEvent {
   location: string | null;
   description: string | null;
   is_focus_block: boolean;
+  hangout_link?: string | null;
+  html_link?: string | null;
+  organizer?: string | null;
+  status?: string | null;
 }
 
 export interface Briefing {

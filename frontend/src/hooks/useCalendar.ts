@@ -10,13 +10,12 @@ function addDays(date: Date, days: number): Date {
   return d;
 }
 
-function isoDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
+export function useCalendar(weekStart: Date) {
+  const weekEndExclusive = addDays(weekStart, 7);
+  const url = `/calendar/events?time_min=${encodeURIComponent(weekStart.toISOString())}&time_max=${encodeURIComponent(weekEndExclusive.toISOString())}`;
 
-export function useCalendar(_weekStart: Date) {
   const { data, error, isLoading } = useSWR<{ events: CalendarEvent[]; count: number }>(
-    `/calendar/events?days_ahead=14`,
+    url,
     (url: string) => api.get<{ events: CalendarEvent[]; count: number }>(url),
   );
 
