@@ -79,36 +79,34 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
     logger.info("[connect] step 1 — user authenticated: user_id=%s", user_id)
 
-    # Reuse an existing non-expired nonce if one exists, otherwise generate a new one.
-    # ON CONFLICT DO NOTHING prevents a double-click from overwriting the first
-    # nonce while Google is still redirecting back with it in the state parameter.
+    # Reuse an existing non-expired nonce if one exists, so that if Google
+    # returns a callback with an older authorization code the nonce still matches.
     existing = await db.query_one(
         "SELECT nonce, expires_at FROM oauth_nonces WHERE user_id = $1",
         user_id,
     )
-    if existing and existing["expires_at"].replace(tzinfo=timezone.utc) > datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    expires_at_val = existing["expires_at"] if existing else None
+    if expires_at_val is not None and expires_at_val.tzinfo is None:
+        expires_at_val = expires_at_val.replace(tzinfo=timezone.utc)
+
+    if existing and expires_at_val and expires_at_val > now:
         nonce = existing["nonce"]
-        logger.info("[connect] step 2 — reusing existing nonce: nonce=%s", nonce)
+        logger.info("[connect] step 2 — reusing existing unexpired nonce: nonce=%s", nonce)
     else:
         nonce = secrets.token_urlsafe(32)
         logger.info("[connect] step 2 — nonce generated: nonce=%s", nonce)
 
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        expires_at = now + timedelta(minutes=10)
         try:
             await db.execute(
                 """
                 INSERT INTO oauth_nonces (user_id, nonce, expires_at)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (user_id) DO NOTHING
+                ON CONFLICT (user_id) DO UPDATE SET nonce = $2, expires_at = $3
                 """,
                 user_id, nonce, expires_at,
             )
-            # Re-read in case a concurrent request won the insert race
-            row = await db.query_one(
-                "SELECT nonce FROM oauth_nonces WHERE user_id = $1",
-                user_id,
-            )
-            nonce = row["nonce"]
             logger.info("[connect] step 3 — nonce stored in oauth_nonces")
         except Exception as exc:
             logger.error("[connect] step 3 FAILED — could not insert nonce into oauth_nonces: %s", exc, exc_info=True)
