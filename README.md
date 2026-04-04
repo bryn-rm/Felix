@@ -7,6 +7,14 @@
 
 An AI email and calendar chief of staff. Felix connects to your Gmail and Google Calendar, triages your inbox, drafts replies in your voice, tracks follow-ups, and gives you a spoken morning briefing. Invite-only, fully self-hosted, every user's data is completely siloed.
 
+## Screenshots
+
+### Dashboard
+![Dashboard](docs/screenshots/dashboard.jpeg)
+
+### Landing Page
+![Landing Page](docs/screenshots/landing-page.jpeg)
+
 ---
 
 ## What it does
