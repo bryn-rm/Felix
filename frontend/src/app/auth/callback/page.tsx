@@ -11,15 +11,6 @@ export default function CallbackPage() {
 
   useEffect(() => {
     console.log("[callback] component mounted, URL:", window.location.href);
-    let handled = false;
-
-    const timeout = setTimeout(() => {
-      if (!handled) {
-        handled = true;
-        console.log("[callback] timed out after 10s — no session detected");
-        setError("Sign in timed out. Please try again.");
-      }
-    }, 10_000);
 
     async function navigateWithSession(session: { access_token: string }) {
       console.log("[callback] session acquired, navigating...", session.access_token.slice(0, 10) + "...");
@@ -31,33 +22,39 @@ export default function CallbackPage() {
       }
     }
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        console.log("[callback] onAuthStateChange:", event, "session:", !!session);
-        if (handled) return;
-        if (event === "SIGNED_IN" && session) {
-          handled = true;
-          clearTimeout(timeout);
-          await navigateWithSession(session);
+    async function handleCallback() {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get("code");
+
+      if (code) {
+        console.log("[callback] found code in URL, exchanging...", code.slice(0, 10) + "...");
+        const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+        console.log("[callback] exchangeCodeForSession result — session:", !!data.session, "error:", error?.message ?? "none");
+
+        if (error) {
+          setError(error.message);
+          return;
         }
-      },
-    );
 
-    // Trigger URL detection in case the auth state change already fired
-    supabase.auth.getSession().then(({ data: { session }, error }) => {
-      console.log("[callback] getSession() result — session:", !!session, "error:", error?.message ?? "none");
-      if (handled) return;
-      if (session) {
-        handled = true;
-        clearTimeout(timeout);
-        navigateWithSession(session);
+        if (data.session) {
+          await navigateWithSession(data.session);
+          return;
+        }
       }
-    });
 
-    return () => {
-      clearTimeout(timeout);
-      subscription.unsubscribe();
-    };
+      // Fallback: no code in URL, check for existing session
+      console.log("[callback] no code in URL, trying getSession() fallback");
+      const { data: { session }, error } = await supabase.auth.getSession();
+      console.log("[callback] getSession() result — session:", !!session, "error:", error?.message ?? "none");
+
+      if (session) {
+        await navigateWithSession(session);
+      } else {
+        setError(error?.message ?? "Sign in failed. Please try again.");
+      }
+    }
+
+    handleCallback();
   }, [router]);
 
   if (error) {
