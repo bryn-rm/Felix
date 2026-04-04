@@ -160,6 +160,7 @@ async def google_callback(
         try:
             user_id, nonce = state.split(".", 1)
         except ValueError:
+            logger.warning("[callback] invalid OAuth state format: state=%s", state)
             raise HTTPException(status_code=400, detail="Invalid OAuth state parameter.")
 
         # Verify nonce — must exist, belong to this user, and not be expired
@@ -168,10 +169,17 @@ async def google_callback(
             user_id,
         )
         if not nonce_row:
+            logger.warning("[callback] nonce row not found for user_id=%s", user_id)
             raise HTTPException(status_code=400, detail="OAuth state not found. Please try connecting again.")
 
         if nonce_row["nonce"] != nonce:
-            raise HTTPException(status_code=400, detail="OAuth state mismatch. Possible CSRF attack.")
+            logger.warning(
+                "[callback] nonce mismatch for user_id=%s expected=%s received=%s",
+                user_id,
+                nonce_row["nonce"],
+                nonce,
+            )
+            raise HTTPException(status_code=400, detail="OAuth state mismatch. Please retry Google connect.")
 
         expires_at = nonce_row["expires_at"]
         # asyncpg returns timezone-aware datetimes; ensure comparison is tz-aware
@@ -179,6 +187,7 @@ async def google_callback(
             from datetime import timezone as _tz
             expires_at = expires_at.replace(tzinfo=_tz.utc)
         if datetime.now(timezone.utc) > expires_at:
+            logger.warning("[callback] nonce expired for user_id=%s expires_at=%s", user_id, expires_at)
             raise HTTPException(status_code=400, detail="OAuth state expired. Please try connecting again.")
 
         logger.info("[callback] nonce verified successfully for user_id=%s", user_id)
@@ -270,8 +279,17 @@ async def google_callback(
         logger.info("[callback] success — redirecting user_id=%s to /dashboard", user_id)
         return RedirectResponse(url=_frontend_redirect_url("/dashboard"))
 
-    except HTTPException:
-        raise
+    except HTTPException as exc:
+        logger.warning("[callback] handled HTTPException status=%s detail=%s", exc.status_code, exc.detail)
+        return RedirectResponse(
+            url=_frontend_redirect_url(
+                "/settings",
+                {
+                    "google_error": "oauth_callback_failed",
+                    "reason": str(exc.detail),
+                },
+            )
+        )
     except Exception as exc:
         logger.error("[callback] unexpected error: %s\n%s", exc, traceback.format_exc())
         raise
