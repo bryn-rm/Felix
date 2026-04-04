@@ -7,7 +7,7 @@ updates these values.
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 
 import pytz
 from fastapi import APIRouter, Depends, HTTPException
@@ -28,6 +28,11 @@ router = APIRouter()
 _DIGEST_TIME_RE = re.compile(r"^([01]\d|2[0-3]):(00|30)$")
 _BRIEFING_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _parse_time(value: str) -> time:
+    """Convert HH:MM string into a datetime.time object for Postgres TIME columns."""
+    return time.fromisoformat(value.strip())
 
 
 class SettingsUpdate(BaseModel):
@@ -100,8 +105,8 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
                 "user_id": current_user["id"],
                 "display_name": current_user.get("metadata", {}).get("full_name", ""),
                 "timezone": "Europe/London",
-                "briefing_time": "07:30",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "briefing_time": _parse_time("07:30"),
+                "updated_at": datetime.now(timezone.utc),
             },
         )
     return row
@@ -117,8 +122,11 @@ async def update_settings(
     if not updates:
         return {"updated": False}
 
+    if "briefing_time" in updates:
+        updates["briefing_time"] = _parse_time(updates["briefing_time"])
+
     updates["user_id"] = current_user["id"]
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updates["updated_at"] = datetime.now(timezone.utc)
 
     row = await db.upsert("settings", updates, conflict_columns=["user_id"])
     return row
@@ -139,7 +147,7 @@ async def analyse_writing_style(
         {
             "user_id": user_id,
             "style_profile": result,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc),
         },
         conflict_columns=["user_id"],
     )
@@ -157,7 +165,7 @@ async def update_vip_contacts(
         {
             "user_id": current_user["id"],
             "vip_contacts": body.vip_contacts,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc),
         },
         conflict_columns=["user_id"],
     )
