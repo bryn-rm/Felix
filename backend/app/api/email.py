@@ -69,6 +69,8 @@ async def list_emails(
     List processed emails from the local DB, newest first.
     The background sync job keeps this table up to date.
     """
+    await _ensure_google_connected(current_user["id"])
+
     conditions = ["e.user_id = $1"]
     args: list = [current_user["id"]]
     idx = 2
@@ -120,6 +122,19 @@ async def list_emails(
     return {"emails": rows, "total": total_count, "limit": limit, "offset": offset}
 
 
+@router.get("/", include_in_schema=False)
+async def list_emails_trailing_slash(
+    category: str | None = Query(None, description="Filter by triage category"),
+    urgency: str | None = Query(None),
+    draft_pending: bool | None = Query(None, description="Only emails with a pending draft"),
+    limit: int = Query(50, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user),
+):
+    """Alias for clients requesting /emails/ with a trailing slash."""
+    return await list_emails(category, urgency, draft_pending, limit, offset, current_user)
+
+
 # ---------------------------------------------------------------------------
 # GET /emails/stats
 # ---------------------------------------------------------------------------
@@ -148,6 +163,38 @@ async def email_stats(current_user: dict = Depends(get_current_user)):
     return {
         "by_category": counts,
         "pending_drafts": pending_drafts["count"] if pending_drafts else 0,
+    }
+
+
+@router.get("/counts")
+async def email_counts(current_user: dict = Depends(get_current_user)):
+    """
+    Return compact counters used by the sidebar badges in the frontend.
+    """
+    await _ensure_google_connected(current_user["id"])
+
+    action_required_row = await db.query_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM emails
+        WHERE user_id = $1 AND category = 'action_required'
+        """,
+        current_user["id"],
+    )
+    overdue_followups_row = await db.query_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM follow_ups
+        WHERE user_id = $1
+          AND status = 'waiting'
+          AND follow_up_by IS NOT NULL
+          AND follow_up_by < NOW()
+        """,
+        current_user["id"],
+    )
+    return {
+        "action_required": action_required_row["count"] if action_required_row else 0,
+        "overdue_followups": overdue_followups_row["count"] if overdue_followups_row else 0,
     }
 
 
@@ -435,3 +482,8 @@ async def discard_draft(
         draft["id"], current_user["id"],
     )
     return {"discarded": True}
+
+
+async def _ensure_google_connected(user_id: str) -> None:
+    """Raise HTTP 403 with a clear message when Google is not connected."""
+    await get_google_credentials(user_id)

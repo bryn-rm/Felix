@@ -218,7 +218,7 @@ async def google_callback(
             )
         access_token = tokens["access_token"]
         refresh_token = tokens.get("refresh_token")
-        expires_in = tokens.get("expires_in", 3600)
+        expires_in = int(tokens.get("expires_in", 3600))
         logger.info("[callback] tokens received: has_access=%s has_refresh=%s expires_in=%s", bool(access_token), bool(refresh_token), expires_in)
 
         if not refresh_token:
@@ -249,6 +249,8 @@ async def google_callback(
 
         # Compute expiry timestamp
         token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        if not isinstance(token_expiry, datetime):
+            raise HTTPException(status_code=502, detail="Invalid token expiry returned by Google OAuth.")
 
         # Encrypt + persist — upsert so reconnecting overwrites existing row
         logger.info("[callback] storing credentials for user_id=%s google_email=%s", user_id, google_email)

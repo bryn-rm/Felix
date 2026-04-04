@@ -46,6 +46,8 @@ async def list_follow_ups(
     current_user: dict = Depends(get_current_user),
 ):
     """Return follow-ups for this user filtered by status, oldest deadline first."""
+    await get_google_credentials(current_user["id"])
+
     valid_statuses = {"waiting", "replied", "followed_up", "closed"}
     if status not in valid_statuses:
         raise HTTPException(
@@ -65,6 +67,15 @@ async def list_follow_ups(
         status,
     )
     return {"follow_ups": rows, "count": len(rows)}
+
+
+@router.get("/", include_in_schema=False)
+async def list_follow_ups_trailing_slash(
+    status: str = Query("waiting", description="waiting | replied | followed_up | closed"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Alias for clients requesting /follow-ups/ with a trailing slash."""
+    return await list_follow_ups(status, current_user)
 
 
 # ---------------------------------------------------------------------------

@@ -89,7 +89,16 @@ async def today_summary(current_user: dict = Depends(get_current_user)):
     user_tz: str = (settings or {}).get("timezone") or "UTC"
     energy_profile: dict = (settings or {}).get("energy_profile") or {}
 
-    creds = await get_google_credentials(user_id)
+    try:
+        creds = await get_google_credentials(user_id)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            raise HTTPException(
+                status_code=403,
+                detail="Google Calendar is not connected or access expired. Reconnect your Google account in Settings.",
+            )
+        raise
+
     cal = CalendarService(creds)
 
     try:
