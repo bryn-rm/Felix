@@ -10,31 +10,49 @@ export default function CallbackPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    console.log("[callback] component mounted, URL:", window.location.href);
     let handled = false;
 
     const timeout = setTimeout(() => {
       if (!handled) {
         handled = true;
+        console.log("[callback] timed out after 10s — no session detected");
         setError("Sign in timed out. Please try again.");
       }
     }, 10_000);
 
+    async function navigateWithSession(session: { access_token: string }) {
+      console.log("[callback] session acquired, navigating...", session.access_token.slice(0, 10) + "...");
+      try {
+        const status = await api.get<{ connected: boolean }>("/auth/google/status");
+        router.replace(status.connected ? "/dashboard" : "/connect");
+      } catch {
+        router.replace("/connect");
+      }
+    }
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        console.log("[callback] onAuthStateChange:", event, "session:", !!session);
         if (handled) return;
         if (event === "SIGNED_IN" && session) {
           handled = true;
           clearTimeout(timeout);
-
-          try {
-            const status = await api.get<{ connected: boolean }>("/auth/google/status");
-            router.replace(status.connected ? "/dashboard" : "/connect");
-          } catch {
-            router.replace("/connect");
-          }
+          await navigateWithSession(session);
         }
       },
     );
+
+    // Trigger URL detection in case the auth state change already fired
+    supabase.auth.getSession().then(({ data: { session }, error }) => {
+      console.log("[callback] getSession() result — session:", !!session, "error:", error?.message ?? "none");
+      if (handled) return;
+      if (session) {
+        handled = true;
+        clearTimeout(timeout);
+        navigateWithSession(session);
+      }
+    });
 
     return () => {
       clearTimeout(timeout);
