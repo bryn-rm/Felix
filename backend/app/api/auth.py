@@ -78,27 +78,41 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
     logger.info("[connect] step 1 — user authenticated: user_id=%s", user_id)
 
-    # Generate a cryptographically random CSRF nonce
-    nonce = secrets.token_urlsafe(32)
-    logger.info("[connect] step 2 — nonce generated: nonce=%s", nonce)
+    # Reuse an existing non-expired nonce if one exists, otherwise generate a new one.
+    # ON CONFLICT DO NOTHING prevents a double-click from overwriting the first
+    # nonce while Google is still redirecting back with it in the state parameter.
+    existing = await db.query_one(
+        "SELECT nonce, expires_at FROM oauth_nonces WHERE user_id = $1",
+        user_id,
+    )
+    if existing and existing["expires_at"].replace(tzinfo=timezone.utc) > datetime.now(timezone.utc):
+        nonce = existing["nonce"]
+        logger.info("[connect] step 2 — reusing existing nonce: nonce=%s", nonce)
+    else:
+        nonce = secrets.token_urlsafe(32)
+        logger.info("[connect] step 2 — nonce generated: nonce=%s", nonce)
 
-    # Store nonce with expiry (10 minutes) — scoped to this user
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-    try:
-        result = await db.execute(
-            """
-            INSERT INTO oauth_nonces (user_id, nonce, expires_at)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (user_id) DO UPDATE SET nonce = $2, expires_at = $3
-            """,
-            user_id, nonce, expires_at,
-        )
-        logger.info("[connect] step 3 — nonce stored in oauth_nonces: db result=%s", result)
-    except Exception as exc:
-        logger.error("[connect] step 3 FAILED — could not insert nonce into oauth_nonces: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to store OAuth nonce. Check server logs.")
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        try:
+            await db.execute(
+                """
+                INSERT INTO oauth_nonces (user_id, nonce, expires_at)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO NOTHING
+                """,
+                user_id, nonce, expires_at,
+            )
+            # Re-read in case a concurrent request won the insert race
+            row = await db.query_one(
+                "SELECT nonce FROM oauth_nonces WHERE user_id = $1",
+                user_id,
+            )
+            nonce = row["nonce"]
+            logger.info("[connect] step 3 — nonce stored in oauth_nonces")
+        except Exception as exc:
+            logger.error("[connect] step 3 FAILED — could not insert nonce into oauth_nonces: %s", exc, exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to store OAuth nonce. Check server logs.")
 
-    # Encode both user_id and nonce in state so callback can verify
     state = f"{user_id}.{nonce}"
 
     params = {
