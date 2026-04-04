@@ -13,6 +13,8 @@ Possible intents:
 - summarise_inbox   : user wants a quick summary of their inbox state
 - start_meeting_notes : user wants to begin recording notes for a current meeting
 - follow_up_with    : user wants to create a follow-up reminder for a person or topic
+- check_calendar    : user wants to know what meetings or events they have (extract timeframe)
+- general_question  : anything that does not fit the above categories
 
 Return a JSON object:
 {{

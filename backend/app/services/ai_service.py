@@ -213,6 +213,29 @@ class AIService:
             return {"intent": "general_question", "raw_transcript": transcript}
 
     # ------------------------------------------------------------------
+    # General voice question — Haiku (conversational fallback)
+    # ------------------------------------------------------------------
+
+    async def answer_general_voice_question(self, transcript: str, user_name: str) -> str:
+        """Generate a short conversational response for questions that don't match a structured intent."""
+        response = await client.messages.create(
+            model=settings.ANTHROPIC_MODEL_FAST,
+            max_tokens=300,
+            system=(
+                "You are Felix, an AI chief of staff. The user just asked you a voice question "
+                "that doesn't match a specific action. Respond conversationally in 1-3 short sentences. "
+                "Keep it natural and suitable for text-to-speech. Do not use markdown, bullet points, "
+                "or special formatting. If you can't help, suggest what Felix can do (check emails, "
+                "calendar, follow-ups, drafts)."
+            ),
+            messages=[{
+                "role": "user",
+                "content": f"User ({user_name}) said: {transcript}",
+            }],
+        )
+        return response.content[0].text.strip()
+
+    # ------------------------------------------------------------------
     # Follow-up detection — Haiku
     # ------------------------------------------------------------------
 

@@ -68,11 +68,11 @@ async def sync_user_inbox(user_id: str) -> None:
     vip_list: list[str] = user_settings.get("vip_contacts") or []
     style_profile: dict = user_settings.get("style_profile") or {}
 
-    # Fetch only emails not yet processed. Gmail label "felix-processed"
-    # is applied after each email is handled, so this query is idempotent.
+    # Fetch emails from the last 4 days (read or unread) that haven't been
+    # processed yet. The "felix-processed" label prevents double-processing.
     new_emails = await gmail.get_recent_emails(
         max_results=50,
-        query="in:inbox is:unread -label:felix-processed",
+        query="in:inbox newer_than:4d -label:felix-processed",
     )
 
     if not new_emails:

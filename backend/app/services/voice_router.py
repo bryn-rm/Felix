@@ -9,8 +9,11 @@ read-only intents, keeping latency low.
 """
 
 import logging
+from datetime import date, datetime, timedelta, timezone
 
 from app import db
+from app.middleware.auth import get_google_credentials
+from app.services.calendar_service import CalendarService
 from app.services.gmail_service import GmailService
 
 logger = logging.getLogger(__name__)
@@ -38,6 +41,8 @@ async def route_intent(
         "schedule_meeting":   _schedule_meeting,
         "follow_up_with":     _follow_up_with,
         "start_meeting_notes": _start_meeting_notes,
+        "check_calendar":     _check_calendar,
+        "general_question":   _general_question,
     }
 
     handler = handlers.get(name)
@@ -214,3 +219,111 @@ async def _start_meeting_notes(intent, user_id, gmail, user_name) -> str:
         "Meeting notes mode is ready. "
         "Use the Felix app to start recording, and I'll transcribe and summarise everything when you're done."
     )
+
+
+def _resolve_timeframe(timeframe: str) -> tuple[datetime, datetime]:
+    """Parse a natural-language timeframe into (start, end) datetimes in UTC."""
+    today = date.today()
+    tf = (timeframe or "").lower().strip()
+
+    if tf in ("today", ""):
+        start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+    elif tf in ("tomorrow",):
+        start = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+    elif tf in ("this week",):
+        # Monday of current week through Sunday
+        monday = today - timedelta(days=today.weekday())
+        start = datetime.combine(monday, datetime.min.time(), tzinfo=timezone.utc)
+        end = start + timedelta(days=7)
+    elif tf in ("next week",):
+        next_monday = today + timedelta(days=7 - today.weekday())
+        start = datetime.combine(next_monday, datetime.min.time(), tzinfo=timezone.utc)
+        end = start + timedelta(days=7)
+    else:
+        # Try to match a weekday name (e.g. "tuesday", "on wednesday")
+        day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        target_day = None
+        for i, name in enumerate(day_names):
+            if name in tf:
+                target_day = i
+                break
+
+        if target_day is not None:
+            days_ahead = (target_day - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7  # next occurrence if today
+            target_date = today + timedelta(days=days_ahead)
+            start = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc)
+            end = start + timedelta(days=1)
+        else:
+            # Default to today
+            start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+            end = start + timedelta(days=1)
+
+    return start, end
+
+
+async def _check_calendar(intent, user_id, gmail, user_name) -> str:
+    timeframe = intent.get("timeframe") or "today"
+
+    try:
+        creds = await get_google_credentials(user_id)
+    except Exception:
+        return "I can't access your calendar right now. Make sure your Google account is connected in Settings."
+
+    cal = CalendarService(creds)
+    start, end = _resolve_timeframe(timeframe)
+
+    try:
+        events = await cal.get_events(
+            time_min=start.isoformat(),
+            time_max=end.isoformat(),
+        )
+    except Exception:
+        logger.exception("Calendar fetch failed for user %s", user_id)
+        return "I had trouble fetching your calendar. Please try again."
+
+    if not events:
+        return f"You have no meetings {timeframe}. Your schedule is clear."
+
+    count = len(events)
+    label = timeframe if timeframe != "today" else "today"
+    lines = [f"You have {count} {'meeting' if count == 1 else 'meetings'} {label}."]
+
+    for i, ev in enumerate(events, 1):
+        title = ev.get("title") or ev.get("summary") or "Untitled meeting"
+        start_time = ev.get("start_time") or ev.get("start", "")
+        # Format time for speech
+        if isinstance(start_time, str) and "T" in start_time:
+            try:
+                dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                time_str = dt.strftime("%-I:%M %p").lower()
+            except (ValueError, TypeError):
+                time_str = ""
+        elif isinstance(start_time, datetime):
+            time_str = start_time.strftime("%-I:%M %p").lower()
+        else:
+            time_str = ""
+
+        if time_str:
+            lines.append(f"{i}. {title} at {time_str}.")
+        else:
+            lines.append(f"{i}. {title}.")
+
+    return " ".join(lines)
+
+
+async def _general_question(intent, user_id, gmail, user_name) -> str:
+    from app.services.ai_service import ai_service
+
+    transcript = intent.get("raw_transcript", "")
+    if not transcript:
+        return "I didn't quite catch that. Could you say that again?"
+
+    try:
+        return await ai_service.answer_general_voice_question(transcript, user_name)
+    except Exception:
+        logger.exception("General question handler failed for user %s", user_id)
+        return "I'm not sure how to help with that. You can ask me to check your emails, calendar, or follow-ups."
