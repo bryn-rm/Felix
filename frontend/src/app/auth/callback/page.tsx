@@ -10,23 +10,36 @@ export default function CallbackPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    async function handleCallback() {
-      const { data: { session }, error } = await supabase.auth.getSession();
+    let handled = false;
 
-      if (error || !session) {
-        setError("Sign in failed. Please try again.");
-        return;
+    const timeout = setTimeout(() => {
+      if (!handled) {
+        handled = true;
+        setError("Sign in timed out. Please try again.");
       }
+    }, 10_000);
 
-      try {
-        const status = await api.get<{ connected: boolean }>("/auth/google/status");
-        router.replace(status.connected ? "/dashboard" : "/connect");
-      } catch {
-        router.replace("/connect");
-      }
-    }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (handled) return;
+        if (event === "SIGNED_IN" && session) {
+          handled = true;
+          clearTimeout(timeout);
 
-    handleCallback();
+          try {
+            const status = await api.get<{ connected: boolean }>("/auth/google/status");
+            router.replace(status.connected ? "/dashboard" : "/connect");
+          } catch {
+            router.replace("/connect");
+          }
+        }
+      },
+    );
+
+    return () => {
+      clearTimeout(timeout);
+      subscription.unsubscribe();
+    };
   }, [router]);
 
   if (error) {
