@@ -138,11 +138,12 @@ async def get_google_credentials(user_id: str) -> Credentials:
     else:
         expiry = None
 
-    # Google's Credentials.expired compares expiry against a tz-aware utcnow,
-    # so expiry must be tz-aware to avoid "can't compare offset-naive and
-    # offset-aware datetimes" TypeError.
-    if expiry is not None and expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
+    # google-auth's _helpers.utcnow() returns a NAIVE UTC datetime (tzinfo
+    # stripped for backward compat). Credentials.expired compares expiry against
+    # that, so expiry must also be naive UTC — otherwise we get "can't compare
+    # offset-naive and offset-aware datetimes".
+    if expiry is not None and expiry.tzinfo is not None:
+        expiry = expiry.astimezone(timezone.utc).replace(tzinfo=None)
 
     creds = Credentials(
         token=decrypt_token(row["access_token"]),
