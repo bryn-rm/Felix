@@ -15,6 +15,7 @@ Flow:
 
 import logging
 import secrets
+import traceback
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
@@ -156,114 +157,124 @@ async def google_callback(
             )
         )
 
-    # Parse state: "<user_id>.<nonce>"
     try:
-        user_id, nonce = state.split(".", 1)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid OAuth state parameter.")
-
-    # Verify nonce — must exist, belong to this user, and not be expired
-    nonce_row = await db.query_one(
-        "SELECT nonce, expires_at FROM oauth_nonces WHERE user_id = $1",
-        user_id,
-    )
-    if not nonce_row:
-        raise HTTPException(status_code=400, detail="OAuth state not found. Please try connecting again.")
-
-    if nonce_row["nonce"] != nonce:
-        raise HTTPException(status_code=400, detail="OAuth state mismatch. Possible CSRF attack.")
-
-    expires_at = nonce_row["expires_at"]
-    # asyncpg returns timezone-aware datetimes; ensure comparison is tz-aware
-    if expires_at.tzinfo is None:
-        from datetime import timezone as _tz
-        expires_at = expires_at.replace(tzinfo=_tz.utc)
-    if datetime.now(timezone.utc) > expires_at:
-        raise HTTPException(status_code=400, detail="OAuth state expired. Please try connecting again.")
-
-    # Consume the nonce — one-time use
-    await db.execute("DELETE FROM oauth_nonces WHERE user_id = $1", user_id)
-
-    # Exchange code → tokens
-    async with httpx.AsyncClient() as client:
-        token_response = await client.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                "code": code,
-                "client_id": settings.GOOGLE_CLIENT_ID,
-                "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-                "grant_type": "authorization_code",
-            },
-        )
-
-    if token_response.status_code != 200:
-        logger.error(
-            "Google token exchange failed [status=%d]: %s",
-            token_response.status_code,
-            token_response.text,
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="Google token exchange failed. Please try connecting again.",
-        )
-
-    try:
-        tokens = token_response.json()
-    except Exception:
-        logger.error("Google token exchange returned non-JSON: %s", token_response.text)
-        raise HTTPException(
-            status_code=502,
-            detail="Google token exchange returned an unexpected response.",
-        )
-    access_token = tokens["access_token"]
-    refresh_token = tokens.get("refresh_token")
-    expires_in = tokens.get("expires_in", 3600)
-
-    if not refresh_token:
-        # This shouldn't happen when prompt=consent, but guard anyway
-        raise HTTPException(
-            status_code=502,
-            detail="Google did not return a refresh token. Try disconnecting and reconnecting.",
-        )
-
-    # Fetch the Google account email for display purposes
-    async with httpx.AsyncClient() as client:
-        userinfo_resp = await client.get(
-            GOOGLE_USERINFO_URL,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-    if userinfo_resp.status_code == 200:
+        # Parse state: "<user_id>.<nonce>"
         try:
-            google_email = userinfo_resp.json().get("email", "")
+            user_id, nonce = state.split(".", 1)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid OAuth state parameter.")
+
+        # Verify nonce — must exist, belong to this user, and not be expired
+        nonce_row = await db.query_one(
+            "SELECT nonce, expires_at FROM oauth_nonces WHERE user_id = $1",
+            user_id,
+        )
+        if not nonce_row:
+            raise HTTPException(status_code=400, detail="OAuth state not found. Please try connecting again.")
+
+        if nonce_row["nonce"] != nonce:
+            raise HTTPException(status_code=400, detail="OAuth state mismatch. Possible CSRF attack.")
+
+        expires_at = nonce_row["expires_at"]
+        # asyncpg returns timezone-aware datetimes; ensure comparison is tz-aware
+        if expires_at.tzinfo is None:
+            from datetime import timezone as _tz
+            expires_at = expires_at.replace(tzinfo=_tz.utc)
+        if datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(status_code=400, detail="OAuth state expired. Please try connecting again.")
+
+        logger.info("[callback] nonce verified successfully for user_id=%s", user_id)
+
+        # Consume the nonce — one-time use
+        await db.execute("DELETE FROM oauth_nonces WHERE user_id = $1", user_id)
+
+        # Exchange code → tokens
+        logger.info("[callback] exchanging code with Google (redirect_uri=%s)", settings.GOOGLE_REDIRECT_URI)
+        async with httpx.AsyncClient() as client:
+            token_response = await client.post(
+                GOOGLE_TOKEN_URL,
+                data={
+                    "code": code,
+                    "client_id": settings.GOOGLE_CLIENT_ID,
+                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                },
+            )
+
+        logger.info("[callback] Google token exchange response: status=%d body=%s", token_response.status_code, token_response.text)
+
+        if token_response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail="Google token exchange failed. Please try connecting again.",
+            )
+
+        try:
+            tokens = token_response.json()
         except Exception:
+            logger.error("[callback] Google token exchange returned non-JSON: %s", token_response.text)
+            raise HTTPException(
+                status_code=502,
+                detail="Google token exchange returned an unexpected response.",
+            )
+        access_token = tokens["access_token"]
+        refresh_token = tokens.get("refresh_token")
+        expires_in = tokens.get("expires_in", 3600)
+        logger.info("[callback] tokens received: has_access=%s has_refresh=%s expires_in=%s", bool(access_token), bool(refresh_token), expires_in)
+
+        if not refresh_token:
+            raise HTTPException(
+                status_code=502,
+                detail="Google did not return a refresh token. Try disconnecting and reconnecting.",
+            )
+
+        # Fetch the Google account email for display purposes
+        async with httpx.AsyncClient() as client:
+            userinfo_resp = await client.get(
+                GOOGLE_USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        if userinfo_resp.status_code == 200:
+            try:
+                google_email = userinfo_resp.json().get("email", "")
+            except Exception:
+                google_email = ""
+        else:
             google_email = ""
-    else:
-        google_email = ""
-    if not google_email:
-        raise HTTPException(
-            status_code=502,
-            detail="Could not retrieve your Google email address. Please try connecting again.",
+        logger.info("[callback] userinfo response: status=%d email=%s", userinfo_resp.status_code, google_email)
+        if not google_email:
+            raise HTTPException(
+                status_code=502,
+                detail="Could not retrieve your Google email address. Please try connecting again.",
+            )
+
+        # Compute expiry timestamp
+        token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+
+        # Encrypt + persist — upsert so reconnecting overwrites existing row
+        logger.info("[callback] storing credentials for user_id=%s google_email=%s", user_id, google_email)
+        await db.upsert(
+            "google_connections",
+            {
+                "user_id": user_id,
+                "google_email": google_email,
+                "access_token": encrypt_token(access_token),
+                "refresh_token": encrypt_token(refresh_token),
+                "token_expiry": token_expiry,
+                "connected_at": datetime.now(timezone.utc),
+            },
+            conflict_columns=["user_id"],
         )
 
-    # Compute expiry timestamp
-    token_expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        logger.info("[callback] success — redirecting user_id=%s to /dashboard", user_id)
+        return RedirectResponse(url=_frontend_redirect_url("/dashboard"))
 
-    # Encrypt + persist — upsert so reconnecting overwrites existing row
-    await db.upsert(
-        "google_connections",
-        {
-            "user_id": user_id,
-            "google_email": google_email,
-            "access_token": encrypt_token(access_token),
-            "refresh_token": encrypt_token(refresh_token),
-            "token_expiry": token_expiry,
-            "connected_at": datetime.now(timezone.utc),
-        },
-        conflict_columns=["user_id"],
-    )
-
-    return RedirectResponse(url=_frontend_redirect_url("/dashboard"))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[callback] unexpected error: %s\n%s", exc, traceback.format_exc())
+        raise
 
 
 # ---------------------------------------------------------------------------
