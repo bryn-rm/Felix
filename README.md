@@ -14,7 +14,6 @@ An AI email and calendar chief of staff. Felix connects to your Gmail and Google
 
 ### Landing Page
 ![Landing Page](docs/screenshots/landing-page.jpeg)
-
 ---
 
 ## What it does
