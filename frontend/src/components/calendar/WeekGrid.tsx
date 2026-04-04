@@ -22,8 +22,15 @@ const HOURS = Array.from({ length: TOTAL_HOURS }, (_, i) => START_HOUR + i);
 // Helpers
 // ---------------------------------------------------------------------------
 
-function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+function localDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function eventDateKey(iso: string): string {
+  return localDateKey(new Date(iso));
 }
 
 function eventTop(start: string): number {
@@ -130,9 +137,10 @@ function layoutDayEvents(events: CalendarEvent[]): {
 interface WeekGridProps {
   events: CalendarEvent[];
   weekStart: Date;
+  onEventClick?: (event: CalendarEvent) => void;
 }
 
-export function WeekGrid({ events, weekStart }: WeekGridProps) {
+export function WeekGrid({ events, weekStart, onEventClick }: WeekGridProps) {
   // Mon-Sun dates for this week
   const weekDates = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(weekStart);
@@ -140,7 +148,7 @@ export function WeekGrid({ events, weekStart }: WeekGridProps) {
     return d;
   });
 
-  const todayKey = isoDate(new Date());
+  const todayKey = localDateKey(new Date());
 
   // Live current-time indicator
   const [now, setNow] = useState(new Date());
@@ -178,10 +186,10 @@ export function WeekGrid({ events, weekStart }: WeekGridProps) {
       {/* ---- Day columns ---- */}
       <div className="flex flex-1 overflow-x-auto">
         {weekDates.map((date, dayIdx) => {
-          const dateKey = isoDate(date);
+          const dateKey = localDateKey(date);
           const isToday = dateKey === todayKey;
           const dayEvents = events.filter(
-            (e) => e.start.slice(0, 10) === dateKey,
+            (e) => eventDateKey(e.start) === dateKey,
           );
           const conflictIds = detectConflicts(dayEvents);
           const { layouts, overflowByHour } = layoutDayEvents(dayEvents);
@@ -267,6 +275,7 @@ export function WeekGrid({ events, weekStart }: WeekGridProps) {
                           event={event}
                           hasConflict={conflictIds.has(event.id)}
                           compact={compact}
+                          onOpenDetail={onEventClick}
                         />
                       </div>
                     );

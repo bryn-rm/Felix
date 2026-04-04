@@ -17,9 +17,10 @@ interface EventCardProps {
   hasConflict?: boolean;
   /** Compact mode: no time row, no expand chevron */
   compact?: boolean;
+  onOpenDetail?: (event: CalendarEvent) => void;
 }
 
-export function EventCard({ event, hasConflict, compact }: EventCardProps) {
+export function EventCard({ event, hasConflict, compact, onOpenDetail }: EventCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const startTime = formatTime(event.start);
@@ -34,7 +35,13 @@ export function EventCard({ event, hasConflict, compact }: EventCardProps) {
   return (
     <div
       className={`h-full overflow-hidden rounded border px-1.5 py-1 text-xs cursor-pointer transition-all hover:brightness-110 select-none ${baseBg} ${conflictBorder}`}
-      onClick={() => !compact && setExpanded((v) => !v)}
+      onClick={() => {
+        if (onOpenDetail) {
+          onOpenDetail(event);
+          return;
+        }
+        if (!compact) setExpanded((v) => !v);
+      }}
     >
       {/* Title row */}
       <div className="flex items-start justify-between gap-1">

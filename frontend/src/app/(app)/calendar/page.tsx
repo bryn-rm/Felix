@@ -5,6 +5,7 @@ import { ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { useCalendar } from "@/hooks/useCalendar";
 import { WeekGrid } from "@/components/calendar/WeekGrid";
 import { api } from "@/lib/api";
+import type { CalendarEvent } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Date helpers
@@ -169,6 +170,94 @@ function FreeSlotModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+function EventDetailModal({
+  event,
+  onClose,
+}: {
+  event: CalendarEvent;
+  onClose: () => void;
+}) {
+  const formatDate = (iso: string) =>
+    new Date(iso).toLocaleString("en", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZoneName: "short",
+    });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-xl border border-slate-700 bg-slate-800 p-6 shadow-2xl">
+        <h2 className="text-lg font-semibold text-slate-100">{event.title}</h2>
+        <p className="mt-1 text-sm text-slate-400">
+          {formatDate(event.start)} → {formatDate(event.end)}
+        </p>
+
+        {event.location && (
+          <p className="mt-4 text-sm text-slate-200">
+            <span className="text-slate-400">Location:</span> {event.location}
+          </p>
+        )}
+
+        <p className="mt-2 text-sm text-slate-200">
+          <span className="text-slate-400">Attendees:</span>{" "}
+          {event.attendees.length > 0 ? event.attendees.join(", ") : "None"}
+        </p>
+
+        {event.organizer && (
+          <p className="mt-2 text-sm text-slate-200">
+            <span className="text-slate-400">Organizer:</span> {event.organizer}
+          </p>
+        )}
+
+        {event.description && (
+          <div className="mt-4 rounded-lg border border-slate-700 bg-slate-900/50 p-3">
+            <p className="whitespace-pre-wrap text-sm text-slate-300">
+              {event.description}
+            </p>
+          </div>
+        )}
+
+        {(event.hangout_link || event.html_link) && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {event.hangout_link && (
+              <a
+                href={event.hangout_link}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+              >
+                Join meeting
+              </a>
+            )}
+            {event.html_link && (
+              <a
+                href={event.html_link}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:border-slate-500"
+              >
+                Open in Google Calendar
+              </a>
+            )}
+          </div>
+        )}
+
+        <button
+          onClick={onClose}
+          className="mt-6 w-full rounded-lg bg-slate-700 px-4 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-600"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -176,6 +265,7 @@ function FreeSlotModal({ onClose }: { onClose: () => void }) {
 export default function CalendarPage() {
   const [weekStart, setWeekStart] = useState(() => getMonday(new Date()));
   const [showFreeSlot, setShowFreeSlot] = useState(false);
+  const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
 
   const { events, isLoading, error } = useCalendar(weekStart);
 
@@ -239,12 +329,23 @@ export default function CalendarPage() {
         {isLoading ? (
           <SkeletonGrid />
         ) : (
-          <WeekGrid events={events} weekStart={weekStart} />
+          <WeekGrid
+            events={events}
+            weekStart={weekStart}
+            onEventClick={(event) => setSelectedEvent(event)}
+          />
         )}
       </div>
 
       {showFreeSlot && (
         <FreeSlotModal onClose={() => setShowFreeSlot(false)} />
+      )}
+
+      {selectedEvent && (
+        <EventDetailModal
+          event={selectedEvent}
+          onClose={() => setSelectedEvent(null)}
+        />
       )}
     </div>
   );

@@ -13,7 +13,7 @@ Endpoints:
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -51,6 +51,8 @@ class FocusBlockRequest(BaseModel):
 @router.get("/events")
 async def list_events(
     days_ahead: int = Query(7, ge=1, le=30),
+    time_min: str | None = Query(None),
+    time_max: str | None = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -60,9 +62,35 @@ async def list_events(
     creds = await get_google_credentials(current_user["id"])
     cal = CalendarService(creds)
 
+    if (time_min and not time_max) or (time_max and not time_min):
+        raise HTTPException(
+            status_code=422,
+            detail="time_min and time_max must be provided together.",
+        )
+
+    def _parse_rfc3339(ts: str) -> datetime:
+        value = ts.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(value)
+
     try:
-        events = await cal.get_upcoming_events(days_ahead=days_ahead)
+        if time_min and time_max:
+            # Validate range and format first for better client errors.
+            start = _parse_rfc3339(time_min)
+            end = _parse_rfc3339(time_max)
+            if end <= start:
+                raise HTTPException(
+                    status_code=422,
+                    detail="time_max must be after time_min.",
+                )
+            events = await cal.get_events(
+                time_min=start.isoformat(),
+                time_max=end.isoformat(),
+            )
+        else:
+            events = await cal.get_upcoming_events(days_ahead=days_ahead)
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
         logger.exception("Calendar fetch failed for user %s", current_user["id"])
         raise HTTPException(status_code=502, detail=f"Calendar API error: {exc}")
 
