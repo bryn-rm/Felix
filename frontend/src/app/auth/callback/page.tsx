@@ -11,30 +11,17 @@ export default function CallbackPage() {
 
   useEffect(() => {
     async function handleCallback() {
-      const params = new URLSearchParams(window.location.search);
-      const code = params.get("code");
-
-      if (code) {
-        const { error } = await supabase.auth.exchangeCodeForSession(code);
-        if (error) {
-          setError(error.message);
-          return;
-        }
-      }
-
       const { data: { session }, error } = await supabase.auth.getSession();
 
       if (error || !session) {
-        setError(error?.message ?? "Sign-in failed");
+        setError("Sign in failed. Please try again.");
         return;
       }
 
-      // Check whether the user already has a connected Google account
       try {
         const status = await api.get<{ connected: boolean }>("/auth/google/status");
         router.replace(status.connected ? "/dashboard" : "/connect");
       } catch {
-        // If the status check fails, send to /connect as a safe default
         router.replace("/connect");
       }
     }
