@@ -33,14 +33,16 @@ An AI email and calendar chief of staff. Felix connects to your Gmail and Google
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 14, TypeScript, Tailwind CSS, SWR |
-| Backend | FastAPI (Python 3.12), Cloud Run (GCP) |
+| Frontend | Next.js 14.2 (App Router), React 18, TypeScript, Tailwind CSS 3.4, SWR |
+| Backend | FastAPI (Python 3.12) |
+| Hosting | Frontend on **Vercel**, Backend on **Railway** |
 | Auth | Supabase Auth with Google OAuth |
 | Database | Supabase PostgreSQL with Row Level Security |
 | AI | Claude Sonnet 4.6 (drafts / analysis) · Claude Haiku 4.5 (triage / routing) |
 | Voice | Google Cloud Speech-to-Text V2 · ElevenLabs Turbo v2.5 |
 | Google APIs | Gmail API · Google Calendar API |
 | Scheduler | APScheduler (inbox sync every 2 min, briefings, nightly relationship refresh) |
+| Key libs | anthropic, asyncpg, httpx, cryptography (Fernet), recharts, lucide-react, dompurify |
 
 ---
 
@@ -79,6 +81,7 @@ felix/
 │   │   │   ├── style_profiler.py       # Learn user writing style from sent mail
 │   │   │   ├── sentiment_analyser.py   # Per-email sentiment scoring
 │   │   │   ├── polish_service.py       # Polish draft text
+│   │   │   ├── google_api.py          # Shared Google API auth helpers
 │   │   │   └── timezone_utils.py       # Timezone helpers
 │   │   ├── jobs/                # APScheduler background tasks
 │   │   │   ├── scheduler.py            # Job registration, get_active_users()
@@ -91,7 +94,7 @@ felix/
 │   │   └── prompts/             # All Claude system prompts (one file per feature)
 │   ├── tests/
 │   ├── requirements.txt
-│   └── Dockerfile               # Cloud Run — python:3.12-slim, port 8080
+│   └── Dockerfile               # Railway deploy — python:3.12-slim
 │
 ├── frontend/
 │   └── src/
@@ -132,11 +135,18 @@ felix/
 │       ├── lib/
 │       │   ├── api.ts           # fetch wrapper with auth, 401/403 redirects, streaming
 │       │   ├── supabase.ts      # Supabase browser client
+│       │   ├── supabase-server.ts # Supabase server-side client (SSR)
 │       │   └── types.ts         # TypeScript interfaces (Email, Draft, Contact, etc.)
 │       └── middleware.ts        # Session refresh for all routes
 │
 ├── infra/
-│   └── schema.sql               # Supabase schema — all tables + RLS policies
+│   ├── schema.sql               # Supabase schema — all tables + RLS policies
+│   └── migrations/              # Incremental SQL migrations (001–005)
+│       ├── 001_phase2_email_fields.sql
+│       ├── 002_phase7_smart_templates.sql
+│       ├── 003_oauth_nonces.sql
+│       ├── 004_eval_infrastructure.sql
+│       └── 005_schema_hardening.sql
 ├── .env.example
 ├── CLAUDE.MD                    # Architecture rules and build phases
 └── FELIX_BUILD_PLAN.md          # Full technical specification
@@ -177,7 +187,7 @@ Go to **APIs & Services → OAuth consent screen**:
 
 Go to **Credentials → Create OAuth Client ID → Web application**, add redirect URIs:
 - `http://localhost:8000/auth/google/callback` (local)
-- `https://your-cloud-run-url/auth/google/callback` (production)
+- `https://your-railway-url/auth/google/callback` (production)
 
 ### 2. Supabase
 
@@ -301,19 +311,16 @@ These apply everywhere in the codebase, no exceptions:
 
 ## Deployment
 
-```bash
-# Deploy backend to Cloud Run
-gcloud run deploy felix-backend \
-  --source ./backend \
-  --region europe-west2 \
-  --allow-unauthenticated \
-  --min-instances 1 \
-  --set-env-vars FRONTEND_URL=https://your-frontend.vercel.app \
-  --set-secrets \
-    ANTHROPIC_API_KEY=anthropic-key:latest,\
-    ELEVENLABS_API_KEY=elevenlabs-key:latest,\
-    GOOGLE_CLIENT_SECRET=google-client-secret:latest,\
-    TOKEN_ENCRYPTION_KEY=token-encryption-key:latest
-```
+**Backend — Railway**
 
-Frontend deploys to Vercel — set `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SUPABASE_URL`, and `NEXT_PUBLIC_SUPABASE_ANON_KEY` in the Vercel dashboard.
+The backend deploys to [Railway](https://railway.app) using the Dockerfile at `backend/Dockerfile`. Set all required environment variables (`DATABASE_URL`, `ANTHROPIC_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `TOKEN_ENCRYPTION_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `FRONTEND_URL`, etc.) in the Railway service dashboard.
+
+**Frontend — Vercel**
+
+The frontend deploys to [Vercel](https://vercel.com). Set these environment variables in the Vercel dashboard:
+
+- `NEXT_PUBLIC_API_URL` — your Railway backend URL
+- `NEXT_PUBLIC_SUPABASE_URL` — your Supabase project URL
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY` — your Supabase anon key
+
+After deploying, update your Google OAuth redirect URI and Supabase Site URL / Redirect URLs to match the production domains.
