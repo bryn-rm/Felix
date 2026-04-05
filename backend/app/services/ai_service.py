@@ -12,6 +12,7 @@ draft_reply() is an async generator — consume with:
 
 import json
 import logging
+import re
 from typing import AsyncGenerator
 
 from anthropic import AsyncAnthropic
@@ -62,7 +63,7 @@ class AIService:
             }],
         )
         try:
-            return json.loads(response.content[0].text)
+            return json.loads(_strip_markdown_fences(response.content[0].text))
         except json.JSONDecodeError:
             logger.warning("Triage response was not valid JSON: %s", response.content[0].text)
             return {
@@ -145,7 +146,7 @@ class AIService:
             }],
         )
         try:
-            return json.loads(response.content[0].text)
+            return json.loads(_strip_markdown_fences(response.content[0].text))
         except json.JSONDecodeError:
             logger.warning("Style analysis response was not valid JSON")
             return _default_style_profile()
@@ -173,7 +174,7 @@ class AIService:
             }],
         )
         try:
-            return json.loads(response.content[0].text)
+            return json.loads(_strip_markdown_fences(response.content[0].text))
         except json.JSONDecodeError:
             logger.warning("Meeting notes response was not valid JSON")
             return {"summary": response.content[0].text, "action_items": [], "decisions": [], "open_questions": []}
@@ -207,7 +208,7 @@ class AIService:
             }],
         )
         try:
-            return json.loads(response.content[0].text)
+            return json.loads(_strip_markdown_fences(response.content[0].text))
         except json.JSONDecodeError:
             logger.warning("Voice intent response was not valid JSON: %s", response.content[0].text)
             return {"intent": "general_question", "raw_transcript": transcript}
@@ -254,7 +255,7 @@ class AIService:
             }],
         )
         try:
-            result = json.loads(response.content[0].text)
+            result = json.loads(_strip_markdown_fences(response.content[0].text))
         except json.JSONDecodeError:
             return None
         return result if result.get("needs_follow_up") else None
@@ -277,7 +278,7 @@ class AIService:
             }],
         )
         try:
-            return json.loads(response.content[0].text)
+            return json.loads(_strip_markdown_fences(response.content[0].text))
         except json.JSONDecodeError:
             return {"sentiment": "neutral", "urgency_signals": [], "pressure_level": "none", "notable_phrases": []}
 
@@ -292,6 +293,14 @@ ai_service = AIService()
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _strip_markdown_fences(text: str) -> str:
+    """Remove markdown code fences that Claude sometimes wraps around JSON."""
+    text = text.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+    return text
+
 
 def _first(lst: list | None, default: str) -> str:
     if lst:

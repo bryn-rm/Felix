@@ -26,4 +26,6 @@ Return a JSON object with exactly these fields — no explanation, no markdown:
   "sentiment_of_sender": "<neutral|positive|stressed|frustrated|urgent>",
   "requires_response_by": "<ISO 8601 date string if a deadline is stated or clearly implied, otherwise null>",
   "key_entities": ["<person, company, date, or amount mentioned>"]
-}}"""
+}}
+
+Return raw JSON only. Do not wrap in markdown code blocks. Do not include ```json or ``` in your response. Return only the JSON object."""
