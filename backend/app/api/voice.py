@@ -228,7 +228,7 @@ async def _stream_stt(
 
     recognizer = f"projects/{project_id}/locations/global/recognizers/_"
     config = cloud_speech.RecognitionConfig(
-        auto_decoding_config=cloud_speech.AutoDecodingConfig(),
+        auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
         language_codes=["en-US"],
         model="long",
     )
