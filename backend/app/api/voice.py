@@ -254,7 +254,8 @@ async def _stream_stt(
 
     try:
         async with SpeechAsyncClient() as stt_client:
-            async for response in stt_client.streaming_recognize(request_generator()):
+            stream = await stt_client.streaming_recognize(request_generator())
+            async for response in stream:
                 for result in response.results:
                     if result.alternatives:
                         yield result.alternatives[0].transcript, result.is_final
