@@ -1,21 +1,34 @@
 "use client";
 
+/**
+ * Claude-style collapsible sidebar.
+ *
+ * - Collapsed (icon-only, ~56px) by default.
+ * - Expands to ~240px on hover (after 150ms delay) or click.
+ * - Pin button (chevron) toggles a sticky-open mode.
+ * - 200ms ease CSS transition.
+ *
+ * Mobile bottom tab bar is rendered separately by AppShell.
+ */
+
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import {
-  LayoutDashboard,
+  Home,
   Inbox,
+  Mic,
   Calendar,
   Clock,
   Users,
   FileText,
   Settings,
   LogOut,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import { VoiceOrb } from "@/components/felix/VoiceOrb";
 import { useUnreadCounts } from "@/hooks/useUnreadCounts";
-import type { VoiceState } from "@/hooks/useVoice";
 
 interface NavItem {
   href: string;
@@ -26,35 +39,64 @@ interface NavItem {
 
 interface SidebarProps {
   userEmail: string;
-  /**
-   * Current voice session state — mirrored from the VoiceModal that lives in
-   * AppShell. Drives the orb appearance. Defaults to "idle".
-   */
-  voiceState?: VoiceState;
-  /**
-   * Called when the user clicks the VoiceOrb. AppShell handles opening the
-   * VoiceModal overlay; the actual WebSocket session lives there, not here.
-   */
-  onVoiceClick?: () => void;
+  displayName: string | null;
 }
 
-export function Sidebar({
-  userEmail,
-  voiceState = "idle",
-  onVoiceClick,
-}: SidebarProps) {
+const HOVER_DELAY_MS = 150;
+
+function getInitials(displayName: string | null, email: string): string {
+  if (displayName) {
+    const parts = displayName.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    }
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  return email.slice(0, 2).toUpperCase();
+}
+
+export function Sidebar({ userEmail, displayName }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { actionRequired, overdueFollowups } = useUnreadCounts();
 
+  const [pinned, setPinned] = useState(false);
+  const [hoverExpanded, setHoverExpanded] = useState(false);
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const expanded = pinned || hoverExpanded;
+
+  useEffect(() => {
+    return () => {
+      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    };
+  }, []);
+
+  function handleMouseEnter() {
+    if (pinned) return;
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = setTimeout(() => {
+      setHoverExpanded(true);
+    }, HOVER_DELAY_MS);
+  }
+
+  function handleMouseLeave() {
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+    setHoverExpanded(false);
+  }
+
   const navItems: NavItem[] = [
-    { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/home", label: "Home", icon: Home },
     {
       href: "/inbox",
       label: "Inbox",
       icon: Inbox,
       badge: actionRequired > 0 ? actionRequired : undefined,
     },
+    { href: "/briefing", label: "Briefing", icon: Mic },
     { href: "/calendar", label: "Calendar", icon: Calendar },
     {
       href: "/follow-ups",
@@ -72,67 +114,116 @@ export function Sidebar({
     router.push("/login");
   }
 
-  return (
-    <div className="flex h-full flex-col justify-between py-4">
-      {/* Logo */}
-      <div>
-        <div className="px-5 pb-6 pt-2">
-          <span className="text-xl font-bold tracking-tight text-slate-100">
-            Felix
-          </span>
-        </div>
+  const initials = getInitials(displayName, userEmail);
 
-        {/* Nav links */}
-        <nav className="space-y-0.5 px-3">
-          {navItems.map(({ href, label, icon: Icon, badge }) => {
-            const active =
-              pathname === href || pathname.startsWith(href + "/");
-            return (
-              <Link
-                key={href}
-                href={href}
-                className={[
-                  "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                  active
-                    ? "border-l-2 border-indigo-500 bg-indigo-600/20 pl-[10px] text-slate-100"
-                    : "border-l-2 border-transparent text-slate-400 hover:bg-slate-700/50 hover:text-slate-100",
-                ].join(" ")}
-              >
-                <Icon className="h-4 w-4 shrink-0" />
-                <span className="flex-1">{label}</span>
-                {badge !== undefined && (
-                  <span className="rounded-full bg-indigo-600 px-1.5 py-0.5 text-xs font-semibold text-white leading-none">
+  return (
+    <aside
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      style={{ width: expanded ? 240 : 56 }}
+      className={[
+        "hidden md:flex md:flex-col h-full shrink-0 bg-[#0d1526] border-r border-white/[0.04]",
+        "transition-[width] duration-200 ease-out overflow-hidden",
+      ].join(" ")}
+      aria-label="Primary navigation"
+    >
+      {/* Top — logo + pin toggle */}
+      <div className="flex items-center justify-between h-14 px-3 shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-indigo-600 text-sm font-bold text-white">
+            F
+          </div>
+          {expanded && (
+            <span className="truncate text-sm font-semibold tracking-tight text-slate-100">
+              Felix
+            </span>
+          )}
+        </div>
+        {expanded && (
+          <button
+            onClick={() => setPinned((v) => !v)}
+            className="rounded p-1 text-slate-500 hover:bg-slate-700/50 hover:text-slate-200 transition-colors"
+            aria-label={pinned ? "Unpin sidebar" : "Pin sidebar"}
+            title={pinned ? "Unpin" : "Pin open"}
+          >
+            {pinned ? (
+              <ChevronsLeft className="h-4 w-4" />
+            ) : (
+              <ChevronsRight className="h-4 w-4" />
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* Nav links */}
+      <nav className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-2 space-y-0.5">
+        {navItems.map(({ href, label, icon: Icon, badge }) => {
+          const active =
+            pathname === href || pathname.startsWith(href + "/");
+          return (
+            <Link
+              key={href}
+              href={href}
+              title={expanded ? undefined : label}
+              className={[
+                "group relative flex items-center h-10 rounded-md text-sm font-medium",
+                "transition-colors",
+                active
+                  ? "bg-indigo-600/20 text-slate-100"
+                  : "text-slate-400 hover:bg-slate-700/40 hover:text-slate-100",
+              ].join(" ")}
+            >
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center">
+                <Icon className="h-[18px] w-[18px]" />
+              </span>
+              {expanded && (
+                <span className="flex-1 truncate pr-2">{label}</span>
+              )}
+              {badge !== undefined &&
+                (expanded ? (
+                  <span className="mr-2 rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
                     {badge > 99 ? "99+" : badge}
                   </span>
-                )}
-              </Link>
-            );
-          })}
-        </nav>
-      </div>
+                ) : (
+                  <span
+                    className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-indigo-500 ring-2 ring-[#0d1526]"
+                    aria-label={`${badge} unread`}
+                  />
+                ))}
+              {active && (
+                <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-indigo-400" />
+              )}
+            </Link>
+          );
+        })}
+      </nav>
 
-      {/* Bottom section: VoiceOrb (above) + user info (below) */}
-      <div className="px-5">
-        {/* VoiceOrb — positioned at the bottom of nav links, above user info */}
-        <div className="mb-6 flex justify-center">
-          <VoiceOrb
-            state={voiceState}
-            onClick={onVoiceClick ?? (() => {})}
-            size={64}
-          />
-        </div>
-
-        <div className="flex items-center justify-between gap-2 border-t border-slate-700 pt-4">
-          <span className="truncate text-xs text-slate-400">{userEmail}</span>
-          <button
-            onClick={handleSignOut}
-            title="Sign out"
-            className="shrink-0 rounded p-1 text-slate-400 transition-colors hover:bg-slate-700 hover:text-slate-100"
+      {/* Bottom — user + sign out */}
+      <div className="shrink-0 border-t border-white/[0.04] p-2">
+        <div className="flex items-center h-10 gap-2">
+          <div
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-[11px] font-bold text-white"
+            title={displayName ?? userEmail}
           >
-            <LogOut className="h-4 w-4" />
-          </button>
+            {initials}
+          </div>
+          {expanded && (
+            <span className="flex-1 truncate text-xs text-slate-400">
+              {userEmail}
+            </span>
+          )}
+          {expanded && (
+            <button
+              onClick={handleSignOut}
+              title="Sign out"
+              className="shrink-0 rounded p-1.5 text-slate-500 transition-colors hover:bg-slate-700/50 hover:text-slate-100"
+              aria-label="Sign out"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
+          )}
         </div>
       </div>
-    </div>
+    </aside>
   );
 }

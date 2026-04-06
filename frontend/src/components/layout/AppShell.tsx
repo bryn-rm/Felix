@@ -1,24 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import {
-  LayoutDashboard,
+  Home,
   Inbox,
+  Mic,
   Calendar,
   Clock,
   Users,
   FileText,
   Settings,
   Bell,
-  Menu,
-  X,
 } from "lucide-react";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { VoiceProvider, useVoiceContext } from "@/components/felix/VoiceContext";
 import { VoiceModal } from "@/components/felix/VoiceModal";
-import { supabase } from "@/lib/supabase";
-import type { VoiceState } from "@/hooks/useVoice";
+import { FloatingVoiceFab } from "@/components/felix/FloatingVoiceFab";
 
 interface AppShellProps {
   userEmail: string;
@@ -27,6 +25,7 @@ interface AppShellProps {
 }
 
 const PAGE_TITLES: Record<string, string> = {
+  "/home": "Home",
   "/dashboard": "Dashboard",
   "/inbox": "Inbox",
   "/calendar": "Calendar",
@@ -38,11 +37,14 @@ const PAGE_TITLES: Record<string, string> = {
 };
 
 const MOBILE_NAV = [
-  { href: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+  { href: "/home", icon: Home, label: "Home" },
   { href: "/inbox", icon: Inbox, label: "Inbox" },
+  { href: "/briefing", icon: Mic, label: "Briefing" },
   { href: "/calendar", icon: Calendar, label: "Calendar" },
   { href: "/follow-ups", icon: Clock, label: "Follow-ups" },
   { href: "/contacts", icon: Users, label: "Contacts" },
+  { href: "/templates", icon: FileText, label: "Templates" },
+  { href: "/settings", icon: Settings, label: "Settings" },
 ];
 
 function getPageTitle(pathname: string): string {
@@ -65,129 +67,28 @@ function initials(displayName: string | null, email: string): string {
   return email.slice(0, 2).toUpperCase();
 }
 
-export function AppShell({ userEmail, displayName, children }: AppShellProps) {
+/**
+ * Inner shell — runs inside the VoiceProvider so it can read modal state.
+ */
+function ShellInner({ userEmail, displayName, children }: AppShellProps) {
   const pathname = usePathname();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-
-  // ------------------------------------------------------------------
-  // Voice — token, modal open state, orb state (mirrored from VoiceModal)
-  // ------------------------------------------------------------------
-
-  const [token, setToken] = useState<string | null>(null);
-  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
-  // Mirrors the VoiceModal's internal state so the Sidebar orb reflects it
-  const [orbVoiceState, setOrbVoiceState] = useState<VoiceState>("idle");
-
-  // Load Supabase access token (was previously in Sidebar — centralised here
-  // so it's available for VoiceModal and the keyboard shortcut)
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setToken(session?.access_token ?? null);
-    });
-
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setToken(session?.access_token ?? null);
-      },
-    );
-    return () => listener.subscription.unsubscribe();
-  }, []);
-
-  const openVoiceModal = useCallback(() => {
-    if (token) setVoiceModalOpen(true);
-  }, [token]);
-
-  const closeVoiceModal = useCallback(() => {
-    setVoiceModalOpen(false);
-    setOrbVoiceState("idle"); // reset sidebar orb when modal closes
-  }, []);
-
-  // ------------------------------------------------------------------
-  // Keyboard shortcut: Cmd+Shift+F (Mac) / Ctrl+Shift+F (Windows/Linux)
-  // Opens the VoiceModal from anywhere in the app.
-  // ------------------------------------------------------------------
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "F") {
-        e.preventDefault();
-        openVoiceModal();
-      }
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [openVoiceModal]);
-
-  // ------------------------------------------------------------------
-  // Render
-  // ------------------------------------------------------------------
+  const { modalOpen } = useVoiceContext();
 
   const title = getPageTitle(pathname);
   const avatarText = initials(displayName, userEmail);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#0f172a] text-slate-100">
-      {/* ------------------------------------------------------------------ */}
-      {/* Desktop sidebar                                                      */}
-      {/* ------------------------------------------------------------------ */}
-      <aside className="hidden w-64 shrink-0 bg-[#1e293b] md:flex md:flex-col">
-        <Sidebar
-          userEmail={userEmail}
-          voiceState={orbVoiceState}
-          onVoiceClick={openVoiceModal}
-        />
-      </aside>
+    <div className="flex h-screen overflow-hidden bg-[#080f1e] text-slate-100">
+      {/* Desktop collapsible sidebar */}
+      <Sidebar userEmail={userEmail} displayName={displayName} />
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Mobile sidebar overlay                                              */}
-      {/* ------------------------------------------------------------------ */}
-      {sidebarOpen && (
-        <div className="fixed inset-0 z-40 md:hidden">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/60"
-            onClick={() => setSidebarOpen(false)}
-          />
-          {/* Drawer */}
-          <aside className="absolute left-0 top-0 flex h-full w-64 flex-col bg-[#1e293b]">
-            <div className="flex justify-end p-3">
-              <button
-                onClick={() => setSidebarOpen(false)}
-                className="rounded p-1 text-slate-400 hover:text-slate-100"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <Sidebar
-              userEmail={userEmail}
-              voiceState={orbVoiceState}
-              onVoiceClick={() => {
-                setSidebarOpen(false);
-                openVoiceModal();
-              }}
-            />
-          </aside>
-        </div>
-      )}
-
-      {/* ------------------------------------------------------------------ */}
-      {/* Main area                                                           */}
-      {/* ------------------------------------------------------------------ */}
+      {/* Main area */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Top bar */}
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-700/60 bg-[#0f172a] px-4">
-          {/* Left: hamburger (mobile) + page title */}
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.04] bg-[#080f1e] px-4">
           <div className="flex items-center gap-3">
-            <button
-              className="rounded p-1 text-slate-400 hover:text-slate-100 md:hidden"
-              onClick={() => setSidebarOpen(true)}
-              aria-label="Open sidebar"
-            >
-              <Menu className="h-5 w-5" />
-            </button>
             <h1 className="text-base font-semibold text-slate-100">{title}</h1>
           </div>
 
-          {/* Right: bell + avatar */}
           <div className="flex items-center gap-3">
             <button
               aria-label="Notifications"
@@ -205,14 +106,15 @@ export function AppShell({ userEmail, displayName, children }: AppShellProps) {
           </div>
         </header>
 
-        {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-6">{children}</main>
+        {/* Page content — extra bottom padding on mobile so the bottom nav doesn't overlap */}
+        <main className="flex-1 overflow-y-auto pb-20 md:pb-0">{children}</main>
       </div>
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Mobile bottom nav bar                                               */}
-      {/* ------------------------------------------------------------------ */}
-      <nav className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around border-t border-slate-700/60 bg-[#1e293b] py-2 md:hidden">
+      {/* Mobile bottom nav bar — icons only, scrolls horizontally if cramped */}
+      <nav
+        className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around overflow-x-auto border-t border-white/[0.04] bg-[#0d1526] py-2 md:hidden"
+        aria-label="Mobile navigation"
+      >
         {MOBILE_NAV.map(({ href, icon: Icon, label }) => {
           const active = pathname === href || pathname.startsWith(href + "/");
           return (
@@ -220,37 +122,30 @@ export function AppShell({ userEmail, displayName, children }: AppShellProps) {
               key={href}
               href={href}
               className={[
-                "flex flex-col items-center gap-0.5 px-3 py-1 text-xs transition-colors",
-                active ? "text-indigo-400" : "text-slate-400",
+                "flex shrink-0 flex-col items-center justify-center px-3 py-1 transition-colors",
+                active ? "text-indigo-400" : "text-slate-500",
               ].join(" ")}
               aria-label={label}
             >
               <Icon className="h-5 w-5" />
-              <span>{label}</span>
             </Link>
           );
         })}
-        <button
-          className="flex flex-col items-center gap-0.5 px-3 py-1 text-xs text-slate-400"
-          onClick={() => setSidebarOpen(true)}
-          aria-label="More"
-        >
-          <Menu className="h-5 w-5" />
-          <span>More</span>
-        </button>
       </nav>
 
-      {/* ------------------------------------------------------------------ */}
-      {/* VoiceModal — rendered at app-shell level so it overlays everything. */}
-      {/* Only mounted when open AND token is available.                      */}
-      {/* ------------------------------------------------------------------ */}
-      {voiceModalOpen && token && (
-        <VoiceModal
-          token={token}
-          onClose={closeVoiceModal}
-          onStateChange={setOrbVoiceState}
-        />
-      )}
+      {/* Floating Voice Orb FAB — present on every page */}
+      <FloatingVoiceFab />
+
+      {/* Full-screen Voice Modal — shared session via context */}
+      {modalOpen && <VoiceModal />}
     </div>
+  );
+}
+
+export function AppShell(props: AppShellProps) {
+  return (
+    <VoiceProvider>
+      <ShellInner {...props} />
+    </VoiceProvider>
   );
 }
