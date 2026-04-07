@@ -35,11 +35,16 @@ import json
 import logging
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 
 from app import db
 from app.config import settings
-from app.middleware.auth import get_supabase_client, get_google_credentials
+from app.middleware.auth import (
+    get_current_user,
+    get_google_credentials,
+    get_supabase_client,
+)
 from app.services.ai_service import ai_service
 from app.services.gmail_service import GmailService
 from app.services.voice_router import route_intent
@@ -47,6 +52,75 @@ from app.services.voice_service import voice_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# /voice/chat — text-in/text-out chat (used by the /home page chat input)
+# ---------------------------------------------------------------------------
+
+class VoiceChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+class VoiceChatResponse(BaseModel):
+    response: str
+    intent: str
+
+
+@router.post("/chat", response_model=VoiceChatResponse)
+async def voice_chat(
+    body: VoiceChatRequest,
+    current_user: dict = Depends(get_current_user),
+) -> VoiceChatResponse:
+    """
+    Lightweight text-only counterpart to the /voice/stream WebSocket pipeline.
+
+    Parses intent from text using the same Claude Haiku intent parser, then
+    routes through voice_router. No STT, no TTS — pure text in / text out.
+    """
+    user_id: str = current_user["id"]
+    message = body.message.strip()
+
+    user_settings = await db.query_one(
+        "SELECT display_name FROM settings WHERE user_id = $1", user_id
+    )
+    user_name: str = (user_settings or {}).get("display_name") or "there"
+
+    gmail: GmailService | None = None
+    try:
+        creds = await get_google_credentials(user_id)
+        gmail = GmailService(creds)
+    except Exception:
+        logger.info("No Google credentials for chat user %s", user_id)
+
+    try:
+        intent = await ai_service.parse_voice_intent(message)
+    except Exception:
+        logger.exception("parse_voice_intent failed for user %s", user_id)
+        intent = {"intent": "general_question", "raw_transcript": message}
+
+    try:
+        response_text = await route_intent(intent, user_id, gmail, user_name)
+    except Exception:
+        logger.exception("route_intent failed for user %s", user_id)
+        response_text = "I had trouble handling that. Please try again."
+
+    # Best-effort session log so /voice/chat shows up alongside voice sessions
+    try:
+        await db.insert("voice_sessions", {
+            "user_id":      user_id,
+            "transcript":   message,
+            "intent":       intent,
+            "response":     response_text,
+            "action_taken": intent.get("intent"),
+        })
+    except Exception:
+        logger.warning("Failed to log voice/chat session for user %s", user_id)
+
+    return VoiceChatResponse(
+        response=response_text,
+        intent=str(intent.get("intent", "general_question")),
+    )
 
 
 # ---------------------------------------------------------------------------

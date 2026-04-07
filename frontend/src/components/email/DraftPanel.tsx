@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Send, Trash2, RefreshCw, Loader2 } from "lucide-react";
+import { Send, Trash2, RefreshCw, Loader2, Sparkles } from "lucide-react";
 import { useDraft } from "@/hooks/useDraft";
+import { api } from "@/lib/api";
 
 interface DraftPanelProps {
   emailId: string;
@@ -14,7 +15,27 @@ export function DraftPanel({ emailId }: DraftPanelProps) {
   const { draft, draftText, state, error, send, discard } = useDraft(emailId);
   const [editedText, setEditedText] = useState("");
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+  const [polishing, setPolishing] = useState(false);
+  const [polishError, setPolishError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  async function handlePolish() {
+    if (polishing || !editedText.trim()) return;
+    setPolishing(true);
+    setPolishError(null);
+    try {
+      const res = await api.post<{ polished: string }>("/polish/draft", {
+        text: editedText,
+      });
+      if (res.polished) setEditedText(res.polished);
+    } catch (err) {
+      setPolishError(
+        err instanceof Error ? err.message : "Couldn't polish draft.",
+      );
+    } finally {
+      setPolishing(false);
+    }
+  }
 
   // Keep textarea in sync with streaming / initial text
   useEffect(() => {
@@ -142,13 +163,34 @@ export function DraftPanel({ emailId }: DraftPanelProps) {
         <div className="flex items-center justify-between">
           {isInteractive ? (
             <span className="text-xs text-slate-500">
-              {editedText.length.toLocaleString()} chars
+              {polishError ? (
+                <span className="text-red-400">{polishError}</span>
+              ) : (
+                <>{editedText.length.toLocaleString()} chars</>
+              )}
             </span>
           ) : (
             <span />
           )}
 
           <div className="flex items-center gap-2">
+            {/* Polish */}
+            {isInteractive && (
+              <button
+                onClick={handlePolish}
+                disabled={polishing || editedText.trim().length === 0}
+                title="Polish — improve tone, grammar and clarity"
+                className="flex items-center gap-1.5 rounded-md border border-slate-600 px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-indigo-500/50 hover:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {polishing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3.5 w-3.5" />
+                )}
+                {polishing ? "Polishing…" : "Polish"}
+              </button>
+            )}
+
             {/* Discard */}
             {draft && isInteractive && (
               <button

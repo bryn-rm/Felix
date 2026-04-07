@@ -1,11 +1,35 @@
 """Phase 7 API routes: digest, weekly review, templates, style evolution."""
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 
 from app.middleware.auth import get_current_user
 from app.services.polish_service import polish_service
 
 router = APIRouter()
+
+
+class PolishDraftRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=20_000)
+
+
+class PolishDraftResponse(BaseModel):
+    polished: str
+
+
+@router.post("/draft", response_model=PolishDraftResponse)
+async def polish_draft(
+    body: PolishDraftRequest,
+    current_user: dict = Depends(get_current_user),
+) -> PolishDraftResponse:
+    """
+    Polish draft email text — fix tone, grammar and clarity without changing
+    the underlying meaning. Used by the inline DraftPanel "Polish" button.
+    """
+    polished = await polish_service.polish_draft_text(
+        current_user["id"], body.text
+    )
+    return PolishDraftResponse(polished=polished)
 
 
 @router.get("/digest")

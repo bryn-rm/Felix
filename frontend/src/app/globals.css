@@ -68,6 +68,12 @@ body {
 .felix-delay-5 { animation-delay: 400ms; }
 .felix-delay-6 { animation-delay: 480ms; }
 
+/* ── Skeleton shimmer (used by /home loading state) ── */
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
 /* ── Google button hover lift ── */
 .felix-google-btn {
   transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1),

@@ -1,64 +1,48 @@
 /**
  * VoiceModal — full-screen overlay for Felix voice interactions.
  *
- * Shows:
- *   - TranscriptDisplay (scrolling conversation history)
- *   - Live interim transcript (greyed, streaming)
- *   - VoiceOrb (tap to start / stop)
- *   - Interrupt button (visible while Felix is speaking)
- *   - Error message + Retry button (when state === "error")
- *   - Escape key or × button closes the modal
- *
- * Props:
- *   token          — Supabase access token
- *   onClose        — called when the user ends the session
- *   onStateChange  — optional; fires whenever the internal voice state changes
- *                    so the parent (AppShell) can mirror the state for the
- *                    Sidebar orb without a second WebSocket session.
+ * Reads its session state from VoiceContext so the orb FAB, the keyboard
+ * shortcut and the modal all share one WebSocket session.
  */
 
 "use client";
 
 import { useEffect } from "react";
 
-import { useVoice, type VoiceState } from "@/hooks/useVoice";
+import { useVoiceContext } from "./VoiceContext";
 import { TranscriptDisplay } from "./TranscriptDisplay";
 import { VoiceOrb } from "./VoiceOrb";
 
-interface VoiceModalProps {
-  token: string;
-  onClose: () => void;
-  /** Mirror internal voice state to the parent (e.g. for Sidebar orb). */
-  onStateChange?: (state: VoiceState) => void;
-}
-
-export function VoiceModal({ token, onClose, onStateChange }: VoiceModalProps) {
-  const { state, interimTranscript, messages, error, start, stop, interrupt } =
-    useVoice(token);
-
-  // Notify parent of every state transition
-  useEffect(() => {
-    onStateChange?.(state);
-  }, [state, onStateChange]);
+export function VoiceModal() {
+  const {
+    state,
+    interimTranscript,
+    messages,
+    error,
+    start,
+    stop,
+    interrupt,
+    closeModal,
+  } = useVoiceContext();
 
   // Close on Escape
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         stop();
-        onClose();
+        closeModal();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [stop, onClose]);
+  }, [stop, closeModal]);
 
   const handleOrbClick = () => {
     if (state === "idle" || state === "error") {
       start();
     } else {
       stop();
-      onClose();
+      closeModal();
     }
   };
 
@@ -84,7 +68,7 @@ export function VoiceModal({ token, onClose, onStateChange }: VoiceModalProps) {
         <button
           onClick={() => {
             stop();
-            onClose();
+            closeModal();
           }}
           className="text-zinc-500 hover:text-zinc-300 transition-colors"
           aria-label="Close voice assistant"
@@ -108,14 +92,12 @@ export function VoiceModal({ token, onClose, onStateChange }: VoiceModalProps) {
       <div className="flex-1 w-full max-w-lg flex flex-col justify-end overflow-hidden py-4">
         <TranscriptDisplay messages={messages} />
 
-        {/* Live interim transcript */}
         {interimTranscript && (
           <p className="mt-3 px-1 text-sm italic text-zinc-500 leading-relaxed">
             {interimTranscript}
           </p>
         )}
 
-        {/* ── Error state — message + retry button ── */}
         {state === "error" && error && (
           <div className="mt-3 flex flex-col items-center gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-4 text-center">
             <p className="text-sm text-red-400">{error}</p>
@@ -131,7 +113,6 @@ export function VoiceModal({ token, onClose, onStateChange }: VoiceModalProps) {
           </div>
         )}
 
-        {/* Non-fatal error hint (e.g. transient message while still connected) */}
         {state !== "error" && error && (
           <p className="mt-2 px-1 text-sm text-red-400">{error}</p>
         )}
@@ -139,7 +120,6 @@ export function VoiceModal({ token, onClose, onStateChange }: VoiceModalProps) {
 
       {/* ── Controls ── */}
       <div className="flex flex-col items-center gap-4 pb-2">
-        {/* Interrupt button — only when Felix is speaking */}
         {state === "speaking" && (
           <button
             onClick={interrupt}
@@ -158,7 +138,7 @@ export function VoiceModal({ token, onClose, onStateChange }: VoiceModalProps) {
           <button
             onClick={() => {
               stop();
-              onClose();
+              closeModal();
             }}
             className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
           >
@@ -166,7 +146,6 @@ export function VoiceModal({ token, onClose, onStateChange }: VoiceModalProps) {
           </button>
         )}
 
-        {/* Keyboard hints */}
         {state === "idle" && (
           <p className="text-xs text-zinc-700">
             Tap orb to start · Esc to close

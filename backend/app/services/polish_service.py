@@ -4,10 +4,43 @@ Phase 7 polish service: digest mode, weekly review, templates, style evolution.
 
 from datetime import datetime, timedelta, timezone
 
+from anthropic import AsyncAnthropic
+
 from app import db
+from app.config import settings as _settings
+
+
+_client = AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY)
+
+
+_POLISH_DRAFT_SYSTEM = (
+    "You are an expert editor for professional email drafts. "
+    "Polish the user's draft so it is clear, concise and professionally toned. "
+    "Fix grammar and awkward phrasing. Preserve the writer's intent, key facts, "
+    "names, dates, numbers and any signature. Do not invent new content. "
+    "Return only the polished email body — no preamble, no commentary, no markdown."
+)
 
 
 class PolishService:
+    async def polish_draft_text(self, user_id: str, text: str) -> str:
+        """
+        Polish a draft email body. Returns the polished text only.
+
+        user_id is currently unused but kept in the signature so we can
+        layer in per-user style profiles later without changing the API.
+        """
+        _ = user_id  # reserved for future per-user style customisation
+        response = await _client.messages.create(
+            model=_settings.ANTHROPIC_MODEL_SMART,
+            max_tokens=2000,
+            system=_POLISH_DRAFT_SYSTEM,
+            messages=[{"role": "user", "content": text}],
+        )
+        block = response.content[0]
+        polished = getattr(block, "text", "").strip()
+        return polished or text
+
     async def build_digest(self, user_id: str, window_hours: int = 6) -> dict:
         since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
         categories = await db.query(
