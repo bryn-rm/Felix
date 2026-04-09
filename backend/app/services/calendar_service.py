@@ -88,20 +88,30 @@ class CalendarService:
     # Creating events
     # ------------------------------------------------------------------
 
-    async def create_event(self, event: dict, calendar_id: str = "primary") -> dict:
+    async def create_event(
+        self,
+        event: dict,
+        calendar_id: str = "primary",
+        user_timezone: str | None = None,
+    ) -> dict:
         """
         Create a calendar event.
 
         event dict format (Google Calendar API v3):
         {
             "summary": "Meeting title",
-            "start": {"dateTime": "2026-03-03T10:00:00+00:00", "timeZone": "Europe/London"},
-            "end":   {"dateTime": "2026-03-03T11:00:00+00:00", "timeZone": "Europe/London"},
+            "start": {"dateTime": "2026-03-03T10:00:00", "timeZone": "Europe/London"},
+            "end":   {"dateTime": "2026-03-03T11:00:00", "timeZone": "Europe/London"},
             "attendees": [{"email": "person@example.com"}],
             "description": "...",
             "location": "...",
         }
+
+        If ``user_timezone`` is provided, any start/end entries that are missing a
+        ``timeZone`` field (or that contain a naive datetime object) will be
+        normalized into that timezone rather than silently being treated as UTC.
         """
+        event = _normalize_event_timezone(event, user_timezone)
         request = self.service.events().insert(
             calendarId=calendar_id,
             body=event,
@@ -363,6 +373,51 @@ class CalendarService:
 # ---------------------------------------------------------------------------
 # Error handling (matches gmail_service._handle_http_error pattern)
 # ---------------------------------------------------------------------------
+
+def _normalize_event_timezone(event: dict, user_timezone: str | None) -> dict:
+    """
+    Ensure event start/end carry an explicit IANA timezone and a wall-clock
+    dateTime string. Without this, naive datetime objects (or ISO strings with
+    no offset) are interpreted by Google as UTC, which causes events spoken in
+    a local timezone to land at the wrong absolute time.
+    """
+    if not isinstance(event, dict):
+        return event
+
+    tz_name = user_timezone or "UTC"
+    try:
+        tz = pytz.timezone(tz_name)
+    except pytz.UnknownTimeZoneError:
+        tz_name = "UTC"
+        tz = pytz.UTC
+
+    normalized = dict(event)
+    for key in ("start", "end"):
+        slot = normalized.get(key)
+        if not isinstance(slot, dict):
+            continue
+        slot = dict(slot)
+
+        dt_value = slot.get("dateTime")
+        if isinstance(dt_value, datetime):
+            if dt_value.tzinfo is None:
+                dt_value = tz.localize(dt_value)
+            slot["dateTime"] = dt_value.isoformat()
+            slot.setdefault("timeZone", tz_name)
+        elif isinstance(dt_value, str) and dt_value:
+            # If the string has no offset and no timeZone field, attach the user tz.
+            has_offset = (
+                dt_value.endswith("Z")
+                or "+" in dt_value[10:]
+                or "-" in dt_value[10:]
+            )
+            if not has_offset and not slot.get("timeZone"):
+                slot["timeZone"] = tz_name
+
+        normalized[key] = slot
+
+    return normalized
+
 
 def _handle_http_error(error: HttpError, context: str = "") -> None:
     code = error.resp.status if hasattr(error, "resp") else None

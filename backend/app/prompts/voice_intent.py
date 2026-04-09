@@ -36,9 +36,16 @@ Return a JSON object:
   "topic": "<string, subject of the email/meeting, null if not applicable>",
   "reply_content": "<string, what the user wants to say, null if not applicable>",
   "timeframe": "<string, e.g. 'next week', 'tomorrow afternoon', null if not applicable>",
+  "start_time": "<string in 24h 'HH:MM' format if the user said an explicit time like '3pm', '15:00', 'half past four'; null otherwise>",
+  "end_time": "<string in 24h 'HH:MM' format if the user gave an explicit end time like 'until 5pm', '3pm to 5pm'; null otherwise>",
   "duration_minutes": <integer or null>,
   "raw_transcript": "{transcript}"
 }}
+
+Time extraction notes:
+- Interpret times as the speaker's local wall-clock time. Do NOT convert to UTC.
+- "3pm" → "15:00", "5pm" → "17:00", "9 in the morning" → "09:00", "half past four" → "16:30".
+- If both start_time and end_time are given, you may leave duration_minutes null (it will be derived).
 
 Return JSON only — no explanation, no markdown.
 """

@@ -63,11 +63,54 @@ async def route_intent(
 # Helpers
 # ---------------------------------------------------------------------------
 
+DEFAULT_USER_TIMEZONE = "Europe/London"
+
+
 async def _get_user_timezone(user_id: str) -> str:
     settings = await db.query_one(
         "SELECT timezone FROM settings WHERE user_id = $1", user_id
     )
-    return (settings or {}).get("timezone") or "UTC"
+    return (settings or {}).get("timezone") or DEFAULT_USER_TIMEZONE
+
+
+def _parse_clock_time(value) -> time | None:
+    """Parse 'HH:MM' (24h) or '3pm'/'3:30pm' style strings into a time object."""
+    if value is None:
+        return None
+    if isinstance(value, time):
+        return value
+    if not isinstance(value, str):
+        return None
+    s = value.strip().lower().replace(" ", "")
+    if not s:
+        return None
+
+    suffix = None
+    if s.endswith("am") or s.endswith("pm"):
+        suffix = s[-2:]
+        s = s[:-2]
+
+    try:
+        if ":" in s:
+            hh, mm = s.split(":", 1)
+            hour = int(hh)
+            minute = int(mm)
+        else:
+            hour = int(s)
+            minute = 0
+    except ValueError:
+        return None
+
+    if suffix == "am":
+        if hour == 12:
+            hour = 0
+    elif suffix == "pm":
+        if hour < 12:
+            hour += 12
+
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return None
+    return time(hour=hour, minute=minute)
 
 
 def _format_time_for_speech(dt_value) -> str:
@@ -344,13 +387,29 @@ async def _schedule_meeting(intent, user_id, gmail, user_name) -> str:
     try:
         user_tz = pytz.timezone(user_tz_name)
     except pytz.UnknownTimeZoneError:
-        user_tz = pytz.UTC
+        user_tz_name = DEFAULT_USER_TIMEZONE
+        user_tz = pytz.timezone(DEFAULT_USER_TIMEZONE)
 
     target_date, hint_hour = _resolve_local_date_and_hint(timeframe, user_tz)
-    start_local = user_tz.localize(
-        datetime.combine(target_date, time(hour=hint_hour, minute=0))
-    )
-    end_local = start_local + timedelta(minutes=duration)
+
+    explicit_start = _parse_clock_time(intent.get("start_time"))
+    explicit_end = _parse_clock_time(intent.get("end_time"))
+
+    if explicit_start is not None:
+        start_time_of_day = explicit_start
+    else:
+        start_time_of_day = time(hour=hint_hour, minute=0)
+
+    start_local = user_tz.localize(datetime.combine(target_date, start_time_of_day))
+
+    if explicit_end is not None:
+        end_local = user_tz.localize(datetime.combine(target_date, explicit_end))
+        if end_local <= start_local:
+            end_local += timedelta(days=1)
+        # Derive duration from the explicit end so the spoken response is consistent
+        duration = max(int((end_local - start_local).total_seconds() // 60), 1)
+    else:
+        end_local = start_local + timedelta(minutes=duration)
 
     try:
         creds = await get_google_credentials(user_id)
@@ -375,7 +434,7 @@ async def _schedule_meeting(intent, user_id, gmail, user_name) -> str:
         event_body["attendees"] = [{"email": recipient}]
 
     try:
-        await cal.create_event(event_body)
+        await cal.create_event(event_body, user_timezone=user_tz_name)
     except Exception:
         logger.exception("create_event failed for user %s", user_id)
         return "I had trouble creating that calendar event. Please try again."
