@@ -1,6 +1,5 @@
 "use client";
 
-import { use } from "react";
 import useSWR from "swr";
 import { Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -10,11 +9,11 @@ import { DraftPanel } from "@/components/email/DraftPanel";
 import { ContactSidebar } from "@/components/email/ContactSidebar";
 
 interface PageProps {
-  params: Promise<{ id: string }>;
+  params: { id: string };
 }
 
 export default function EmailDetailPage({ params }: PageProps) {
-  const { id } = use(params);
+  const { id } = params;
 
   const {
     data: email,

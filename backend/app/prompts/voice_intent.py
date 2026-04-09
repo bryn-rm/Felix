@@ -7,14 +7,27 @@ Possible intents:
 - read_emails       : user wants to hear their priority/unread emails
 - reply_to          : user wants to reply to a specific email (extract recipient/context)
 - compose_new       : user wants to write a new email (extract recipient and topic)
-- schedule_meeting  : user wants to schedule a meeting (extract who, when, duration)
-- whats_today       : user wants their status — pending drafts, action items, overdue follow-ups
+- schedule_meeting  : user wants to put something on their calendar. This covers ANY
+                      request to add, create, schedule, book, set up, arrange, or
+                      organise an event, meeting, call, appointment, reminder, or
+                      focus/blocked time — whether or not other people are involved.
+                      Phrases like "add an event", "create a meeting", "block time",
+                      "put X on my calendar", "schedule a 1:1", "book a call",
+                      "put a reminder on my calendar for Friday" all map here.
+                      Extract who (if any), when, and duration.
+- whats_today       : user wants their status — pending drafts, action items, overdue follow-ups, calendar events
 - whos_waiting      : user wants to know who they owe a reply or action to
 - summarise_inbox   : user wants a quick summary of their inbox state
 - start_meeting_notes : user wants to begin recording notes for a current meeting
 - follow_up_with    : user wants to create a follow-up reminder for a person or topic
-- check_calendar    : user wants to know what meetings or events they have (extract timeframe)
-- general_question  : anything that does not fit the above categories
+                      (distinct from schedule_meeting — this is a nudge to chase
+                      someone, not a calendar event)
+- check_calendar    : user wants to READ what is already on their calendar (extract
+                      timeframe). Use this only when the user is asking what's
+                      scheduled — never when they are asking to add something.
+- general_question  : anything that does not fit the above categories. Do NOT use
+                      this as a fallback for calendar/scheduling requests — those
+                      must be classified as schedule_meeting.
 
 Return a JSON object:
 {{
