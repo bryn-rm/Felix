@@ -10,12 +10,12 @@ from app.services.ai_service import ai_service
 
 class StyleProfiler:
 
-    async def build_profile(self, sent_emails: list[dict]) -> dict:
+    async def build_profile(self, sent_emails: list[dict], user_id: str | None = None) -> dict:
         """
         Analyse up to 200 sent emails and return a style profile dict.
         Stored in settings.style_profile.
         """
-        return await ai_service.analyse_writing_style(sent_emails)
+        return await ai_service.analyse_writing_style(sent_emails, user_id=user_id)
 
     async def update_profile(self, user_id: str, new_emails: list[dict]) -> dict:
         """
@@ -29,7 +29,7 @@ class StyleProfiler:
         )
         existing: dict = (row or {}).get("style_profile") or {}
 
-        new_profile = await ai_service.analyse_writing_style(new_emails)
+        new_profile = await ai_service.analyse_writing_style(new_emails, user_id=user_id)
 
         merged = {**existing, **new_profile}
 

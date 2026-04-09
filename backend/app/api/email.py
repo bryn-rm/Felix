@@ -303,6 +303,7 @@ async def generate_draft(
 
     async def sse_stream():
         full_text = ""
+        draft_metadata: dict = {}
         try:
             async for chunk in ai_service.draft_reply(
                 email=dict(email),
@@ -311,6 +312,8 @@ async def generate_draft(
                 style_profile=style_profile,
                 user_name=user_name,
                 user_intent=body.user_intent,
+                user_id=current_user["id"],
+                metadata=draft_metadata,
             ):
                 full_text += chunk
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
@@ -338,7 +341,7 @@ async def generate_draft(
             "UPDATE emails SET draft_generated = TRUE WHERE id = $1 AND user_id = $2",
             email_id, current_user["id"],
         )
-        yield f"data: {json.dumps({'done': True, 'draft_id': draft_id})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'draft_id': draft_id, 'ai_call_id': draft_metadata.get('ai_call_id')})}\n\n"
 
     return StreamingResponse(sse_stream(), media_type="text/event-stream")
 

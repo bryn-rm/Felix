@@ -141,7 +141,7 @@ async def analyse_writing_style(
     creds = await get_google_credentials(user_id)
     gmail = GmailService(creds)
     sent_emails = await gmail.get_sent_emails(max_results=100)
-    result = await ai_service.analyse_writing_style(sent_emails)
+    result = await ai_service.analyse_writing_style(sent_emails, user_id=user_id)
     await db.upsert(
         "settings",
         {

@@ -13,7 +13,8 @@ draft_reply() is an async generator — consume with:
 import json
 import logging
 import re
-from typing import AsyncGenerator
+import time
+from typing import Any, AsyncGenerator
 
 from anthropic import AsyncAnthropic
 
@@ -32,6 +33,74 @@ logger = logging.getLogger(__name__)
 client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 
+# ---------------------------------------------------------------------------
+# ai_calls instrumentation
+#
+# Every Claude call is logged to the ai_calls table for observability
+# (latency, token usage, parse errors, success rates). The helper below is
+# best-effort: a logging failure must never break the user-facing AI call.
+# ---------------------------------------------------------------------------
+
+# Static prompt versions until a real prompt-versioning system lands.
+PROMPT_VERSIONS: dict[str, str] = {
+    "triage":             "v1",
+    "draft":              "v1",
+    "style_analysis":     "v1",
+    "meeting_notes":      "v1",
+    "briefing":           "v1",
+    "voice_intent":       "v1",
+    "voice_general":      "v1",
+    "follow_up_detect":   "v1",
+    "sentiment":          "v1",
+    "polish_draft":       "v1",
+}
+
+
+async def log_ai_call(
+    *,
+    feature: str,
+    model: str,
+    response: Any | None,
+    started_at: float,
+    user_id: str | None = None,
+    success: bool = True,
+    parse_error: bool = False,
+    error_message: str | None = None,
+) -> str | None:
+    """
+    Best-effort insert into ai_calls. Returns the row id or None.
+
+    Imported lazily to avoid a circular import (db -> config -> ... -> services).
+    """
+    try:
+        from app import db as _db  # local import to break import cycles
+
+        usage = getattr(response, "usage", None) if response is not None else None
+        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+        output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
+        latency_ms = int((time.monotonic() - started_at) * 1000)
+
+        row = await _db.insert(
+            "ai_calls",
+            {
+                "user_id":        user_id,
+                "feature":        feature,
+                "prompt_version": PROMPT_VERSIONS.get(feature, "v1"),
+                "model":          model,
+                "input_tokens":   input_tokens,
+                "output_tokens":  output_tokens,
+                "latency_ms":     latency_ms,
+                "success":        success,
+                "parse_error":    parse_error,
+                "error_message":  (error_message or "")[:1000] or None,
+            },
+        )
+        return str(row["id"]) if row and row.get("id") else None
+    except Exception:
+        logger.exception("Failed to log ai_call for feature %s", feature)
+        return None
+
+
 class AIService:
 
     # ------------------------------------------------------------------
@@ -43,37 +112,62 @@ class AIService:
         email: dict,
         vip_list: list[str],
         user_name: str,
+        *,
+        user_id: str | None = None,
     ) -> dict:
         """
         Classify an email and extract metadata.
         Returns parsed triage JSON dict.
         """
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_FAST,
-            max_tokens=500,
-            messages=[{
-                "role": "user",
-                "content": TRIAGE_PROMPT.format(
-                    user_name=user_name,
-                    sender=email.get("from", ""),
-                    subject=email.get("subject", ""),
-                    body=email.get("body", "")[:3000],  # cap tokens
-                    vip_list=", ".join(vip_list) if vip_list else "none",
-                ),
-            }],
-        )
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
         try:
-            return json.loads(_strip_markdown_fences(response.content[0].text))
-        except json.JSONDecodeError:
-            logger.warning("Triage response was not valid JSON: %s", response.content[0].text)
-            return {
-                "category": "fyi",
-                "urgency": "low",
-                "topic": email.get("subject", ""),
-                "sentiment_of_sender": "neutral",
-                "requires_response_by": None,
-                "key_entities": [],
-            }
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_FAST,
+                max_tokens=500,
+                messages=[{
+                    "role": "user",
+                    "content": TRIAGE_PROMPT.format(
+                        user_name=user_name,
+                        sender=email.get("from", ""),
+                        subject=email.get("subject", ""),
+                        body=email.get("body", "")[:3000],  # cap tokens
+                        vip_list=", ".join(vip_list) if vip_list else "none",
+                    ),
+                }],
+            )
+            try:
+                return json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                parse_error = True
+                error_message = f"JSONDecodeError: {e}"
+                logger.warning("Triage response was not valid JSON: %s", response.content[0].text)
+                return {
+                    "category": "fyi",
+                    "urgency": "low",
+                    "topic": email.get("subject", ""),
+                    "sentiment_of_sender": "neutral",
+                    "requires_response_by": None,
+                    "key_entities": [],
+                }
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="triage",
+                model=settings.ANTHROPIC_MODEL_FAST,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+            )
 
     # ------------------------------------------------------------------
     # Draft reply — Sonnet, streaming
@@ -87,6 +181,9 @@ class AIService:
         style_profile: dict,
         user_name: str,
         user_intent: str = "",
+        *,
+        user_id: str | None = None,
+        metadata: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         Stream a draft reply token by token.
@@ -94,37 +191,72 @@ class AIService:
         Usage:
             async for chunk in ai_service.draft_reply(...):
                 full_text += chunk
+
+        If `metadata` is provided, after the stream completes the dict will
+        be updated with `{"ai_call_id": "<uuid or None>"}` so the caller can
+        link a follow-up ai_feedback row to the originating ai_call.
         """
-        async with client.messages.stream(
-            model=settings.ANTHROPIC_MODEL_SMART,
-            max_tokens=1000,
-            messages=[{
-                "role": "user",
-                "content": DRAFT_PROMPT.format(
-                    user_name=user_name,
-                    formality=style_profile.get("formality_score", 0.5),
-                    avg_words=int(style_profile.get("avg_words_per_email", 100)),
-                    greeting=_first(style_profile.get("greeting_patterns"), "Hi"),
-                    sign_off=_first(style_profile.get("sign_off_patterns"), "Thanks"),
-                    bullet_tendency=style_profile.get("bullet_point_tendency", 0),
-                    phrases=", ".join(style_profile.get("hedging_language") or []) or "none",
-                    relationship_context=contact.get("their_communication_style") or "unknown",
-                    thread_history=_format_thread(thread_history),
-                    meeting_context="none",
-                    calendar_context="none",
-                    email_content=_format_email(email),
-                    user_intent=user_intent or "Reply appropriately",
-                ),
-            }],
-        ) as stream:
-            async for text in stream.text_stream:
-                yield text
+        started = time.monotonic()
+        final_message = None
+        success = True
+        error_message: str | None = None
+        try:
+            async with client.messages.stream(
+                model=settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=1000,
+                messages=[{
+                    "role": "user",
+                    "content": DRAFT_PROMPT.format(
+                        user_name=user_name,
+                        formality=style_profile.get("formality_score", 0.5),
+                        avg_words=int(style_profile.get("avg_words_per_email", 100)),
+                        greeting=_first(style_profile.get("greeting_patterns"), "Hi"),
+                        sign_off=_first(style_profile.get("sign_off_patterns"), "Thanks"),
+                        bullet_tendency=style_profile.get("bullet_point_tendency", 0),
+                        phrases=", ".join(style_profile.get("hedging_language") or []) or "none",
+                        relationship_context=contact.get("their_communication_style") or "unknown",
+                        thread_history=_format_thread(thread_history),
+                        meeting_context="none",
+                        calendar_context="none",
+                        email_content=_format_email(email),
+                        user_intent=user_intent or "Reply appropriately",
+                    ),
+                }],
+            ) as stream:
+                async for text in stream.text_stream:
+                    yield text
+                # After stream completes, capture the final message for usage stats.
+                try:
+                    final_message = await stream.get_final_message()
+                except Exception:
+                    logger.debug("draft_reply: could not retrieve final message for usage stats")
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            ai_call_id = await log_ai_call(
+                feature="draft",
+                model=settings.ANTHROPIC_MODEL_SMART,
+                response=final_message,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                error_message=error_message,
+            )
+            if metadata is not None:
+                metadata["ai_call_id"] = ai_call_id
 
     # ------------------------------------------------------------------
     # Style analysis — Sonnet (runs once on onboarding, weekly refresh)
     # ------------------------------------------------------------------
 
-    async def analyse_writing_style(self, sent_emails: list[dict]) -> dict:
+    async def analyse_writing_style(
+        self,
+        sent_emails: list[dict],
+        *,
+        user_id: str | None = None,
+    ) -> dict:
         """
         Build a StyleProfile from the user's sent email history.
         Samples up to 50 emails to stay within token limits.
@@ -137,19 +269,42 @@ class AIService:
             f"To: {e.get('to', '')}\nSubject: {e.get('subject', '')}\n{e.get('body', '')[:500]}"
             for e in sample
         )
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_SMART,
-            max_tokens=1000,
-            messages=[{
-                "role": "user",
-                "content": STYLE_ANALYSIS_PROMPT.format(emails=email_text),
-            }],
-        )
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
         try:
-            return json.loads(_strip_markdown_fences(response.content[0].text))
-        except json.JSONDecodeError:
-            logger.warning("Style analysis response was not valid JSON")
-            return _default_style_profile()
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=1000,
+                messages=[{
+                    "role": "user",
+                    "content": STYLE_ANALYSIS_PROMPT.format(emails=email_text),
+                }],
+            )
+            try:
+                return json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                parse_error = True
+                error_message = f"JSONDecodeError: {e}"
+                logger.warning("Style analysis response was not valid JSON")
+                return _default_style_profile()
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="style_analysis",
+                model=settings.ANTHROPIC_MODEL_SMART,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+            )
 
     # ------------------------------------------------------------------
     # Meeting notes — Sonnet
@@ -160,127 +315,299 @@ class AIService:
         transcript: str,
         attendees: list[str],
         title: str,
+        *,
+        user_id: str | None = None,
     ) -> dict:
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_SMART,
-            max_tokens=2000,
-            messages=[{
-                "role": "user",
-                "content": MEETING_NOTES_PROMPT.format(
-                    meeting_title=title,
-                    attendees=", ".join(attendees),
-                    transcript=transcript,
-                ),
-            }],
-        )
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
         try:
-            return json.loads(_strip_markdown_fences(response.content[0].text))
-        except json.JSONDecodeError:
-            logger.warning("Meeting notes response was not valid JSON")
-            return {"summary": response.content[0].text, "action_items": [], "decisions": [], "open_questions": []}
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=2000,
+                messages=[{
+                    "role": "user",
+                    "content": MEETING_NOTES_PROMPT.format(
+                        meeting_title=title,
+                        attendees=", ".join(attendees),
+                        transcript=transcript,
+                    ),
+                }],
+            )
+            try:
+                return json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                parse_error = True
+                error_message = f"JSONDecodeError: {e}"
+                logger.warning("Meeting notes response was not valid JSON")
+                return {"summary": response.content[0].text, "action_items": [], "decisions": [], "open_questions": []}
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="meeting_notes",
+                model=settings.ANTHROPIC_MODEL_SMART,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+            )
 
     # ------------------------------------------------------------------
     # Daily briefing — Sonnet
     # ------------------------------------------------------------------
 
-    async def generate_daily_briefing(self, context: dict) -> str:
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_SMART,
-            max_tokens=400,
-            messages=[{
-                "role": "user",
-                "content": BRIEFING_PROMPT.format(**context),
-            }],
-        )
-        return response.content[0].text
+    async def generate_daily_briefing(
+        self,
+        context: dict,
+        *,
+        user_id: str | None = None,
+    ) -> str:
+        started = time.monotonic()
+        response = None
+        success = True
+        error_message: str | None = None
+        try:
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=400,
+                messages=[{
+                    "role": "user",
+                    "content": BRIEFING_PROMPT.format(**context),
+                }],
+            )
+            return response.content[0].text
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="briefing",
+                model=settings.ANTHROPIC_MODEL_SMART,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                error_message=error_message,
+            )
 
     # ------------------------------------------------------------------
     # Voice intent routing — Haiku (latency critical)
     # ------------------------------------------------------------------
 
-    async def parse_voice_intent(self, transcript: str) -> dict:
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_FAST,
-            max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": VOICE_INTENT_PROMPT.format(transcript=transcript),
-            }],
-        )
+    async def parse_voice_intent(
+        self,
+        transcript: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict:
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
         try:
-            return json.loads(_strip_markdown_fences(response.content[0].text))
-        except json.JSONDecodeError:
-            logger.warning("Voice intent response was not valid JSON: %s", response.content[0].text)
-            return {"intent": "general_question", "raw_transcript": transcript}
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_FAST,
+                max_tokens=200,
+                messages=[{
+                    "role": "user",
+                    "content": VOICE_INTENT_PROMPT.format(transcript=transcript),
+                }],
+            )
+            try:
+                return json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                parse_error = True
+                error_message = f"JSONDecodeError: {e}"
+                logger.warning("Voice intent response was not valid JSON: %s", response.content[0].text)
+                return {"intent": "general_question", "raw_transcript": transcript}
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="voice_intent",
+                model=settings.ANTHROPIC_MODEL_FAST,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+            )
 
     # ------------------------------------------------------------------
     # General voice question — Haiku (conversational fallback)
     # ------------------------------------------------------------------
 
-    async def answer_general_voice_question(self, transcript: str, user_name: str) -> str:
-        """Generate a short conversational response for questions that don't match a structured intent."""
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_FAST,
-            max_tokens=300,
-            system=(
-                "You are Felix, an AI chief of staff. The user just asked you a voice question "
-                "that doesn't match a specific action. Respond conversationally in 1-3 short sentences. "
-                "Keep it natural and suitable for text-to-speech. Do not use markdown, bullet points, "
-                "or special formatting. If you can't help, suggest what Felix can do (check emails, "
-                "calendar, follow-ups, drafts)."
-            ),
-            messages=[{
-                "role": "user",
-                "content": f"User ({user_name}) said: {transcript}",
-            }],
-        )
-        return response.content[0].text.strip()
+    async def answer_general_voice_question(
+        self,
+        transcript: str,
+        user_name: str,
+        felix_context: str = "",
+        *,
+        user_id: str | None = None,
+    ) -> str:
+        """Generate a short conversational response for questions that don't match a structured intent.
+
+        felix_context, if provided, is a short multi-line snapshot of what Felix
+        knows about the user (inbox counts, top contacts, today's calendar) that
+        the model can reference when answering.
+        """
+        user_message = f"User ({user_name}) said: {transcript}"
+        if felix_context:
+            user_message = (
+                f"What Felix knows about {user_name} right now:\n{felix_context}\n\n"
+                f"{user_message}"
+            )
+
+        started = time.monotonic()
+        response = None
+        success = True
+        error_message: str | None = None
+        try:
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_FAST,
+                max_tokens=300,
+                system=(
+                    "You are Felix, an AI chief of staff. The user just asked you a voice question "
+                    "that doesn't match a specific action. Respond conversationally in 1-3 short sentences. "
+                    "Keep it natural and suitable for text-to-speech. Do not use markdown, bullet points, "
+                    "or special formatting. When relevant, reference the concrete facts in the "
+                    "'What Felix knows' block — but don't recite them mechanically. If you can't help, "
+                    "suggest what Felix can do (check emails, calendar, follow-ups, drafts)."
+                ),
+                messages=[{
+                    "role": "user",
+                    "content": user_message,
+                }],
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="voice_general",
+                model=settings.ANTHROPIC_MODEL_FAST,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                error_message=error_message,
+            )
 
     # ------------------------------------------------------------------
     # Follow-up detection — Haiku
     # ------------------------------------------------------------------
 
-    async def detect_follow_ups(self, sent_email: dict) -> dict | None:
+    async def detect_follow_ups(
+        self,
+        sent_email: dict,
+        *,
+        user_id: str | None = None,
+    ) -> dict | None:
         """Return follow-up metadata if the sent email needs tracking, else None."""
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_FAST,
-            max_tokens=300,
-            messages=[{
-                "role": "user",
-                "content": FOLLOW_UP_DETECTION_PROMPT.format(
-                    to=sent_email.get("to", ""),
-                    subject=sent_email.get("subject", ""),
-                    body=sent_email.get("body", "")[:2000],
-                ),
-            }],
-        )
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
         try:
-            result = json.loads(_strip_markdown_fences(response.content[0].text))
-        except json.JSONDecodeError:
-            return None
-        return result if result.get("needs_follow_up") else None
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_FAST,
+                max_tokens=300,
+                messages=[{
+                    "role": "user",
+                    "content": FOLLOW_UP_DETECTION_PROMPT.format(
+                        to=sent_email.get("to", ""),
+                        subject=sent_email.get("subject", ""),
+                        body=sent_email.get("body", "")[:2000],
+                    ),
+                }],
+            )
+            try:
+                result = json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                parse_error = True
+                error_message = f"JSONDecodeError: {e}"
+                return None
+            return result if result.get("needs_follow_up") else None
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="follow_up_detect",
+                model=settings.ANTHROPIC_MODEL_FAST,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+            )
 
     # ------------------------------------------------------------------
     # Sentiment analysis — Haiku
     # ------------------------------------------------------------------
 
-    async def analyse_sentiment(self, email: dict) -> dict:
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_FAST,
-            max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": SENTIMENT_PROMPT.format(
-                    sender=email.get("from", ""),
-                    subject=email.get("subject", ""),
-                    body=email.get("body", "")[:2000],
-                ),
-            }],
-        )
+    async def analyse_sentiment(
+        self,
+        email: dict,
+        *,
+        user_id: str | None = None,
+    ) -> dict:
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
         try:
-            return json.loads(_strip_markdown_fences(response.content[0].text))
-        except json.JSONDecodeError:
-            return {"sentiment": "neutral", "urgency_signals": [], "pressure_level": "none", "notable_phrases": []}
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_FAST,
+                max_tokens=200,
+                messages=[{
+                    "role": "user",
+                    "content": SENTIMENT_PROMPT.format(
+                        sender=email.get("from", ""),
+                        subject=email.get("subject", ""),
+                        body=email.get("body", "")[:2000],
+                    ),
+                }],
+            )
+            try:
+                return json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                parse_error = True
+                error_message = f"JSONDecodeError: {e}"
+                return {"sentiment": "neutral", "urgency_signals": [], "pressure_level": "none", "notable_phrases": []}
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="sentiment",
+                model=settings.ANTHROPIC_MODEL_FAST,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -120,7 +120,7 @@ async def _process_email(
     try:
         # 1. AI triage
         triage = await ai_service.triage_email(
-            email, vip_list=vip_list, user_name=user_name
+            email, vip_list=vip_list, user_name=user_name, user_id=user_id
         )
         category: str = triage.get("category", "fyi")
 
@@ -257,12 +257,15 @@ async def _generate_and_store_draft(
     # Collect streaming draft
     draft_text = ""
     try:
+        draft_metadata: dict = {}
         async for chunk in ai_service.draft_reply(
             email=email,
             thread_history=thread_history,
             contact=contact,
             style_profile=style_profile,
             user_name=user_name,
+            user_id=user_id,
+            metadata=draft_metadata,
         ):
             draft_text += chunk
     except Exception:
@@ -324,7 +327,7 @@ async def refresh_user_style_profile(user_id: str) -> None:
         logger.info("No sent emails found for user %s", user_id)
         return
 
-    profile = await ai_service.analyse_writing_style(sent)
+    profile = await ai_service.analyse_writing_style(sent, user_id=user_id)
     await db.upsert(
         "settings",
         {"user_id": user_id, "style_profile": profile},

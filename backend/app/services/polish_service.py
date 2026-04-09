@@ -2,12 +2,14 @@
 Phase 7 polish service: digest mode, weekly review, templates, style evolution.
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 
 from anthropic import AsyncAnthropic
 
 from app import db
 from app.config import settings as _settings
+from app.services.ai_service import log_ai_call
 
 
 _client = AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY)
@@ -26,20 +28,35 @@ class PolishService:
     async def polish_draft_text(self, user_id: str, text: str) -> str:
         """
         Polish a draft email body. Returns the polished text only.
-
-        user_id is currently unused but kept in the signature so we can
-        layer in per-user style profiles later without changing the API.
         """
-        _ = user_id  # reserved for future per-user style customisation
-        response = await _client.messages.create(
-            model=_settings.ANTHROPIC_MODEL_SMART,
-            max_tokens=2000,
-            system=_POLISH_DRAFT_SYSTEM,
-            messages=[{"role": "user", "content": text}],
-        )
-        block = response.content[0]
-        polished = getattr(block, "text", "").strip()
-        return polished or text
+        started = time.monotonic()
+        response = None
+        success = True
+        error_message: str | None = None
+        try:
+            response = await _client.messages.create(
+                model=_settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=2000,
+                system=_POLISH_DRAFT_SYSTEM,
+                messages=[{"role": "user", "content": text}],
+            )
+            block = response.content[0]
+            polished = getattr(block, "text", "").strip()
+            return polished or text
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="polish_draft",
+                model=_settings.ANTHROPIC_MODEL_SMART,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                error_message=error_message,
+            )
 
     async def build_digest(self, user_id: str, window_hours: int = 6) -> dict:
         since = datetime.now(timezone.utc) - timedelta(hours=window_hours)

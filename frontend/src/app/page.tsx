@@ -22,7 +22,7 @@ export default async function RootPage() {
   const { data: { session } } = await supabase.auth.getSession()
 
   if (session) {
-    redirect('/dashboard')
+    redirect('/home')
   } else {
     redirect('/login')
   }

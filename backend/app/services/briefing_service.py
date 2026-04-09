@@ -191,7 +191,7 @@ class BriefingService:
         prompt_context = {k: v for k, v in context.items() if not k.startswith("_")}
 
         # Generate spoken text via Claude Sonnet
-        briefing_text = await ai_service.generate_daily_briefing(prompt_context)
+        briefing_text = await ai_service.generate_daily_briefing(prompt_context, user_id=user_id)
 
         # Generate TTS audio and upload to Supabase Storage
         audio_url: str = ""
@@ -208,13 +208,13 @@ class BriefingService:
             "briefings",
             {
                 "user_id": user_id,
-                "date": today.isoformat(),
+                "date": today,
                 "text": briefing_text,
                 "audio_url": audio_url or None,
                 "priority_emails": context.get("_priority_emails", []),
                 "calendar_summary": context.get("_calendar_events", []),
                 "follow_ups_summary": context.get("_follow_ups", []),
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.now(timezone.utc),
             },
             conflict_columns=["user_id", "date"],
         )

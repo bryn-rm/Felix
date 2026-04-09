@@ -52,7 +52,7 @@ export default function OnboardingPage() {
         timezone,
         briefing_time: briefingTime,
       });
-      router.replace("/dashboard");
+      router.replace("/home");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save settings");
       setLoading(false);
@@ -60,7 +60,7 @@ export default function OnboardingPage() {
   }
 
   async function handleSkip() {
-    router.replace("/dashboard");
+    router.replace("/home");
   }
 
   return (

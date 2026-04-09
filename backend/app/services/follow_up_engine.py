@@ -51,7 +51,7 @@ class FollowUpEngine:
                 return None
 
         # AI detection
-        result = await ai_service.detect_follow_ups(sent_email)
+        result = await ai_service.detect_follow_ups(sent_email, user_id=user_id)
         if result is None or not result.get("needs_follow_up"):
             return None
 
@@ -180,6 +180,7 @@ class FollowUpEngine:
                     f"{fu.get('topic') or fu.get('subject') or 'a previous matter'} "
                     f"and haven't heard back. Keep it to 2-3 sentences."
                 ),
+                user_id=user_id,
             ):
                 full_text += chunk
         except Exception:

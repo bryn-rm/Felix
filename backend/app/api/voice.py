@@ -94,7 +94,7 @@ async def voice_chat(
         logger.info("No Google credentials for chat user %s", user_id)
 
     try:
-        intent = await ai_service.parse_voice_intent(message)
+        intent = await ai_service.parse_voice_intent(message, user_id=user_id)
     except Exception:
         logger.exception("parse_voice_intent failed for user %s", user_id)
         intent = {"intent": "general_question", "raw_transcript": message}
@@ -224,7 +224,7 @@ async def voice_stream(websocket: WebSocket) -> None:
 
             # Parse intent with Claude Haiku
             try:
-                intent = await ai_service.parse_voice_intent(transcript)
+                intent = await ai_service.parse_voice_intent(transcript, user_id=user_id)
             except Exception:
                 logger.exception("parse_voice_intent failed for user %s", user_id)
                 intent = {"intent": "general_question", "raw_transcript": transcript}

@@ -20,9 +20,9 @@ _SENTIMENT_SCORE = {
 
 class SentimentAnalyser:
 
-    async def analyse(self, email: dict) -> dict:
+    async def analyse(self, email: dict, user_id: str | None = None) -> dict:
         """Return sentiment metadata for a single email."""
-        return await ai_service.analyse_sentiment(email)
+        return await ai_service.analyse_sentiment(email, user_id=user_id)
 
     async def update_contact_trend(self, user_id: str, contact_email: str) -> None:
         """

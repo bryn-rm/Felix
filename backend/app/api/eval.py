@@ -12,6 +12,7 @@ Endpoints (mounted at /admin):
 Admin access is gated by the ADMIN_EMAIL environment variable.
 """
 
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -43,7 +44,7 @@ def _require_admin(current_user: dict) -> None:
 
 
 class FeedbackCreate(BaseModel):
-    ai_call_id: str
+    ai_call_id: str | None = None
     feature: str
     rating: int           # 1 = good, 2 = edited, 0 = wrong / corrected
     correction: str | None = None
@@ -55,17 +56,38 @@ class FeedbackCreate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
 @router.post("/feedback")
 async def submit_feedback(
     body: FeedbackCreate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Store a user rating for an AI-generated response (best-effort)."""
+    """
+    Store a user rating for an AI-generated response (best-effort).
+
+    The frontend currently passes either a draft UUID or an email TEXT id as
+    ai_call_id, neither of which is a real ai_calls.id. We validate the value
+    is a UUID *and* exists in ai_calls before storing it; otherwise we drop
+    it to NULL so the rating is still captured rather than failing the insert.
+    """
+    valid_ai_call_id: str | None = None
+    if body.ai_call_id and _UUID_RE.match(body.ai_call_id):
+        exists = await db.query_one(
+            "SELECT id FROM ai_calls WHERE id = $1", body.ai_call_id
+        )
+        if exists:
+            valid_ai_call_id = body.ai_call_id
+
     row = await db.insert(
         "ai_feedback",
         {
             "user_id": current_user["id"],
-            "ai_call_id": body.ai_call_id,
+            "ai_call_id": valid_ai_call_id,
             "feature": body.feature,
             "rating": body.rating,
             "correction": body.correction,
