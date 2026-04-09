@@ -95,7 +95,14 @@ export function ContactSidebar({ senderEmail }: ContactSidebarProps) {
     `contact-${senderEmail}`,
     async () => {
       try {
-        return await api.get<Contact>(`/contacts/${encodedEmail}`);
+        // Backend returns { contact, recent_emails, recent_meetings } — unwrap.
+        const res = await api.get<{ contact: Contact } | Contact>(
+          `/contacts/${encodedEmail}`,
+        );
+        if (res && typeof res === "object" && "contact" in res) {
+          return (res as { contact: Contact }).contact ?? null;
+        }
+        return (res as Contact) ?? null;
       } catch (err) {
         if (err instanceof ApiError && err.status === 404) return null;
         throw err;
@@ -148,8 +155,10 @@ export function ContactSidebar({ senderEmail }: ContactSidebarProps) {
   }
 
   // ── Full contact card ──────────────────────────────────────────────────────
-  const displayName = contact.name ?? contact.email;
-  const initial = displayName.slice(0, 1).toUpperCase();
+  const displayName = contact.name ?? contact.email ?? senderEmail ?? "";
+  const initial = displayName?.slice(0, 1).toUpperCase() ?? "?";
+  const openCommitments = contact.open_commitments ?? [];
+  const theirOpenCommitments = contact.their_open_commitments ?? [];
 
   return (
     <div className="rounded-xl border border-slate-700/50 bg-slate-800/40 p-5 space-y-4">
@@ -182,7 +191,7 @@ export function ContactSidebar({ senderEmail }: ContactSidebarProps) {
         <div>
           <p className="text-slate-500">Emails exchanged</p>
           <p className="mt-0.5 font-medium text-slate-200">
-            {contact.total_emails.toLocaleString()}
+            {(contact.total_emails ?? 0).toLocaleString()}
           </p>
         </div>
         <div>
@@ -205,16 +214,15 @@ export function ContactSidebar({ senderEmail }: ContactSidebarProps) {
       )}
 
       {/* Commitments */}
-      {(contact.open_commitments.length > 0 ||
-        contact.their_open_commitments.length > 0) && (
+      {(openCommitments.length > 0 || theirOpenCommitments.length > 0) && (
         <>
           <hr className="border-slate-700/50" />
           <CommitmentList
-            items={contact.open_commitments}
+            items={openCommitments}
             label="Your open commitments"
           />
           <CommitmentList
-            items={contact.their_open_commitments}
+            items={theirOpenCommitments}
             label="Their open commitments"
           />
         </>
