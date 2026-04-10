@@ -11,6 +11,7 @@
  * Mobile bottom tab bar is rendered separately by AppShell.
  */
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -130,9 +131,13 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
       {/* Top — logo + pin toggle */}
       <div className="flex items-center justify-between h-14 px-3 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-indigo-600 text-sm font-bold text-white">
-            F
-          </div>
+          <Image
+            src="/sidebar-icon-32.png"
+            alt="Felix"
+            width={32}
+            height={32}
+            className="h-8 w-8 shrink-0 rounded-md"
+          />
           {expanded && (
             <span className="truncate text-sm font-semibold tracking-tight text-slate-100">
               Felix
