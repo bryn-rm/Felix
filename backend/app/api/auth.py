@@ -92,10 +92,10 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
 
     if existing and expires_at_val and expires_at_val > now:
         nonce = existing["nonce"]
-        logger.info("[connect] step 2 — reusing existing unexpired nonce: nonce=%s", nonce)
+        logger.info("[connect] step 2 — reusing existing unexpired nonce for user_id=%s", user_id)
     else:
         nonce = secrets.token_urlsafe(32)
-        logger.info("[connect] step 2 — nonce generated: nonce=%s", nonce)
+        logger.info("[connect] step 2 — nonce generated for user_id=%s", user_id)
 
         expires_at = now + timedelta(minutes=10)
         try:
@@ -173,12 +173,7 @@ async def google_callback(
             raise HTTPException(status_code=400, detail="OAuth state not found. Please try connecting again.")
 
         if nonce_row["nonce"] != nonce:
-            logger.warning(
-                "[callback] nonce mismatch for user_id=%s expected=%s received=%s",
-                user_id,
-                nonce_row["nonce"],
-                nonce,
-            )
+            logger.warning("[callback] nonce mismatch for user_id=%s", user_id)
             raise HTTPException(status_code=400, detail="OAuth state mismatch. Please retry Google connect.")
 
         expires_at = nonce_row["expires_at"]
@@ -209,7 +204,7 @@ async def google_callback(
                 },
             )
 
-        logger.info("[callback] Google token exchange response: status=%d body=%s", token_response.status_code, token_response.text)
+        logger.info("[callback] Google token exchange response: status=%d", token_response.status_code)
 
         if token_response.status_code != 200:
             raise HTTPException(
@@ -220,7 +215,7 @@ async def google_callback(
         try:
             tokens = token_response.json()
         except Exception:
-            logger.error("[callback] Google token exchange returned non-JSON: %s", token_response.text)
+            logger.error("[callback] Google token exchange returned non-JSON response (status=%d)", token_response.status_code)
             raise HTTPException(
                 status_code=502,
                 detail="Google token exchange returned an unexpected response.",

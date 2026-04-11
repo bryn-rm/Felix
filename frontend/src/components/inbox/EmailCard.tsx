@@ -61,13 +61,13 @@ const URGENCY_CLASSES: Record<string, string> = {
   low: "bg-slate-500/20 text-slate-400 ring-slate-500/30",
 };
 
-const CATEGORY_DOT: Record<string, string> = {
-  action_required: "bg-red-500",
-  fyi: "bg-slate-400",
-  waiting_on: "bg-blue-500",
-  newsletter: "bg-purple-500",
-  automated: "bg-slate-600",
-  vip: "bg-indigo-500",
+const CATEGORY_BADGE: Record<string, { classes: string; label: string }> = {
+  action_required: { classes: "bg-red-500/20 text-red-400 ring-red-500/30", label: "Action Required" },
+  fyi:             { classes: "bg-slate-500/20 text-slate-400 ring-slate-500/30", label: "FYI" },
+  waiting_on:      { classes: "bg-blue-500/20 text-blue-400 ring-blue-500/30", label: "Waiting On" },
+  newsletter:      { classes: "bg-purple-500/20 text-purple-400 ring-purple-500/30", label: "Newsletter" },
+  automated:       { classes: "bg-slate-600/20 text-slate-500 ring-slate-600/30", label: "Automated" },
+  vip:             { classes: "bg-amber-500/20 text-amber-400 ring-amber-500/30", label: "VIP" },
 };
 
 // ---------------------------------------------------------------------------
@@ -136,7 +136,9 @@ function CorrectionPopover({
           className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-slate-200 transition-colors hover:bg-slate-700 disabled:opacity-50"
         >
           <span
-            className={`h-2 w-2 rounded-full ${CATEGORY_DOT[cat] ?? "bg-slate-400"}`}
+            className={`h-2 w-2 shrink-0 rounded-full ${
+              ({ action_required: "bg-red-400", fyi: "bg-slate-400", waiting_on: "bg-blue-400", newsletter: "bg-purple-400", automated: "bg-slate-500" } as Record<string, string>)[cat] ?? "bg-slate-400"
+            }`}
           />
           {cat.replace(/_/g, " ")}
         </button>
@@ -162,8 +164,7 @@ export function EmailCard({ email }: EmailCardProps) {
   const initials = senderInitials(email.from_name, email.from_email);
   const urgencyClass =
     email.urgency ? (URGENCY_CLASSES[email.urgency] ?? URGENCY_CLASSES.low) : null;
-  const dotClass =
-    email.category ? (CATEGORY_DOT[email.category] ?? "bg-slate-400") : "bg-slate-400";
+  const categoryBadge = email.category ? CATEGORY_BADGE[email.category] ?? null : null;
 
   return (
     <div
@@ -214,10 +215,13 @@ export function EmailCard({ email }: EmailCardProps) {
           </span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span
-            className={`h-2 w-2 rounded-full ${dotClass}`}
-            title={email.category ?? undefined}
-          />
+          {categoryBadge && (
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] font-medium leading-none ring-1 ${categoryBadge.classes}`}
+            >
+              {categoryBadge.label}
+            </span>
+          )}
           {/* Thumbs-down feedback trigger — visible on hover */}
           <div className="relative">
             <button
