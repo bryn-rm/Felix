@@ -145,10 +145,19 @@ class GmailService:
     # Labels
     # ------------------------------------------------------------------
 
-    async def get_or_create_label(self, name: str) -> str:
+    async def get_or_create_label(
+        self,
+        name: str,
+        color: dict[str, str] | None = None,
+    ) -> str:
         """
         Return the label ID for `name`, creating it if it doesn't exist.
         Uses a nested path for readability: e.g. "Felix/Action Required".
+
+        If `color` is given (a dict with `backgroundColor` and `textColor` from
+        Gmail's fixed palette), it is set on creation and also patched onto a
+        pre-existing label so the colour stays in sync when the mapping changes
+        or when the label was first created by an older version without colour.
         """
         request = self.service.users().labels().list(userId="me")
         try:
@@ -159,15 +168,31 @@ class GmailService:
 
         for label in result.get("labels", []):
             if label["name"].lower() == name.lower():
-                return label["id"]
+                label_id = label["id"]
+                if color is not None:
+                    patch_request = self.service.users().labels().patch(
+                        userId="me",
+                        id=label_id,
+                        body={"color": color},
+                    )
+                    try:
+                        await asyncio.to_thread(patch_request.execute)
+                    except HttpError as e:
+                        _handle_http_error(e, context=f"patch colour on label '{name}'")
+                        raise
+                return label_id
+
+        create_body: dict = {
+            "name": name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+        }
+        if color is not None:
+            create_body["color"] = color
 
         create_request = self.service.users().labels().create(
             userId="me",
-            body={
-                "name": name,
-                "labelListVisibility": "labelShow",
-                "messageListVisibility": "show",
-            },
+            body=create_body,
         )
         try:
             created = await asyncio.to_thread(create_request.execute)

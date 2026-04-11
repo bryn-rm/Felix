@@ -36,6 +36,17 @@ CATEGORY_LABEL = {
     "automated":       "Felix/Automated",
     "vip":             "Felix/VIP",
 }
+# Colours applied to the Gmail labels above, picked from Gmail's fixed label
+# palette so they visually match the in-app category badges in EmailCard.tsx.
+# Gmail rejects arbitrary hex values — only the documented palette pairs work.
+CATEGORY_LABEL_COLOR = {
+    "action_required": {"backgroundColor": "#fb4c2f", "textColor": "#ffffff"},
+    "fyi":             {"backgroundColor": "#cccccc", "textColor": "#000000"},
+    "waiting_on":      {"backgroundColor": "#4a86e8", "textColor": "#ffffff"},
+    "newsletter":      {"backgroundColor": "#a479e2", "textColor": "#ffffff"},
+    "automated":       {"backgroundColor": "#666666", "textColor": "#ffffff"},
+    "vip":             {"backgroundColor": "#ffad47", "textColor": "#000000"},
+}
 PROCESSED_LABEL = "felix-processed"  # flat label used as the sync sentinel
 
 
@@ -194,19 +205,30 @@ async def _apply_gmail_labels(
     are never shared across different users' Gmail accounts.
     """
     label_name = CATEGORY_LABEL.get(category, "Felix/FYI")
+    label_color = CATEGORY_LABEL_COLOR.get(category) or CATEGORY_LABEL_COLOR["fyi"]
 
-    label_id, processed_id = await _get_or_create_labels(gmail, label_name, label_cache)
+    label_id, processed_id = await _get_or_create_labels(
+        gmail, label_name, label_color, label_cache
+    )
     await gmail.apply_labels(email_id, [label_id, processed_id])
 
 
 async def _get_or_create_labels(
     gmail: GmailService,
     category_label_name: str,
+    category_label_color: dict[str, str],
     label_cache: dict[str, str],
 ) -> tuple[str, str]:
-    """Return (category_label_id, processed_label_id), creating them if needed."""
+    """Return (category_label_id, processed_label_id), creating them if needed.
+
+    The category label is created/patched with its mapped colour so Gmail's
+    label chip matches the in-app badge. The per-run cache ensures we only
+    issue the create/patch round-trip once per category per sync run.
+    """
     if category_label_name not in label_cache:
-        label_cache[category_label_name] = await gmail.get_or_create_label(category_label_name)
+        label_cache[category_label_name] = await gmail.get_or_create_label(
+            category_label_name, color=category_label_color
+        )
     if PROCESSED_LABEL not in label_cache:
         label_cache[PROCESSED_LABEL] = await gmail.get_or_create_label(PROCESSED_LABEL)
     return label_cache[category_label_name], label_cache[PROCESSED_LABEL]
