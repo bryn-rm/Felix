@@ -9,9 +9,20 @@ for correct backend scoping.
 
 import json as _json
 import re
+from datetime import date, datetime, time
+from functools import partial
 
 import asyncpg
 from app.config import settings
+
+
+def _json_default(obj):
+    if isinstance(obj, (datetime, date, time)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
+_json_dumps = partial(_json.dumps, default=_json_default)
 
 _SAFE_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
 
@@ -29,13 +40,13 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
     """Register JSON/JSONB codecs so Python dicts/lists are auto-serialised."""
     await conn.set_type_codec(
         "jsonb",
-        encoder=_json.dumps,
+        encoder=_json_dumps,
         decoder=_json.loads,
         schema="pg_catalog",
     )
     await conn.set_type_codec(
         "json",
-        encoder=_json.dumps,
+        encoder=_json_dumps,
         decoder=_json.loads,
         schema="pg_catalog",
     )
