@@ -85,7 +85,7 @@ export default function TemplatesPage() {
     isLoading,
     error,
     mutate,
-  } = useSWR<{ templates: Template[] }>("/templates/", (url: string) =>
+  } = useSWR<{ templates: Template[] }>("/templates", (url: string) =>
     api.get<{ templates: Template[] }>(url),
   );
 

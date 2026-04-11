@@ -116,7 +116,7 @@ export function TemplateEditor({ template, onClose, onSave }: TemplateEditorProp
       if (isEdit) {
         await api.patch(`/templates/${template!.id}`, payload);
       } else {
-        await api.post("/templates/", payload);
+        await api.post("/templates", payload);
       }
       onSave();
     } catch (err) {

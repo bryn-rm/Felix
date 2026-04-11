@@ -57,7 +57,7 @@ async def list_templates(current_user: dict = Depends(get_current_user)):
     """Return all templates for this user, ordered by most-used then most-recent."""
     rows = await db.query(
         """
-        SELECT id, name, subject_template, tags, use_count, created_at, updated_at
+        SELECT id, name, subject_template, body_template, tags, use_count, created_at, updated_at
         FROM smart_templates
         WHERE user_id = $1
         ORDER BY use_count DESC, updated_at DESC

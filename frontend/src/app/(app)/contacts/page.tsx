@@ -129,7 +129,7 @@ export default function ContactsPage() {
   const [sort, setSort] = useState<SortKey>("strength");
 
   const { data, isLoading, error } = useSWR<{ contacts: Contact[]; count: number }>(
-    "/contacts/",
+    "/contacts",
     (url: string) => api.get<{ contacts: Contact[]; count: number }>(url),
   );
 
