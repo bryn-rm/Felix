@@ -36,6 +36,8 @@ Return a JSON object:
   "topic": "<string, subject of the email/meeting, null if not applicable>",
   "reply_content": "<string, what the user wants to say, null if not applicable>",
   "timeframe": "<string, e.g. 'next week', 'tomorrow afternoon', null if not applicable>",
+  "date_iso": "<string in local YYYY-MM-DD form when the user gave an explicit calendar date like 'April 18th'; null otherwise>",
+  "weekday": "<normalized weekday name like 'saturday' when the user explicitly says a day of week; null otherwise>",
   "start_time": "<string in 24h 'HH:MM' format if the user said an explicit time like '3pm', '15:00', 'half past four'; null otherwise>",
   "end_time": "<string in 24h 'HH:MM' format if the user gave an explicit end time like 'until 5pm', '3pm to 5pm'; null otherwise>",
   "duration_minutes": <integer or null>,
@@ -44,6 +46,11 @@ Return a JSON object:
 
 Time extraction notes:
 - Interpret times as the speaker's local wall-clock time. Do NOT convert to UTC.
+- For schedule_meeting, prefer structured dates:
+  explicit date like "April 18th", "18 April", "April 18" -> set "date_iso".
+  explicit weekday like "Saturday" -> set "weekday".
+  if the user says both, include both so they can be cross-checked downstream.
+- Keep "timeframe" for relative phrases like "today", "tomorrow afternoon", "next week", "Friday afternoon".
 - "3pm" → "15:00", "5pm" → "17:00", "9 in the morning" → "09:00", "half past four" → "16:30".
 - If both start_time and end_time are given, you may leave duration_minutes null (it will be derived).
 

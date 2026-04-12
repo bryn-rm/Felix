@@ -10,6 +10,7 @@ calendar events, etc. — using the current user's Google credentials.
 """
 
 import logging
+import re
 from datetime import date, datetime, time, timedelta, timezone
 
 import pytz
@@ -64,6 +65,21 @@ async def route_intent(
 # ---------------------------------------------------------------------------
 
 DEFAULT_USER_TIMEZONE = "Europe/London"
+DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+MONTH_NAME_TO_NUMBER = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
 
 
 async def _get_user_timezone(user_id: str) -> str:
@@ -390,7 +406,9 @@ async def _schedule_meeting(intent, user_id, gmail, user_name) -> str:
         user_tz_name = DEFAULT_USER_TIMEZONE
         user_tz = pytz.timezone(DEFAULT_USER_TIMEZONE)
 
-    target_date, hint_hour = _resolve_local_date_and_hint(timeframe, user_tz)
+    target_date, hint_hour, clarification = _resolve_schedule_date(intent, user_tz)
+    if clarification:
+        return clarification
 
     explicit_start = _parse_clock_time(intent.get("start_time"))
     explicit_end = _parse_clock_time(intent.get("end_time"))
@@ -495,47 +513,154 @@ async def _start_meeting_notes(intent, user_id, gmail, user_name) -> str:
     )
 
 
-def _resolve_local_date_and_hint(timeframe: str, tz: pytz.BaseTzInfo) -> tuple[date, int]:
+def _resolve_schedule_date(intent: dict, tz: pytz.BaseTzInfo) -> tuple[date, int, str | None]:
     """
-    Parse a natural-language timeframe into (local_date, hint_hour).
+    Resolve the schedule date for a create-event request.
 
-    The hint_hour is the default starting hour to use when no specific time
-    is mentioned (morning → 10, afternoon → 14, evening → 18, otherwise 10).
+    Preference order:
+    1. explicit date_iso from the LLM
+    2. explicit month/day parsed from the raw transcript or timeframe as a safety net
+    3. relative timeframe phrases
+    4. explicit weekday
+    5. default fallback (tomorrow)
     """
+    raw_transcript = (intent.get("raw_transcript") or "").strip()
+    timeframe = (intent.get("timeframe") or "").strip()
     today = datetime.now(tz).date()
-    tf = (timeframe or "").lower().strip()
+    hint_hour = _hint_hour_from_text(" ".join(part for part in (timeframe, raw_transcript) if part))
 
-    # Default starting hour
+    explicit_date = _parse_iso_date(intent.get("date_iso"))
+    if explicit_date is None:
+        explicit_date = _extract_explicit_month_day(raw_transcript, today) or _extract_explicit_month_day(timeframe, today)
+
+    explicit_weekday = _normalize_weekday(intent.get("weekday")) or _extract_weekday(raw_transcript)
+    if explicit_date is None and explicit_weekday is None:
+        explicit_weekday = _extract_weekday(timeframe)
+
+    if explicit_date is not None and explicit_weekday is not None:
+        actual_weekday = DAY_NAMES[explicit_date.weekday()]
+        if actual_weekday != explicit_weekday:
+            return (
+                today,
+                hint_hour,
+                f"You said {explicit_date.strftime('%B %-d')} and {explicit_weekday.capitalize()}, but those don't match. Which date should I use?",
+            )
+
+    if explicit_date is not None:
+        return explicit_date, hint_hour, None
+
+    relative_date = _resolve_relative_timeframe(timeframe, today)
+    if relative_date is not None:
+        return relative_date, hint_hour, None
+
+    if explicit_weekday is not None:
+        return _next_weekday(today, explicit_weekday), hint_hour, None
+
+    date_like_text = " ".join(part for part in (raw_transcript, timeframe) if part)
+    if _looks_like_explicit_date_phrase(date_like_text):
+        return today, hint_hour, "I’m not fully confident about the date you meant. Which date should I put on the calendar?"
+
+    return today + timedelta(days=1), hint_hour, None
+
+
+def _hint_hour_from_text(text: str) -> int:
+    tf = (text or "").lower().strip()
     if "morning" in tf:
-        hint_hour = 10
-    elif "afternoon" in tf:
-        hint_hour = 14
-    elif "evening" in tf:
-        hint_hour = 18
-    elif "lunch" in tf or "midday" in tf or "noon" in tf:
-        hint_hour = 12
-    else:
-        hint_hour = 10
+        return 10
+    if "afternoon" in tf:
+        return 14
+    if "evening" in tf:
+        return 18
+    if "lunch" in tf or "midday" in tf or "noon" in tf:
+        return 12
+    return 10
 
+
+def _parse_iso_date(value) -> date | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def _normalize_weekday(value) -> str | None:
+    if not value or not isinstance(value, str):
+        return None
+    candidate = value.strip().lower()
+    return candidate if candidate in DAY_NAMES else None
+
+
+def _extract_weekday(text: str) -> str | None:
+    tf = (text or "").lower()
+    for name in DAY_NAMES:
+        if re.search(rf"\b{name}\b", tf):
+            return name
+    return None
+
+
+def _next_weekday(today: date, weekday_name: str) -> date:
+    target_index = DAY_NAMES.index(weekday_name)
+    days_ahead = (target_index - today.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return today + timedelta(days=days_ahead)
+
+
+def _extract_explicit_month_day(text: str, today: date) -> date | None:
+    lower_text = (text or "").lower()
+    if not lower_text:
+        return None
+
+    month_names = "|".join(MONTH_NAME_TO_NUMBER.keys())
+    patterns = [
+        rf"\b(?P<month>{month_names})\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{{4}}))?\b",
+        rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{month_names})(?:,?\s+(?P<year>\d{{4}}))?\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lower_text)
+        if not match:
+            continue
+
+        month = MONTH_NAME_TO_NUMBER[match.group("month")]
+        day = int(match.group("day"))
+        year = int(match.group("year")) if match.group("year") else today.year
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+
+        if match.group("year") is None and candidate < today:
+            try:
+                candidate = date(today.year + 1, month, day)
+            except ValueError:
+                return None
+        return candidate
+
+    return None
+
+
+def _looks_like_explicit_date_phrase(text: str) -> bool:
+    lower_text = (text or "").lower()
+    if not lower_text:
+        return False
+    if any(month in lower_text for month in MONTH_NAME_TO_NUMBER):
+        return True
+    return bool(re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", lower_text))
+
+
+def _resolve_relative_timeframe(timeframe: str, today: date) -> date | None:
+    tf = (timeframe or "").lower().strip()
     if tf in ("", "today"):
-        return today, hint_hour
+        return today
     if "tomorrow" in tf:
-        return today + timedelta(days=1), hint_hour
+        return today + timedelta(days=1)
     if "next week" in tf:
-        next_monday = today + timedelta(days=7 - today.weekday())
-        return next_monday, hint_hour
+        return today + timedelta(days=7 - today.weekday())
     if "this week" in tf:
-        return today, hint_hour
-
-    day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    for i, name in enumerate(day_names):
-        if name in tf:
-            days_ahead = (i - today.weekday()) % 7
-            if days_ahead == 0:
-                days_ahead = 7
-            return today + timedelta(days=days_ahead), hint_hour
-
-    return today + timedelta(days=1), hint_hour
+        return today
+    return None
 
 
 def _resolve_timeframe(timeframe: str) -> tuple[datetime, datetime]:
@@ -558,9 +683,8 @@ def _resolve_timeframe(timeframe: str) -> tuple[datetime, datetime]:
         start = datetime.combine(next_monday, datetime.min.time(), tzinfo=timezone.utc)
         end = start + timedelta(days=7)
     else:
-        day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         target_day = None
-        for i, name in enumerate(day_names):
+        for i, name in enumerate(DAY_NAMES):
             if name in tf:
                 target_day = i
                 break
