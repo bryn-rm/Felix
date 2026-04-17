@@ -90,7 +90,6 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
             """
             INSERT INTO oauth_nonces (user_id, nonce, expires_at)
             VALUES ($1, $2, $3)
-            ON CONFLICT (user_id) DO UPDATE SET nonce = $2, expires_at = $3
             """,
             user_id, nonce, expires_at,
         )
@@ -150,17 +149,20 @@ async def google_callback(
             logger.warning("[callback] invalid OAuth state format: state=%s", state)
             raise HTTPException(status_code=400, detail="Invalid OAuth state parameter.")
 
-        # Verify nonce — must exist, belong to this user, and not be expired
+        # Look up the nonce row. Keyed on the nonce itself so concurrent
+        # attempts for the same user don't overwrite each other's state.
         nonce_row = await db.query_one(
-            "SELECT nonce, expires_at FROM oauth_nonces WHERE user_id = $1",
-            user_id,
+            "SELECT user_id, expires_at FROM oauth_nonces WHERE nonce = $1",
+            nonce,
         )
         if not nonce_row:
-            logger.warning("[callback] nonce row not found for user_id=%s", user_id)
+            logger.warning("[callback] nonce row not found nonce_prefix=%s", nonce[:8])
             raise HTTPException(status_code=400, detail="OAuth state not found. Please try connecting again.")
 
-        if nonce_row["nonce"] != nonce:
-            logger.warning("[callback] nonce mismatch for user_id=%s", user_id)
+        # The state user_id must match the row's user_id so a valid nonce
+        # can't be replayed against a different account.
+        if str(nonce_row["user_id"]) != user_id:
+            logger.warning("[callback] nonce user mismatch nonce_prefix=%s", nonce[:8])
             raise HTTPException(status_code=400, detail="OAuth state mismatch. Please retry Google connect.")
 
         expires_at = nonce_row["expires_at"]
@@ -173,8 +175,9 @@ async def google_callback(
 
         logger.info("[callback] nonce verified successfully for user_id=%s", user_id)
 
-        # Consume the nonce — one-time use
-        await db.execute("DELETE FROM oauth_nonces WHERE user_id = $1", user_id)
+        # Consume the nonce (one-time use). Delete by nonce, not by user_id,
+        # so a successful callback doesn't cancel a parallel in-flight attempt.
+        await db.execute("DELETE FROM oauth_nonces WHERE nonce = $1", nonce)
 
         # Exchange code → tokens
         logger.info("[callback] exchanging code with Google (redirect_uri=%s)", settings.GOOGLE_REDIRECT_URI)

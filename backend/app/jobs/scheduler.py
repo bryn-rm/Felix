@@ -302,3 +302,16 @@ async def _send_weekly_review_for_user(user_id: str) -> None:
         logger.info("Weekly review sent for user %s", user_id)
     except Exception:
         logger.exception("Failed to send weekly review for user %s", user_id)
+
+
+# ---------------------------------------------------------------------------
+# Expired OAuth nonce sweep — hourly
+# Nonces are keyed per-attempt so abandoned ones accumulate unless swept.
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("interval", hours=1, id="sweep_expired_oauth_nonces")
+async def sweep_expired_oauth_nonces() -> None:
+    try:
+        await db.execute("DELETE FROM oauth_nonces WHERE expires_at < NOW()")
+    except Exception:
+        logger.exception("sweep_expired_oauth_nonces failed")
