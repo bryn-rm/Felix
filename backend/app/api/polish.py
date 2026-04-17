@@ -1,9 +1,10 @@
 """Phase 7 API routes: digest, weekly review, templates, style evolution."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from app.middleware.auth import get_current_user
+from app.middleware.rate_limit import check_monthly_ai_budget, limiter
 from app.services.polish_service import polish_service
 
 router = APIRouter()
@@ -18,7 +19,9 @@ class PolishDraftResponse(BaseModel):
 
 
 @router.post("/draft", response_model=PolishDraftResponse)
+@limiter.limit("10/minute")
 async def polish_draft(
+    request: Request,
     body: PolishDraftRequest,
     current_user: dict = Depends(get_current_user),
 ) -> PolishDraftResponse:
@@ -26,6 +29,8 @@ async def polish_draft(
     Polish draft email text — fix tone, grammar and clarity without changing
     the underlying meaning. Used by the inline DraftPanel "Polish" button.
     """
+    await check_monthly_ai_budget(current_user["id"])
+
     polished = await polish_service.polish_draft_text(
         current_user["id"], body.text
     )

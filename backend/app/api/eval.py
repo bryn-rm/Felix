@@ -9,9 +9,10 @@ Endpoints (mounted at /admin):
   GET  /admin/parse-errors      — last 20 parse errors from ai_calls (admin only)
   GET  /admin/prompt-versions   — performance grouped by prompt_version + feature (admin only)
 
-Admin access is gated by the ADMIN_EMAIL environment variable.
+Admin access is gated by the ADMIN_EMAILS environment variable (comma-separated).
 """
 
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -21,6 +22,9 @@ from pydantic import BaseModel
 from app import db
 from app.config import settings
 from app.middleware.auth import get_current_user
+from app.middleware.pii import redact_pii
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()        # mounted at /eval   in main.py
 admin_router = APIRouter()  # mounted at /admin  in main.py
@@ -31,11 +35,49 @@ admin_router = APIRouter()  # mounted at /admin  in main.py
 # ---------------------------------------------------------------------------
 
 
+def _get_admin_emails() -> set[str]:
+    """Parse the comma-separated ADMIN_EMAILS config into a set of lower-cased emails.
+
+    Also includes the deprecated ADMIN_EMAIL (singular) for backward compat.
+    """
+    raw = settings.ADMIN_EMAILS or ""
+    emails = {e.strip().lower() for e in raw.split(",") if e.strip()}
+    # Backward compat: merge the old singular setting if present
+    legacy = (settings.ADMIN_EMAIL or "").strip().lower()
+    if legacy:
+        emails.add(legacy)
+    return emails
+
+
 def _require_admin(current_user: dict) -> None:
-    """Raise 403 unless the current user matches ADMIN_EMAIL."""
-    admin_email = settings.ADMIN_EMAIL or ""
-    if not admin_email or current_user["email"] != admin_email:
+    """Raise 403 unless the current user is in the ADMIN_EMAILS list."""
+    admin_emails = _get_admin_emails()
+    if not admin_emails or (current_user.get("email") or "").lower() not in admin_emails:
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+async def _log_admin_access(user_id: str, email: str, endpoint: str) -> None:
+    """Best-effort audit log for admin endpoint access."""
+    try:
+        await db.insert("admin_audit", {
+            "user_id": user_id,
+            "email": email,
+            "endpoint": endpoint,
+            "accessed_at": datetime.now(timezone.utc),
+        })
+    except Exception:
+        # Table may not exist yet — log and continue
+        logger.warning("Could not write admin audit log for %s (table may not exist)", endpoint)
+
+
+def _redact_error_message(msg: str | None, max_len: int = 200) -> str:
+    """Redact PII from error messages and truncate to max_len."""
+    if not msg:
+        return ""
+    redacted = redact_pii(msg)
+    if len(redacted) > max_len:
+        return redacted[:max_len] + "..."
+    return redacted
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +195,11 @@ async def get_parse_errors(
     """
     Last 20 rows from ai_calls where parse_error = true, across ALL users.
     Useful for identifying which prompt version is producing malformed JSON.
-    Requires ADMIN_EMAIL match.
+    Requires ADMIN_EMAILS match.
     """
     _require_admin(current_user)
+    await _log_admin_access(current_user["id"], current_user.get("email", ""), "/admin/parse-errors")
+
     rows = await db.query(
         """
         SELECT id, feature, prompt_version, error_message, created_at
@@ -165,6 +209,9 @@ async def get_parse_errors(
         LIMIT  20
         """
     )
+    # Redact error_message to avoid leaking PII (email subjects/bodies)
+    for row in rows:
+        row["error_message"] = _redact_error_message(row.get("error_message"))
     return rows
 
 
@@ -175,9 +222,11 @@ async def get_prompt_versions(
     """
     Performance breakdown grouped by prompt_version + feature, across all users.
     Use this to compare prompt versions and decide which to promote.
-    Requires ADMIN_EMAIL match.
+    Requires ADMIN_EMAILS match.
     """
     _require_admin(current_user)
+    await _log_admin_access(current_user["id"], current_user.get("email", ""), "/admin/prompt-versions")
+
     rows = await db.query(
         """
         SELECT

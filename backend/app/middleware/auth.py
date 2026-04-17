@@ -13,8 +13,12 @@ Two concerns live here:
 
 import asyncio
 import base64
+import hashlib
+import logging
+import time
 from datetime import datetime, timezone
 
+import jwt as pyjwt
 from cryptography.fernet import Fernet
 from fastapi import Depends, Header, HTTPException
 from google.auth.transport.requests import Request
@@ -23,6 +27,8 @@ from supabase import Client, create_client
 
 from app import db
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Supabase client — service key only used here for JWT validation
@@ -70,31 +76,91 @@ def decrypt_token(ciphertext: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# JWT validation
+# JWT validation — local verification with short-lived cache
 # ---------------------------------------------------------------------------
+
+# In-memory cache: token_hash → (user_dict, expiry_timestamp)
+_jwt_cache: dict[str, tuple[dict, float]] = {}
+_JWT_CACHE_TTL = 60  # seconds
+
+
+def _cache_cleanup() -> None:
+    """Evict expired entries (called lazily on each lookup)."""
+    now = time.monotonic()
+    expired = [k for k, (_, exp) in _jwt_cache.items() if now > exp]
+    for k in expired:
+        del _jwt_cache[k]
+
+
+def _verify_jwt_locally(token: str) -> dict | None:
+    """Verify a Supabase JWT using the shared secret.
+
+    Returns the decoded payload on success, or None if the secret is not
+    configured or the token fails verification.
+    """
+    secret = settings.SUPABASE_JWT_SECRET
+    if not secret:
+        return None
+    try:
+        payload = pyjwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+        return payload
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except pyjwt.InvalidTokenError:
+        return None  # fall through to network validation
+
 
 async def get_current_user(authorization: str = Header(...)) -> dict:
     """
     Validate the Supabase JWT sent as `Authorization: Bearer <token>`.
 
-    Returns the Supabase user object dict on success.
+    Tries local signature verification first (fast, no network). Falls back to
+    a Supabase network call if the JWT secret is not configured or if local
+    verification fails for a non-expiry reason. Results are cached for 60s
+    keyed on a hash of the token.
+
+    Returns the authenticated user dict on success.
     Raises HTTP 401 on any failure.
     """
     token = authorization.removeprefix("Bearer ").strip()
     if not token:
         raise HTTPException(status_code=401, detail="Missing auth token")
 
+    # Check cache first
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    _cache_cleanup()
+    cached = _jwt_cache.get(token_hash)
+    if cached:
+        return cached[0].copy()
+
+    # Try local verification
+    payload = _verify_jwt_locally(token)
+    if payload and payload.get("sub"):
+        user = {
+            "id": payload["sub"],
+            "email": payload.get("email", ""),
+            "metadata": payload.get("user_metadata", {}),
+        }
+        _jwt_cache[token_hash] = (user, time.monotonic() + _JWT_CACHE_TTL)
+        return user
+
+    # Fall back to Supabase network call
     try:
-        # get_user() makes a synchronous HTTP call to Supabase — run in a thread
-        # so it never blocks the asyncio event loop.
         result = await asyncio.to_thread(_get_supabase().auth.get_user, token)
         if not result or not result.user:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return {
+        user = {
             "id": result.user.id,
             "email": result.user.email,
             "metadata": result.user.user_metadata or {},
         }
+        _jwt_cache[token_hash] = (user, time.monotonic() + _JWT_CACHE_TTL)
+        return user
     except HTTPException:
         raise
     except Exception:
@@ -130,8 +196,7 @@ async def get_google_credentials(user_id: str) -> Credentials:
         try:
             expiry = datetime.fromisoformat(str(raw_expiry))
         except ValueError:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+            logger.warning(
                 "Malformed token_expiry for user %s: %r — treating as expired", user_id, raw_expiry
             )
             expiry = None
@@ -155,26 +220,27 @@ async def get_google_credentials(user_id: str) -> Credentials:
     )
 
     if creds.expired and creds.refresh_token:
+        original_refresh_token = creds.refresh_token
         # creds.refresh() is a synchronous blocking HTTP call — run in a thread.
         try:
             await asyncio.to_thread(creds.refresh, Request())
         except Exception as exc:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+            logger.warning(
                 "Google token refresh failed for user %s: %s", user_id, exc
             )
             raise HTTPException(
                 status_code=403,
                 detail="Google access has expired. Please reconnect your account at /settings.",
             )
-        await db.update(
-            "google_connections",
-            {
-                "user_id": user_id,
-                "access_token": encrypt_token(creds.token),
-                "token_expiry": creds.expiry if creds.expiry else None,
-            },
-        )
+        update_data: dict = {
+            "user_id": user_id,
+            "access_token": encrypt_token(creds.token),
+            "token_expiry": creds.expiry if creds.expiry else None,
+        }
+        # Google may rotate the refresh token; persist the new one if it changed.
+        if creds.refresh_token and creds.refresh_token != original_refresh_token:
+            update_data["refresh_token"] = encrypt_token(creds.refresh_token)
+        await db.update("google_connections", update_data)
 
     return creds
 

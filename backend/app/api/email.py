@@ -21,12 +21,13 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app import db
 from app.middleware.auth import get_current_user, get_google_credentials
+from app.middleware.rate_limit import check_monthly_ai_budget, limiter
 from app.services.ai_service import ai_service
 from app.services.follow_up_engine import follow_up_engine as _fu_engine
 from app.services.gmail_service import GmailService
@@ -256,7 +257,9 @@ async def get_thread(
 # ---------------------------------------------------------------------------
 
 @router.post("/{email_id}/draft")
+@limiter.limit("10/minute")
 async def generate_draft(
+    request: Request,
     email_id: str,
     body: RegenerateRequest = RegenerateRequest(),
     current_user: dict = Depends(get_current_user),
@@ -271,6 +274,8 @@ async def generate_draft(
     The client should accumulate chunk values and display live. On "done",
     the draft has been saved to the DB and the draft_id is returned.
     """
+    await check_monthly_ai_budget(current_user["id"])
+
     email = await db.query_one(
         "SELECT * FROM emails WHERE id = $1 AND user_id = $2",
         email_id, current_user["id"],

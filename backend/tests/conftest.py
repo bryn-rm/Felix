@@ -18,6 +18,7 @@ _TEST_ENV = {
     "FELIX_VOICE_ID":        "test-voice-id",
     "SUPABASE_URL":          "https://test.supabase.co",
     "SUPABASE_SERVICE_KEY":  "test-service-key",
+    "SUPABASE_JWT_SECRET":   "test-jwt-secret-that-is-long-enough-for-hs256-validation",
     "DATABASE_URL":          "postgresql://test:test@localhost/testdb",
     # Must be a valid 64-char hex string for Fernet key derivation
     "TOKEN_ENCRYPTION_KEY":  "a" * 64,

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # Supabase
     SUPABASE_URL: str
     SUPABASE_SERVICE_KEY: str
+    SUPABASE_JWT_SECRET: str = ""  # For local JWT verification; falls back to network if empty
 
     # Direct Postgres connection for background jobs (from Supabase project settings)
     # Format: postgresql://postgres.[ref]:[password]@aws-0-eu-west-2.pooler.supabase.com:6543/postgres
@@ -39,7 +40,12 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:3000"
 
     # Admin (optional — required to access /admin routes)
-    ADMIN_EMAIL: str | None = None
+    # Comma-separated list of admin emails, e.g. "alice@co.com,bob@co.com"
+    ADMIN_EMAILS: str = ""
+    ADMIN_EMAIL: str = ""  # Deprecated — use ADMIN_EMAILS; kept for backward compat
+
+    # Rate limiting — monthly AI call cap per user (0 = unlimited)
+    MONTHLY_AI_CALL_LIMIT: int = 5000
 
     class Config:
         env_file = ".env"

@@ -35,7 +35,7 @@ import json
 import logging
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from app import db
@@ -45,6 +45,7 @@ from app.middleware.auth import (
     get_google_credentials,
     get_supabase_client,
 )
+from app.middleware.rate_limit import check_monthly_ai_budget, limiter
 from app.services.ai_service import ai_service
 from app.services.gmail_service import GmailService
 from app.services.voice_router import route_intent
@@ -68,7 +69,9 @@ class VoiceChatResponse(BaseModel):
 
 
 @router.post("/chat", response_model=VoiceChatResponse)
+@limiter.limit("15/minute")
 async def voice_chat(
+    request: Request,
     body: VoiceChatRequest,
     current_user: dict = Depends(get_current_user),
 ) -> VoiceChatResponse:
@@ -79,6 +82,7 @@ async def voice_chat(
     routes through voice_router. No STT, no TTS — pure text in / text out.
     """
     user_id: str = current_user["id"]
+    await check_monthly_ai_budget(user_id)
     message = body.message.strip()
 
     user_settings = await db.query_one(
@@ -129,6 +133,14 @@ async def voice_chat(
 
 @router.websocket("/stream")
 async def voice_stream(websocket: WebSocket) -> None:
+    # Validate Origin to prevent cross-site WebSocket hijacking (CSWSH).
+    # CORS middleware does not apply to WebSocket upgrades in Starlette.
+    origin = websocket.headers.get("origin", "")
+    allowed_origin = settings.FRONTEND_URL.rstrip("/")
+    if origin.rstrip("/").lower() != allowed_origin.lower():
+        await websocket.close(code=4003)
+        return
+
     await websocket.accept()
 
     # 1. Authenticate via first JSON message
@@ -137,6 +149,14 @@ async def voice_stream(websocket: WebSocket) -> None:
         return
 
     user_id: str = user["id"]
+
+    # Budget gate — reject before starting the expensive STT/TTS pipeline
+    try:
+        await check_monthly_ai_budget(user_id)
+    except HTTPException as exc:
+        await websocket.send_json({"type": "error", "message": exc.detail})
+        await websocket.close(code=4029)
+        return
 
     # 2. Load user settings
     user_settings = await db.query_one(
@@ -213,11 +233,22 @@ async def voice_stream(websocket: WebSocket) -> None:
     # ------------------------------------------------------------------
     # Task 3 — intent_tts_loop
     # ------------------------------------------------------------------
+    _MAX_UTTERANCES_PER_SESSION = 30
+
     async def intent_tts_loop() -> None:
         """Read final transcripts → intent routing → TTS → stream back."""
+        utterance_count = 0
         while True:
             transcript = await transcript_queue.get()
             if not transcript:  # poison pill
+                break
+
+            utterance_count += 1
+            if utterance_count > _MAX_UTTERANCES_PER_SESSION:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Session utterance limit reached. Please start a new session.",
+                })
                 break
 
             cancel_tts.clear()

@@ -23,11 +23,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, RedirectResponse
 
-logger = logging.getLogger(__name__)
-
 from app import db
 from app.config import settings
 from app.middleware.auth import encrypt_token, get_current_user
+from app.middleware.pii import mask_email
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -79,38 +80,24 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
     user_id = current_user["id"]
     logger.info("[connect] step 1 — user authenticated: user_id=%s", user_id)
 
-    # Reuse an existing non-expired nonce if one exists, so that if Google
-    # returns a callback with an older authorization code the nonce still matches.
-    existing = await db.query_one(
-        "SELECT nonce, expires_at FROM oauth_nonces WHERE user_id = $1",
-        user_id,
-    )
-    now = datetime.now(timezone.utc)
-    expires_at_val = existing["expires_at"] if existing else None
-    if expires_at_val is not None and expires_at_val.tzinfo is None:
-        expires_at_val = expires_at_val.replace(tzinfo=timezone.utc)
+    # Always mint a fresh nonce to preserve one-time-use CSRF semantics.
+    nonce = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    logger.info("[connect] step 2 — fresh nonce generated for user_id=%s", user_id)
 
-    if existing and expires_at_val and expires_at_val > now:
-        nonce = existing["nonce"]
-        logger.info("[connect] step 2 — reusing existing unexpired nonce for user_id=%s", user_id)
-    else:
-        nonce = secrets.token_urlsafe(32)
-        logger.info("[connect] step 2 — nonce generated for user_id=%s", user_id)
-
-        expires_at = now + timedelta(minutes=10)
-        try:
-            await db.execute(
-                """
-                INSERT INTO oauth_nonces (user_id, nonce, expires_at)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (user_id) DO UPDATE SET nonce = $2, expires_at = $3
-                """,
-                user_id, nonce, expires_at,
-            )
-            logger.info("[connect] step 3 — nonce stored in oauth_nonces")
-        except Exception as exc:
-            logger.error("[connect] step 3 FAILED — could not insert nonce into oauth_nonces: %s", exc, exc_info=True)
-            raise HTTPException(status_code=500, detail="Failed to store OAuth nonce. Check server logs.")
+    try:
+        await db.execute(
+            """
+            INSERT INTO oauth_nonces (user_id, nonce, expires_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id) DO UPDATE SET nonce = $2, expires_at = $3
+            """,
+            user_id, nonce, expires_at,
+        )
+        logger.info("[connect] step 3 — nonce stored in oauth_nonces")
+    except Exception as exc:
+        logger.error("[connect] step 3 FAILED — could not insert nonce into oauth_nonces: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to store OAuth nonce. Check server logs.")
 
     state = f"{user_id}.{nonce}"
 
@@ -179,8 +166,7 @@ async def google_callback(
         expires_at = nonce_row["expires_at"]
         # asyncpg returns timezone-aware datetimes; ensure comparison is tz-aware
         if expires_at.tzinfo is None:
-            from datetime import timezone as _tz
-            expires_at = expires_at.replace(tzinfo=_tz.utc)
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) > expires_at:
             logger.warning("[callback] nonce expired for user_id=%s expires_at=%s", user_id, expires_at)
             raise HTTPException(status_code=400, detail="OAuth state expired. Please try connecting again.")
@@ -220,7 +206,12 @@ async def google_callback(
                 status_code=502,
                 detail="Google token exchange returned an unexpected response.",
             )
-        access_token = tokens["access_token"]
+        access_token = tokens.get("access_token")
+        if not access_token:
+            raise HTTPException(
+                status_code=502,
+                detail="Google did not return an access token. Please try connecting again.",
+            )
         refresh_token = tokens.get("refresh_token")
         expires_in = int(tokens.get("expires_in", 3600))
         logger.info("[callback] tokens received: has_access=%s has_refresh=%s expires_in=%s", bool(access_token), bool(refresh_token), expires_in)
@@ -244,7 +235,7 @@ async def google_callback(
                 google_email = ""
         else:
             google_email = ""
-        logger.info("[callback] userinfo response: status=%d email=%s", userinfo_resp.status_code, google_email)
+        logger.info("[callback] userinfo response: status=%d email=%s", userinfo_resp.status_code, mask_email(google_email))
         if not google_email:
             raise HTTPException(
                 status_code=502,
@@ -257,7 +248,7 @@ async def google_callback(
             raise HTTPException(status_code=502, detail="Invalid token expiry returned by Google OAuth.")
 
         # Encrypt + persist — upsert so reconnecting overwrites existing row
-        logger.info("[callback] storing credentials for user_id=%s google_email=%s", user_id, google_email)
+        logger.info("[callback] storing credentials for user_id=%s google_email=%s", user_id, mask_email(google_email))
         await db.upsert(
             "google_connections",
             {
@@ -276,12 +267,27 @@ async def google_callback(
 
     except HTTPException as exc:
         logger.warning("[callback] handled HTTPException status=%s detail=%s", exc.status_code, exc.detail)
+        # Map to a fixed set of user-facing reason codes — never expose raw
+        # exception detail in the redirect URL.
+        detail_lower = str(exc.detail).lower()
+        if "expired" in detail_lower:
+            reason_code = "session_expired"
+        elif "state" in detail_lower or "nonce" in detail_lower or "csrf" in detail_lower:
+            reason_code = "invalid_state"
+        elif "refresh" in detail_lower:
+            reason_code = "missing_refresh_token"
+        elif "token" in detail_lower or "exchange" in detail_lower:
+            reason_code = "token_exchange_failed"
+        elif "email" in detail_lower or "userinfo" in detail_lower:
+            reason_code = "userinfo_failed"
+        else:
+            reason_code = "unknown_error"
         return RedirectResponse(
             url=_frontend_redirect_url(
                 "/settings",
                 {
                     "google_error": "oauth_callback_failed",
-                    "reason": str(exc.detail),
+                    "reason": reason_code,
                 },
             )
         )

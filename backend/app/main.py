@@ -13,12 +13,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
 
 from app import db
 from app.api import auth, briefing, calendar, contacts, email, follow_ups, polish, settings, templates, voice
 from app.api.eval import router as eval_router, admin_router
 from app.config import settings as app_settings
 from app.jobs.scheduler import scheduler
+from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,6 +56,10 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # CORS — only allow the configured frontend origin in production
 _frontend_origin = app_settings.FRONTEND_URL.rstrip("/")
