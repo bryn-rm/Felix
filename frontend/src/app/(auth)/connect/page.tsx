@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { useSearchParams } from "next/navigation";
 
 const permissions = [
   {
@@ -19,8 +20,33 @@ const permissions = [
 ];
 
 export default function ConnectPage() {
+  const searchParams = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const callbackError = useMemo(() => {
+    const code = searchParams.get("error");
+    switch (code) {
+      case "oauth_expired":
+        return "Connection timed out before Google redirected back. Please try again.";
+      case "oauth_invalid_state":
+        return "This Google connect attempt is no longer valid. Please try again.";
+      case "google_denied":
+        return "Google access was not granted. Please try again if you still want to connect.";
+      case "missing_code":
+        return "Google did not return an authorization code. Please try again.";
+      case "missing_refresh_token":
+        return "Google did not return a refresh token. Disconnect any existing consent and try again.";
+      case "token_exchange_failed":
+        return "Google token exchange failed. Please try again.";
+      case "userinfo_failed":
+        return "Felix could not verify your Google account details. Please try again.";
+      case "unknown_error":
+        return "Google connection failed. Please try again.";
+      default:
+        return null;
+    }
+  }, [searchParams]);
 
   async function handleConnect() {
     setLoading(true);
@@ -109,9 +135,9 @@ export default function ConnectPage() {
             ))}
           </ul>
 
-          {error && (
+          {(error || callbackError) && (
             <p className="mb-6 rounded-lg bg-red-900/40 border border-red-700/50 px-4 py-3 text-sm text-red-300">
-              {error}
+              {error ?? callbackError}
             </p>
           )}
 

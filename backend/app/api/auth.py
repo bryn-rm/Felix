@@ -47,6 +47,7 @@ GOOGLE_SCOPES = [
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+OAUTH_NONCE_TTL_MINUTES = 10
 
 
 def _frontend_redirect_url(path: str, query_params: dict[str, str] | None = None) -> str:
@@ -61,6 +62,12 @@ def _frontend_redirect_url(path: str, query_params: dict[str, str] | None = None
     if query_params:
         return f"{base_url}{normalized_path}?{urlencode(query_params)}"
     return f"{base_url}{normalized_path}"
+
+
+def _oauth_error_redirect(error_code: str) -> RedirectResponse:
+    return RedirectResponse(
+        url=_frontend_redirect_url("/connect", {"error": error_code})
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -82,16 +89,23 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
 
     # Always mint a fresh nonce to preserve one-time-use CSRF semantics.
     nonce = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-    logger.info("[connect] step 2 — fresh nonce generated for user_id=%s", user_id)
+    created_at = datetime.now(timezone.utc)
+    expires_at = created_at + timedelta(minutes=OAUTH_NONCE_TTL_MINUTES)
+    logger.info(
+        "[connect] step 2 — fresh nonce generated for user_id=%s created_at=%s expires_at=%s ttl_minutes=%d",
+        user_id,
+        created_at.isoformat(),
+        expires_at.isoformat(),
+        OAUTH_NONCE_TTL_MINUTES,
+    )
 
     try:
         await db.execute(
             """
-            INSERT INTO oauth_nonces (user_id, nonce, expires_at)
-            VALUES ($1, $2, $3)
+            INSERT INTO oauth_nonces (user_id, nonce, expires_at, created_at)
+            VALUES ($1, $2, $3, $4)
             """,
-            user_id, nonce, expires_at,
+            user_id, nonce, expires_at, created_at,
         )
         logger.info("[connect] step 3 — nonce stored in oauth_nonces")
     except Exception as exc:
@@ -122,7 +136,7 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
 
 @router.get("/google/callback")
 async def google_callback(
-    code: str = Query(...),
+    code: str | None = Query(None),
     state: str = Query(...),
     error: str = Query(None),
 ):
@@ -134,12 +148,11 @@ async def google_callback(
     to prevent CSRF attacks, then deleted (one-time use).
     """
     if error:
-        return RedirectResponse(
-            url=_frontend_redirect_url(
-                "/settings",
-                {"google_error": error},
-            )
-        )
+        return _oauth_error_redirect("google_denied")
+
+    if not code:
+        logger.warning("[callback] missing authorization code in Google callback")
+        return _oauth_error_redirect("missing_code")
 
     try:
         # Parse state: "<user_id>.<nonce>"
@@ -152,7 +165,7 @@ async def google_callback(
         # Look up the nonce row. Keyed on the nonce itself so concurrent
         # attempts for the same user don't overwrite each other's state.
         nonce_row = await db.query_one(
-            "SELECT user_id, expires_at FROM oauth_nonces WHERE nonce = $1",
+            "SELECT user_id, expires_at, created_at FROM oauth_nonces WHERE nonce = $1",
             nonce,
         )
         if not nonce_row:
@@ -166,11 +179,24 @@ async def google_callback(
             raise HTTPException(status_code=400, detail="OAuth state mismatch. Please retry Google connect.")
 
         expires_at = nonce_row["expires_at"]
+        created_at = nonce_row.get("created_at")
         # asyncpg returns timezone-aware datetimes; ensure comparison is tz-aware
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) > expires_at:
-            logger.warning("[callback] nonce expired for user_id=%s expires_at=%s", user_id, expires_at)
+        if created_at and created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if now > expires_at:
+            age_seconds = int((now - created_at).total_seconds()) if created_at else None
+            logger.warning(
+                "[callback] nonce expired for user_id=%s created_at=%s expires_at=%s callback_at=%s age_seconds=%s ttl_minutes=%d",
+                user_id,
+                created_at.isoformat() if created_at else None,
+                expires_at.isoformat(),
+                now.isoformat(),
+                age_seconds,
+                OAUTH_NONCE_TTL_MINUTES,
+            )
             raise HTTPException(status_code=400, detail="OAuth state expired. Please try connecting again.")
 
         logger.info("[callback] nonce verified successfully for user_id=%s", user_id)
@@ -274,9 +300,9 @@ async def google_callback(
         # exception detail in the redirect URL.
         detail_lower = str(exc.detail).lower()
         if "expired" in detail_lower:
-            reason_code = "session_expired"
+            return _oauth_error_redirect("oauth_expired")
         elif "state" in detail_lower or "nonce" in detail_lower or "csrf" in detail_lower:
-            reason_code = "invalid_state"
+            return _oauth_error_redirect("oauth_invalid_state")
         elif "refresh" in detail_lower:
             reason_code = "missing_refresh_token"
         elif "token" in detail_lower or "exchange" in detail_lower:
@@ -285,15 +311,7 @@ async def google_callback(
             reason_code = "userinfo_failed"
         else:
             reason_code = "unknown_error"
-        return RedirectResponse(
-            url=_frontend_redirect_url(
-                "/settings",
-                {
-                    "google_error": "oauth_callback_failed",
-                    "reason": reason_code,
-                },
-            )
-        )
+        return _oauth_error_redirect(reason_code)
     except Exception as exc:
         logger.error("[callback] unexpected error: %s\n%s", exc, traceback.format_exc())
         raise
