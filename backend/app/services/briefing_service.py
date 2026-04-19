@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from app import db
 from app.middleware.auth import get_google_credentials
+from app.services import memory_service
 from app.services.timezone_utils import local_date_for_user
 from app.services.ai_service import ai_service
 from app.services.calendar_service import CalendarService
@@ -190,8 +191,16 @@ class BriefingService:
         # Strip the raw data keys before passing to Claude (they're not in the prompt template)
         prompt_context = {k: v for k, v in context.items() if not k.startswith("_")}
 
+        # Inject Layer 1 profile + Layer 2 recent session continuity so the
+        # briefing lands in the user's known voice and picks up open items.
+        briefing_memory = await memory_service.build_memory_context(
+            user_id=user_id, feature="briefing", include_sessions=True,
+        )
+
         # Generate spoken text via Claude Sonnet
-        briefing_text = await ai_service.generate_daily_briefing(prompt_context, user_id=user_id)
+        briefing_text = await ai_service.generate_daily_briefing(
+            prompt_context, user_id=user_id, memory_context=briefing_memory,
+        )
 
         # Generate TTS audio and upload to Supabase Storage
         audio_url: str = ""

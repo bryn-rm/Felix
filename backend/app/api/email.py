@@ -306,6 +306,17 @@ async def generate_draft(
         email.get("from_email", ""), current_user["id"],
     ) or {}
 
+    from app.services import memory_service
+    draft_memory = await memory_service.build_memory_context(
+        user_id=current_user["id"],
+        feature="draft",
+        query=(
+            f"{email.get('from_name') or email.get('from_email', '')} "
+            f"{email.get('subject', '')}"
+        ),
+        include_episodes=True,
+    )
+
     async def sse_stream():
         full_text = ""
         draft_metadata: dict = {}
@@ -319,6 +330,7 @@ async def generate_draft(
                 user_intent=body.user_intent,
                 user_id=current_user["id"],
                 metadata=draft_metadata,
+                memory_context=draft_memory,
             ):
                 full_text += chunk
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"

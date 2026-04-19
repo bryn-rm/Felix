@@ -17,6 +17,7 @@ import pytz
 
 from app import db
 from app.middleware.auth import get_google_credentials
+from app.services import memory_service
 from app.services.calendar_service import CalendarService
 from app.services.gmail_service import GmailService
 
@@ -332,6 +333,16 @@ async def _reply_to(intent, user_id, gmail, user_name) -> str:
 
     user_intent = (intent.get("reply_content") or "").strip() or "Reply appropriately"
 
+    draft_memory = await memory_service.build_memory_context(
+        user_id=user_id,
+        feature="draft",
+        query=(
+            f"{email.get('from_name') or email.get('from_email', '')} "
+            f"{email.get('subject', '')}"
+        ),
+        include_episodes=True,
+    )
+
     # Stream the draft to completion (we don't need partial chunks here).
     full_text = ""
     try:
@@ -343,6 +354,7 @@ async def _reply_to(intent, user_id, gmail, user_name) -> str:
             user_name=display_name,
             user_intent=user_intent,
             user_id=user_id,
+            memory_context=draft_memory,
         ):
             full_text += chunk
     except Exception:
@@ -818,12 +830,23 @@ async def _general_question(intent, user_id, gmail, user_name) -> str:
 
     felix_context = "\n".join(context_lines) if context_lines else ""
 
+    # Chat surface — pull Layer 1 profile, Layer 2 recent sessions, and
+    # Layer 3 episodes relevant to the transcript.
+    chat_memory = await memory_service.build_memory_context(
+        user_id=user_id,
+        feature="voice_general",
+        query=transcript,
+        include_sessions=True,
+        include_episodes=True,
+    )
+
     try:
         return await ai_service.answer_general_voice_question(
             transcript=transcript,
             user_name=user_name,
             felix_context=felix_context,
             user_id=user_id,
+            memory_context=chat_memory,
         )
     except Exception:
         logger.exception("General question handler failed for user %s", user_id)

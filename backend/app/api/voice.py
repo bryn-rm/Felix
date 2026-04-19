@@ -46,6 +46,7 @@ from app.middleware.auth import (
     get_supabase_client,
 )
 from app.middleware.rate_limit import check_monthly_ai_budget, limiter
+from app.services import memory_service, session_manager
 from app.services.ai_service import ai_service
 from app.services.gmail_service import GmailService
 from app.services.voice_router import route_intent
@@ -97,8 +98,18 @@ async def voice_chat(
     except Exception:
         logger.info("No Google credentials for chat user %s", user_id)
 
+    # Session lifecycle — start (or continue) a chat session so summaries can
+    # be produced when the conversation falls silent.
+    session_id = await session_manager.touch_session(user_id, role="user", text=message)
+
+    # Intent parsing only needs the Layer-1 profile; Haiku latency matters here.
+    intent_memory = await memory_service.build_memory_context(
+        user_id=user_id, feature="voice_intent",
+    )
     try:
-        intent = await ai_service.parse_voice_intent(message, user_id=user_id)
+        intent = await ai_service.parse_voice_intent(
+            message, user_id=user_id, memory_context=intent_memory,
+        )
     except Exception:
         logger.exception("parse_voice_intent failed for user %s", user_id)
         intent = {"intent": "general_question", "raw_transcript": message}
@@ -108,6 +119,8 @@ async def voice_chat(
     except Exception:
         logger.exception("route_intent failed for user %s", user_id)
         response_text = "I had trouble handling that. Please try again."
+
+    await session_manager.touch_session(user_id, role="felix", text=response_text, session_id=session_id)
 
     # Best-effort session log so /voice/chat shows up alongside voice sessions
     try:
@@ -253,9 +266,19 @@ async def voice_stream(websocket: WebSocket) -> None:
 
             cancel_tts.clear()
 
+            # Start / continue the chat session so a summary can be captured.
+            session_id = await session_manager.touch_session(
+                user_id, role="user", text=transcript,
+            )
+
             # Parse intent with Claude Haiku
+            intent_memory = await memory_service.build_memory_context(
+                user_id=user_id, feature="voice_intent",
+            )
             try:
-                intent = await ai_service.parse_voice_intent(transcript, user_id=user_id)
+                intent = await ai_service.parse_voice_intent(
+                    transcript, user_id=user_id, memory_context=intent_memory,
+                )
             except Exception:
                 logger.exception("parse_voice_intent failed for user %s", user_id)
                 intent = {"intent": "general_question", "raw_transcript": transcript}
@@ -266,6 +289,10 @@ async def voice_stream(websocket: WebSocket) -> None:
             except Exception:
                 logger.exception("route_intent failed for user %s", user_id)
                 response_text = "I had trouble handling that. Please try again."
+
+            await session_manager.touch_session(
+                user_id, role="felix", text=response_text, session_id=session_id,
+            )
 
             # Stream TTS back
             try:

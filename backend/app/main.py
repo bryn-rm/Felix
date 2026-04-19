@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 
 from app import db
-from app.api import auth, briefing, calendar, contacts, email, follow_ups, polish, settings, templates, voice
+from app.api import auth, briefing, calendar, contacts, email, follow_ups, memory, polish, settings, templates, voice
 from app.api.eval import router as eval_router, admin_router
 from app.config import settings as app_settings
 from app.jobs.scheduler import scheduler
@@ -41,6 +41,14 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("APScheduler started")
     yield
+    try:
+        from app.services.session_manager import flush_all_sessions
+
+        flushed = await flush_all_sessions(reason="shutdown")
+        if flushed:
+            logger.info("Flushed %d active session(s) during shutdown", flushed)
+    except Exception:
+        logger.exception("Failed to flush active sessions during shutdown")
     scheduler.shutdown()
     await db.close_pool()
     logger.info("Felix backend shut down")
@@ -87,6 +95,7 @@ app.include_router(briefing.router,    prefix="/briefing",    tags=["briefing"])
 app.include_router(polish.router,      prefix="/polish",      tags=["polish"])
 app.include_router(settings.router,    prefix="/settings",    tags=["settings"])
 app.include_router(templates.router,   prefix="/templates",   tags=["templates"])
+app.include_router(memory.router,      prefix="/memory",      tags=["memory"])
 app.include_router(eval_router,        prefix="/eval",         tags=["eval"])
 app.include_router(admin_router,       prefix="/admin",        tags=["admin"])
 

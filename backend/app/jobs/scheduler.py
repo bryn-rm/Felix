@@ -315,3 +315,109 @@ async def sweep_expired_oauth_nonces() -> None:
         await db.execute("DELETE FROM oauth_nonces WHERE expires_at < NOW()")
     except Exception:
         logger.exception("sweep_expired_oauth_nonces failed")
+
+
+# ---------------------------------------------------------------------------
+# Memory — session sweep every 5 minutes
+# Idle chat sessions get summarised even without an explicit close.
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("interval", minutes=5, id="sweep_stale_sessions")
+async def sweep_stale_sessions_job() -> None:
+    try:
+        from app.services.session_manager import sweep_stale_sessions
+        n = await sweep_stale_sessions()
+        if n:
+            logger.info("Swept %d stale chat session(s)", n)
+    except Exception:
+        logger.exception("sweep_stale_sessions_job failed")
+
+
+# ---------------------------------------------------------------------------
+# Memory — hourly embedding backfill
+# Episodes are created without embeddings when OpenAI is slow/unavailable;
+# this pass fills them in so retrieval stays semantic over time.
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("interval", hours=1, id="backfill_episode_embeddings")
+async def backfill_episode_embeddings() -> None:
+    try:
+        from app.services.memory_service import backfill_missing_embeddings
+        filled = await backfill_missing_embeddings(limit=200)
+        if filled:
+            logger.info("Backfilled embeddings for %d episodes", filled)
+    except Exception:
+        logger.exception("backfill_episode_embeddings failed")
+
+
+# ---------------------------------------------------------------------------
+# Memory — daily pruning (03:15 UTC)
+# Removes low-importance episodes older than 60 days.
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("cron", hour=3, minute=15, id="prune_memory_episodes")
+async def prune_memory_episodes_job() -> None:
+    try:
+        from app.services.memory_service import prune_low_value_episodes
+        removed = await prune_low_value_episodes()
+        if removed:
+            logger.info("Pruned %d low-value memory episodes", removed)
+    except Exception:
+        logger.exception("prune_memory_episodes_job failed")
+
+
+# ---------------------------------------------------------------------------
+# Memory — nightly profile extraction (02:30 UTC)
+# Looks at each user's recent email activity and merges extracted facts
+# into their profile. Never overwrites manual keys.
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("cron", hour=2, minute=30, id="extract_user_profiles")
+async def extract_user_profiles_job() -> None:
+    try:
+        users = await get_active_users()
+        if not users:
+            return
+        results = await asyncio.gather(
+            *[_extract_profile_for_user(u["user_id"]) for u in users],
+            return_exceptions=True,
+        )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "Profile extraction failed for user %s: %s",
+                    user["user_id"], result,
+                )
+    except Exception:
+        logger.exception("extract_user_profiles_job failed")
+
+
+async def _extract_profile_for_user(user_id: str) -> None:
+    """Build a recent-activity snippet and ask the extractor to merge facts."""
+    try:
+        rows = await db.query(
+            """
+            SELECT from_name, from_email, subject, snippet, topic
+            FROM emails
+            WHERE user_id = $1
+              AND received_at > NOW() - INTERVAL '7 days'
+            ORDER BY received_at DESC
+            LIMIT 30
+            """,
+            user_id,
+        )
+        if not rows:
+            return
+        lines = []
+        for r in rows:
+            sender = r.get("from_name") or r.get("from_email") or "someone"
+            subject = r.get("subject") or "(no subject)"
+            snippet = (r.get("snippet") or "")[:240]
+            topic = r.get("topic") or ""
+            lines.append(f"- From {sender} | {subject} | topic={topic} | {snippet}")
+        snippet = "\n".join(lines)
+
+        from app.services.memory_service import extract_and_merge_profile
+        await extract_and_merge_profile(user_id=user_id, activity_snippet=snippet)
+    except Exception:
+        logger.exception("profile extraction failed for user %s", user_id)

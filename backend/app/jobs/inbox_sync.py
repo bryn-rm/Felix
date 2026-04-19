@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from app import db
 from app.middleware.auth import get_google_credentials
+from app.services import memory_service
 from app.services.ai_service import ai_service
 from app.services.gmail_service import GmailService
 from app.services.relationship_engine import relationship_engine
@@ -129,9 +130,14 @@ async def _process_email(
     email_id: str = email["id"]
 
     try:
-        # 1. AI triage
+        # 1. AI triage — inject the cached profile (Layer 1 only; skip episodic
+        # retrieval so per-email triage stays fast and cheap on Haiku).
+        triage_memory = await memory_service.build_memory_context(
+            user_id=user_id, feature="triage",
+        )
         triage = await ai_service.triage_email(
-            email, vip_list=vip_list, user_name=user_name, user_id=user_id
+            email, vip_list=vip_list, user_name=user_name,
+            user_id=user_id, memory_context=triage_memory,
         )
         category: str = triage.get("category", "fyi")
 
@@ -179,6 +185,12 @@ async def _process_email(
         #    and received_at in one call.  (A second partial call was removed here
         #    because it caused total_emails to be incremented twice per email.)
         asyncio.create_task(relationship_engine.update_contact(user_id, email))
+
+        # 7. Layer 3 — distil interesting emails into episodic memory
+        #    (fire-and-forget). The distiller filters by importance, so routine
+        #    automated / FYI traffic is silently dropped.
+        if category in ("action_required", "vip"):
+            asyncio.create_task(_distil_email_episode(user_id, email, category))
 
         # 6. Phase 5 — auto-close any follow-ups that just got a reply.
         #    If this inbound email is part of a thread we were tracking, mark replied.
@@ -276,6 +288,18 @@ async def _generate_and_store_draft(
         email.get("from_email", ""), user_id,
     ) or {}
 
+    # Build memory context for drafting — include episodic retrieval so the
+    # draft can reference prior exchanges / commitments with this sender.
+    draft_memory = await memory_service.build_memory_context(
+        user_id=user_id,
+        feature="draft",
+        query=(
+            f"{email.get('from_name') or email.get('from_email', '')} "
+            f"{email.get('subject', '')}"
+        ),
+        include_episodes=True,
+    )
+
     # Collect streaming draft
     draft_text = ""
     try:
@@ -288,6 +312,7 @@ async def _generate_and_store_draft(
             user_name=user_name,
             user_id=user_id,
             metadata=draft_metadata,
+            memory_context=draft_memory,
         ):
             draft_text += chunk
     except Exception:
@@ -320,6 +345,26 @@ async def _generate_and_store_draft(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+async def _distil_email_episode(user_id: str, email: dict, category: str) -> None:
+    """Distil an important email into a Layer 3 episode (best-effort)."""
+    try:
+        sender = email.get("from_name") or email.get("from_email") or "someone"
+        subject = email.get("subject") or "(no subject)"
+        body = (email.get("body") or email.get("snippet") or "")[:4000]
+        content = f"From: {sender}\nSubject: {subject}\n\n{body}"
+        await memory_service.distil_and_store_episode(
+            user_id=user_id,
+            episode_type="email",
+            content=content,
+            source_type="email",
+            source_id=email.get("id"),
+            occurred_at=email.get("received_at"),
+            min_importance=0.4 if category == "vip" else 0.5,
+        )
+    except Exception:
+        logger.debug("episode distil failed for email %s", email.get("id"), exc_info=True)
+
 
 async def _touch_last_sync(user_id: str) -> None:
     await db.execute(
