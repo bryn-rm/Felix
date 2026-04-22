@@ -28,7 +28,9 @@ import {
   ChevronsLeft,
   ChevronsRight,
 } from "lucide-react";
+import { useSWRConfig } from "swr";
 import { supabase } from "@/lib/supabase";
+import { clearAllSWR } from "@/components/auth/AuthSync";
 import { useUnreadCounts } from "@/hooks/useUnreadCounts";
 
 interface NavItem {
@@ -60,6 +62,7 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { actionRequired, overdueFollowups } = useUnreadCounts();
+  const { mutate } = useSWRConfig();
 
   const [pinned, setPinned] = useState(false);
   const [hoverExpanded, setHoverExpanded] = useState(false);
@@ -111,6 +114,7 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
   ];
 
   async function handleSignOut() {
+    await clearAllSWR(mutate);
     await supabase.auth.signOut();
     router.push("/login");
   }

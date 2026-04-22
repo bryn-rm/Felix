@@ -2,6 +2,7 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { AppShell } from "@/components/layout/AppShell";
+import { AuthSync } from "@/components/auth/AuthSync";
 
 export default async function AppLayout({
   children,
@@ -65,6 +66,7 @@ export default async function AppLayout({
 
   return (
     <AppShell userEmail={user.email ?? ""} displayName={displayName}>
+      <AuthSync />
       {children}
     </AppShell>
   );

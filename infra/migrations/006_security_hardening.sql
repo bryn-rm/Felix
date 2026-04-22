@@ -10,3 +10,8 @@ CREATE TABLE IF NOT EXISTS admin_audit (
 
 CREATE INDEX IF NOT EXISTS idx_admin_audit_accessed
     ON admin_audit (accessed_at DESC);
+
+-- RLS: backend writes via the postgres role (BYPASSRLS); no client should
+-- ever read/write this table with the anon or authenticated key.
+ALTER TABLE admin_audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_audit FORCE ROW LEVEL SECURITY;

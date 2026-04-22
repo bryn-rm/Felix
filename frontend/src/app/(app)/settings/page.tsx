@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import useSWR from "swr";
+import useSWR, { useSWRConfig } from "swr";
 import {
   Save,
   Plus,
@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
+import { clearAllSWR } from "@/components/auth/AuthSync";
 import type { Settings } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -262,6 +263,7 @@ interface GoogleStatus {
 
 export default function SettingsPage() {
   const router = useRouter();
+  const { mutate } = useSWRConfig();
 
   // ---- Remote data ----
   const {
@@ -481,6 +483,7 @@ export default function SettingsPage() {
 
   // Sign out
   async function handleSignOut() {
+    await clearAllSWR(mutate);
     await supabase.auth.signOut();
     router.push("/login");
   }
