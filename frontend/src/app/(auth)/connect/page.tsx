@@ -1,3 +1,7 @@
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+
 import { ConnectPageClient } from "./page-client";
 
 type ConnectPageProps = {
@@ -27,10 +31,64 @@ function resolveOauthErrorMessage(error: string | null): string | null {
   }
 }
 
+async function isGoogleConnected(accessToken: string): Promise<boolean> {
+  const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
+  try {
+    const res = await fetch(`${apiBase}/auth/google/status`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) return false;
+    const status = (await res.json()) as { connected?: boolean };
+    return status.connected === true;
+  } catch {
+    return false;
+  }
+}
+
 export default async function ConnectPage({ searchParams }: ConnectPageProps) {
+  const cookieStore = cookies();
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(
+          cookiesToSet: Array<{ name: string; value: string; options?: CookieOptions }>,
+        ) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    },
+  );
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    redirect("/login");
+  }
+
   const resolvedParams = (await searchParams) ?? {};
   const errorParam = resolvedParams.error;
   const errorCode = Array.isArray(errorParam) ? errorParam[0] : errorParam;
+
+  // If the backend redirected here with ?error=..., always render the page so
+  // the user sees the remediation message — even if a stale google_connections
+  // row would otherwise shortcut them to /home.
+  if (!errorCode) {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (session?.access_token && (await isGoogleConnected(session.access_token))) {
+      redirect("/home");
+    }
+  }
 
   return <ConnectPageClient initialError={resolveOauthErrorMessage(errorCode ?? null)} />;
 }

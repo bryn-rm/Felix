@@ -42,21 +42,27 @@ export default async function AppLayout({
     data: { session },
   } = await supabase.auth.getSession();
 
-  // Check Google connection status — redirect to /connect if not linked
+  // Fail closed: only an explicit {connected: true} passes. Any non-OK response
+  // or network error bounces to /connect so users never land on /home without
+  // Gmail access. redirect() throws, so keep it outside the try/catch.
   const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
-  try {
-    const res = await fetch(`${apiBase}/auth/google/status`, {
-      headers: { Authorization: `Bearer ${session?.access_token}` },
-      cache: "no-store",
-    });
-    if (res.ok) {
-      const status = (await res.json()) as { connected: boolean };
-      if (!status.connected) {
-        redirect("/connect");
+  let connected = false;
+  if (session?.access_token) {
+    try {
+      const res = await fetch(`${apiBase}/auth/google/status`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const status = (await res.json()) as { connected?: boolean };
+        connected = status.connected === true;
       }
+    } catch {
+      connected = false;
     }
-  } catch {
-    // Backend unavailable — allow through rather than blocking the app
+  }
+  if (!connected) {
+    redirect("/connect");
   }
 
   const displayName =

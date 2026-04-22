@@ -12,7 +12,7 @@ export async function GET(request: NextRequest) {
 
   console.log("[callback] exchanging code for session...");
 
-  const response = NextResponse.redirect(new URL("/home", origin));
+  const response = NextResponse.redirect(new URL("/connect", origin));
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -40,6 +40,6 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  console.log("[callback] exchange succeeded, redirecting to /home");
+  console.log("[callback] exchange succeeded, redirecting to /connect");
   return response;
 }
