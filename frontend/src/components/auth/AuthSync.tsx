@@ -37,7 +37,19 @@ export function AuthSync() {
       }
     });
 
-    return () => listener.subscription.unsubscribe();
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      // Browsers throttle background timers, so Supabase's silent
+      // refresh often misses while the tab is hidden. Force one on
+      // return so the next API call carries a fresh access token.
+      void supabase.auth.refreshSession().catch(() => {});
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      listener.subscription.unsubscribe();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [mutate, router]);
 
   return null;

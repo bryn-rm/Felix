@@ -47,23 +47,44 @@ async function getAuthHeader(): Promise<string> {
   throw new ApiError(401, "No active session");
 }
 
+async function doFetch(
+  method: string,
+  path: string,
+  body: unknown,
+  authorization: string,
+): Promise<Response> {
+  return fetch(`${API_BASE}${path}`, {
+    method,
+    headers: {
+      Authorization: authorization,
+      "Content-Type": "application/json",
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const authorization = await getAuthHeader();
+  let authorization = await getAuthHeader();
+  let res = await doFetch(method, path, body, authorization);
 
-  const headers: Record<string, string> = {
-    Authorization: authorization,
-    "Content-Type": "application/json",
-  };
-
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  // The browser throttles Supabase's silent refresh while the tab is hidden,
+  // so the cached access token may be expired on the first call after focus.
+  // Try a single refresh + replay before giving up and bouncing to /login.
+  if (res.status === 401) {
+    try {
+      const { data } = await supabase.auth.refreshSession();
+      if (data.session?.access_token) {
+        authorization = `Bearer ${data.session.access_token}`;
+        res = await doFetch(method, path, body, authorization);
+      }
+    } catch {
+      // fall through to the redirect handling below
+    }
+  }
 
   if (!res.ok) {
     let message = res.statusText;
