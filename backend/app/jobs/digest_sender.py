@@ -35,11 +35,6 @@ async def send_digest_for_user(user_id: str) -> None:
 
 
 async def send_weekly_review_for_user(user_id: str) -> None:
-    review = await polish_service.build_weekly_review(user_id)
-
-    creds = await get_google_credentials(user_id)
-    gmail = GmailService(creds)
-
     recipient = await db.query_one(
         "SELECT google_email FROM google_connections WHERE user_id = $1",
         user_id,
@@ -48,15 +43,14 @@ async def send_weekly_review_for_user(user_id: str) -> None:
     if not to_email:
         return
 
-    body = review["summary"]
-    if review.get("top_contacts"):
-        tops = ", ".join(
-            f"{r.get('from_email')} ({r.get('n')})" for r in review["top_contacts"][:5]
-        )
-        body += f" Top contacts this week: {tops}."
+    review = await polish_service.generate_weekly_review_email(user_id)
+
+    creds = await get_google_credentials(user_id)
+    gmail = GmailService(creds)
 
     await gmail.send_email(
         to=to_email,
-        subject="Felix Weekly Review",
-        body=body,
+        subject=review["subject"],
+        body=review["text"],
+        html_body=review["html"],
     )

@@ -47,8 +47,19 @@ async def get_digest(
 
 
 @router.get("/weekly-review")
-async def get_weekly_review(current_user: dict = Depends(get_current_user)):
-    return await polish_service.build_weekly_review(current_user["id"])
+@limiter.limit("5/minute")
+async def get_weekly_review(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Preview the user's current weekly review email.
+
+    Returns the same payload the Sunday job sends: subject, full HTML body,
+    plaintext alternative, and the supplementary stats.
+    """
+    await check_monthly_ai_budget(current_user["id"])
+    return await polish_service.generate_weekly_review_email(current_user["id"])
 
 
 @router.get("/templates/suggestions")

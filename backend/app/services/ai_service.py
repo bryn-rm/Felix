@@ -56,6 +56,7 @@ PROMPT_VERSIONS: dict[str, str] = {
     "profile_extract":    "v1",
     "episode_distil":     "v1",
     "session_summary":    "v1",
+    "weekly_review":      "v1",
 }
 
 

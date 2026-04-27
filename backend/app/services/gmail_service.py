@@ -113,9 +113,21 @@ class GmailService:
         to: str,
         subject: str,
         body: str,
+        *,
+        html_body: str | None = None,
     ) -> dict:
-        """Send a standalone (non-reply) email."""
-        message = MIMEText(body, "plain", "utf-8")
+        """Send a standalone (non-reply) email.
+
+        If ``html_body`` is provided, the message is sent as multipart/alternative
+        with both plain and HTML parts. The plain part is attached first so HTML-
+        capable clients prefer the HTML rendering (RFC 2046).
+        """
+        if html_body:
+            message: MIMEText | MIMEMultipart = MIMEMultipart("alternative")
+            message.attach(MIMEText(body, "plain", "utf-8"))
+            message.attach(MIMEText(html_body, "html", "utf-8"))
+        else:
+            message = MIMEText(body, "plain", "utf-8")
         message["to"] = to
         message["subject"] = subject
         return await self._send_raw(message)
