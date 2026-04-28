@@ -6,6 +6,13 @@ import { useSWRConfig, type ScopedMutator } from "swr";
 import { supabase } from "@/lib/supabase";
 import { getFreshSession } from "@/lib/auth-session";
 
+const RESUME_REFRESH_SKEW_SECONDS = 120;
+
+function isExpiringSoon(expiresAt: number | undefined): boolean {
+  if (!expiresAt) return false;
+  return expiresAt <= Math.floor(Date.now() / 1000) + RESUME_REFRESH_SKEW_SECONDS;
+}
+
 export function clearAllSWR(mutate: ScopedMutator): Promise<unknown> {
   return mutate(() => true, undefined, { revalidate: false });
 }
@@ -14,6 +21,7 @@ export function AuthSync() {
   const router = useRouter();
   const { mutate } = useSWRConfig();
   const currentUserIdRef = useRef<string | null | undefined>(undefined);
+  const resumeRefreshInFlightRef = useRef(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -39,14 +47,25 @@ export function AuthSync() {
     });
 
     const refreshAfterResume = async () => {
-      // Browsers throttle background timers, so Supabase's silent
-      // refresh often misses while the tab is hidden. Force one on
-      // return so the next API call carries a fresh access token.
-      const before =
-        (await supabase.auth.getSession()).data.session?.access_token ?? null;
-      const fresh = await getFreshSession({ forceRefresh: true });
-      if (fresh?.access_token && fresh.access_token !== before) {
-        router.refresh();
+      if (resumeRefreshInFlightRef.current) return;
+      resumeRefreshInFlightRef.current = true;
+
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+
+        if (!session?.access_token || !isExpiringSoon(session.expires_at)) {
+          return;
+        }
+
+        const before = session.access_token;
+        const fresh = await getFreshSession({ forceRefresh: true });
+        if (fresh?.access_token && fresh.access_token !== before) {
+          router.refresh();
+        }
+      } finally {
+        resumeRefreshInFlightRef.current = false;
       }
     };
     const onVisibility = () => {

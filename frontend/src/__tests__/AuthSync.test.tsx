@@ -1,6 +1,6 @@
 /**
  * Tests for AuthSync — specifically the visibilitychange resume path that
- * forces a session refresh when the user returns to a backgrounded tab.
+ * refreshes an expiring session when the user returns to a backgrounded tab.
  */
 import "@testing-library/jest-dom";
 import { act, render } from "@testing-library/react";
@@ -35,12 +35,21 @@ jest.mock("@/lib/auth-session", () => ({
 
 import { AuthSync } from "@/components/auth/AuthSync";
 
+const futureExpiry = () => Math.floor(Date.now() / 1000) + 3600;
+const expiringExpiry = () => Math.floor(Date.now() / 1000) + 30;
+
 beforeEach(() => {
   mockRouterRefresh.mockClear();
   mockGetFreshSession.mockReset();
   mockGetSession.mockReset();
   mockGetSession.mockResolvedValue({
-    data: { session: { access_token: "stale-token", user: { id: "u1" } } },
+    data: {
+      session: {
+        access_token: "stale-token",
+        expires_at: futureExpiry(),
+        user: { id: "u1" },
+      },
+    },
   });
 });
 
@@ -60,7 +69,31 @@ function fireVisibilityChange(state: "visible" | "hidden") {
 }
 
 describe("AuthSync visibility resume", () => {
-  it("force-refreshes the session when the tab becomes visible", async () => {
+  it("does not refresh when the visible tab has a healthy cached session", async () => {
+    mockGetFreshSession.mockResolvedValue({ access_token: "stale-token" });
+
+    render(<AuthSync />);
+    await flush();
+
+    await act(async () => {
+      fireVisibilityChange("visible");
+      await flush();
+    });
+
+    expect(mockGetFreshSession).not.toHaveBeenCalled();
+    expect(mockRouterRefresh).not.toHaveBeenCalled();
+  });
+
+  it("force-refreshes the session when the visible tab has an expiring token", async () => {
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "stale-token",
+          expires_at: expiringExpiry(),
+          user: { id: "u1" },
+        },
+      },
+    });
     mockGetFreshSession.mockResolvedValue({ access_token: "stale-token" });
 
     render(<AuthSync />);
@@ -75,6 +108,15 @@ describe("AuthSync visibility resume", () => {
   });
 
   it("calls router.refresh() when the resume produces a new access_token", async () => {
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "stale-token",
+          expires_at: expiringExpiry(),
+          user: { id: "u1" },
+        },
+      },
+    });
     mockGetFreshSession.mockResolvedValue({ access_token: "fresh-token" });
 
     render(<AuthSync />);
@@ -89,6 +131,15 @@ describe("AuthSync visibility resume", () => {
   });
 
   it("skips router.refresh() when the access_token is unchanged", async () => {
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: "stale-token",
+          expires_at: expiringExpiry(),
+          user: { id: "u1" },
+        },
+      },
+    });
     mockGetFreshSession.mockResolvedValue({ access_token: "stale-token" });
 
     render(<AuthSync />);
@@ -102,6 +153,23 @@ describe("AuthSync visibility resume", () => {
     expect(mockRouterRefresh).not.toHaveBeenCalled();
   });
 
+  it("does not refresh or router.refresh when there is no cached session", async () => {
+    mockGetSession.mockResolvedValue({
+      data: { session: null },
+    });
+
+    render(<AuthSync />);
+    await flush();
+
+    await act(async () => {
+      fireVisibilityChange("visible");
+      await flush();
+    });
+
+    expect(mockGetFreshSession).not.toHaveBeenCalled();
+    expect(mockRouterRefresh).not.toHaveBeenCalled();
+  });
+
   it("ignores visibilitychange to hidden", async () => {
     render(<AuthSync />);
     await flush();
@@ -112,5 +180,34 @@ describe("AuthSync visibility resume", () => {
     });
 
     expect(mockGetFreshSession).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates rapid visible events while a resume check is in flight", async () => {
+    let resolveGetSession: (value: unknown) => void = () => undefined;
+    mockGetSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveGetSession = resolve;
+        }),
+    );
+
+    render(<AuthSync />);
+
+    await act(async () => {
+      fireVisibilityChange("visible");
+      fireVisibilityChange("visible");
+      resolveGetSession({
+        data: {
+          session: {
+            access_token: "stale-token",
+            expires_at: expiringExpiry(),
+            user: { id: "u1" },
+          },
+        },
+      });
+      await flush();
+    });
+
+    expect(mockGetFreshSession).toHaveBeenCalledTimes(1);
   });
 });
