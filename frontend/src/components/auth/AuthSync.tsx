@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useSWRConfig, type ScopedMutator } from "swr";
 import { supabase } from "@/lib/supabase";
+import { getFreshSession } from "@/lib/auth-session";
 
 export function clearAllSWR(mutate: ScopedMutator): Promise<unknown> {
   return mutate(() => true, undefined, { revalidate: false });
@@ -37,12 +38,20 @@ export function AuthSync() {
       }
     });
 
-    const onVisibility = () => {
-      if (document.visibilityState !== "visible") return;
+    const refreshAfterResume = async () => {
       // Browsers throttle background timers, so Supabase's silent
       // refresh often misses while the tab is hidden. Force one on
       // return so the next API call carries a fresh access token.
-      void supabase.auth.refreshSession().catch(() => {});
+      const before =
+        (await supabase.auth.getSession()).data.session?.access_token ?? null;
+      const fresh = await getFreshSession({ forceRefresh: true });
+      if (fresh?.access_token && fresh.access_token !== before) {
+        router.refresh();
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      void refreshAfterResume();
     };
     document.addEventListener("visibilitychange", onVisibility);
 

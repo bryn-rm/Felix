@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabase";
+import { getFreshAccessToken } from "@/lib/auth-session";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -24,24 +24,9 @@ export class ApiError extends Error {
 // ---------------------------------------------------------------------------
 
 async function getAuthHeader(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (session?.access_token) {
-    return `Bearer ${session.access_token}`;
-  }
-
-  // Force a round-trip so Supabase rehydrates the session from storage.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (user) {
-    const {
-      data: { session: refreshed },
-    } = await supabase.auth.getSession();
-    if (refreshed?.access_token) {
-      return `Bearer ${refreshed.access_token}`;
-    }
+  const token = await getFreshAccessToken();
+  if (token) {
+    return `Bearer ${token}`;
   }
 
   throw new ApiError(401, "No active session");
@@ -75,14 +60,10 @@ async function request<T>(
   // so the cached access token may be expired on the first call after focus.
   // Try a single refresh + replay before giving up and bouncing to /login.
   if (res.status === 401) {
-    try {
-      const { data } = await supabase.auth.refreshSession();
-      if (data.session?.access_token) {
-        authorization = `Bearer ${data.session.access_token}`;
-        res = await doFetch(method, path, body, authorization);
-      }
-    } catch {
-      // fall through to the redirect handling below
+    const token = await getFreshAccessToken({ forceRefresh: true });
+    if (token) {
+      authorization = `Bearer ${token}`;
+      res = await doFetch(method, path, body, authorization);
     }
   }
 
@@ -125,15 +106,17 @@ export const api = {
 
   /** Returns a ReadableStream for the streaming draft endpoint. */
   streamDraft: async (emailId: string): Promise<ReadableStream<Uint8Array>> => {
-    const authorization = await getAuthHeader();
+    const path = `/emails/${emailId}/draft`;
+    let authorization = await getAuthHeader();
+    let res = await doFetch("POST", path, undefined, authorization);
 
-    const res = await fetch(`${API_BASE}/emails/${emailId}/draft`, {
-      method: "POST",
-      headers: {
-        Authorization: authorization,
-        "Content-Type": "application/json",
-      },
-    });
+    if (res.status === 401) {
+      const token = await getFreshAccessToken({ forceRefresh: true });
+      if (token) {
+        authorization = `Bearer ${token}`;
+        res = await doFetch("POST", path, undefined, authorization);
+      }
+    }
 
     if (!res.ok) {
       let message = res.statusText;

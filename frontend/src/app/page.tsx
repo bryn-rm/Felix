@@ -19,9 +19,12 @@ export default async function RootPage() {
     }
   )
 
-  const { data: { session } } = await supabase.auth.getSession()
+  // getUser() validates the JWT against the Supabase Auth server, unlike
+  // getSession() which trusts whatever the cookie says. Worth the extra
+  // round-trip on the root redirect to avoid honoring forged session cookies.
+  const { data: { user } } = await supabase.auth.getUser()
 
-  if (session) {
+  if (user) {
     redirect('/home')
   } else {
     redirect('/login')
