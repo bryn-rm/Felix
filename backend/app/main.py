@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 
 from app import db
-from app.api import auth, briefing, calendar, contacts, email, follow_ups, memory, polish, settings, templates, voice
+from app.api import auth, briefing, calendar, commitments, contacts, email, follow_ups, meetings, memory, polish, settings, templates, voice
 from app.api.eval import router as eval_router, admin_router
 from app.config import settings as app_settings
 from app.jobs.scheduler import scheduler
@@ -96,6 +96,8 @@ app.include_router(polish.router,      prefix="/polish",      tags=["polish"])
 app.include_router(settings.router,    prefix="/settings",    tags=["settings"])
 app.include_router(templates.router,   prefix="/templates",   tags=["templates"])
 app.include_router(memory.router,      prefix="/memory",      tags=["memory"])
+app.include_router(meetings.router,    prefix="/meetings",    tags=["meetings"])
+app.include_router(commitments.router, prefix="/commitments", tags=["commitments"])
 app.include_router(eval_router,        prefix="/eval",         tags=["eval"])
 app.include_router(admin_router,       prefix="/admin",        tags=["admin"])
 

@@ -20,6 +20,7 @@ from anthropic import AsyncAnthropic
 
 from app.config import settings
 from app.prompts.briefing import BRIEFING_PROMPT
+from app.prompts.commitment_detection import COMMITMENT_DETECTION_PROMPT
 from app.prompts.draft import DRAFT_PROMPT
 from app.prompts.follow_up_detection import FOLLOW_UP_DETECTION_PROMPT
 from app.prompts.meeting_notes import MEETING_NOTES_PROMPT
@@ -57,6 +58,8 @@ PROMPT_VERSIONS: dict[str, str] = {
     "episode_distil":     "v1",
     "session_summary":    "v1",
     "weekly_review":      "v1",
+    "meeting_prep":       "v1",
+    "commitment_detect":  "v1",
 }
 
 
@@ -646,6 +649,108 @@ class AIService:
             )
 
     # ------------------------------------------------------------------
+    # Commitment detection — Haiku
+    # Bidirectional: pulls promises in both directions from a single email.
+    # ------------------------------------------------------------------
+
+    async def detect_commitments(
+        self,
+        email: dict,
+        *,
+        source_kind: str,            # "inbound" | "sent"
+        user_name: str,
+        user_email: str,
+        counterparty_email: str,
+        counterparty_name: str | None = None,
+        user_id: str | None = None,
+        memory_context: str | None = None,
+    ) -> list[dict]:
+        """Return a list of extracted commitment dicts (possibly empty).
+
+        Each item: ``{direction, text, source_quote, deadline_iso, confidence}``.
+        ``direction`` is ``"owed_by_user"`` or ``"owed_to_user"``.
+        """
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
+        try:
+            memory_context = await _auto_memory(memory_context, user_id, feature="commitment_detect")
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_FAST,
+                max_tokens=600,
+                **_system_kwarg(memory_context),
+                messages=[{
+                    "role": "user",
+                    "content": COMMITMENT_DETECTION_PROMPT.format(
+                        source_kind=source_kind,
+                        user_name=user_name or "the user",
+                        user_email=user_email or "",
+                        counterparty_email=counterparty_email or "",
+                        counterparty_name=counterparty_name or "",
+                        from_email=email.get("from_email") or email.get("from") or "",
+                        to_email=email.get("to_email") or email.get("to") or "",
+                        subject=email.get("subject") or "",
+                        sent_at=str(email.get("sent_at") or email.get("received_at") or ""),
+                        body=(email.get("body") or "")[:4000],
+                    ),
+                }],
+            )
+            try:
+                payload = json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                # Re-raise so the inbox-sync caller leaves commitment_scanned_at NULL
+                # and the catch-up sweep retries. Returning [] here previously made
+                # transient parse failures look like "no commitments found" and
+                # silently dropped the row.
+                parse_error = True
+                success = False
+                error_message = f"JSONDecodeError: {e}"
+                raise
+            items = payload.get("commitments")
+            if not isinstance(items, list):
+                # Schema violation — treat as a parse failure and let the
+                # bounded catch-up sweep retry rather than swallowing.
+                parse_error = True
+                success = False
+                error_message = f"commitments field missing or not a list: {type(items).__name__}"
+                raise ValueError(error_message)
+            cleaned: list[dict] = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                direction = it.get("direction")
+                text = (it.get("text") or "").strip()
+                if direction not in ("owed_by_user", "owed_to_user") or not text:
+                    continue
+                cleaned.append({
+                    "direction":          direction,
+                    "counterparty_email": (it.get("counterparty_email") or "").strip().lower() or None,
+                    "text":               text[:500],
+                    "source_quote":       (it.get("source_quote") or "")[:200],
+                    "deadline_iso":       it.get("deadline_iso"),
+                    "confidence":         _coerce_float(it.get("confidence"), 0.5),
+                })
+            return cleaned
+        except Exception as e:
+            success = False
+            if not error_message:
+                error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="commitment_detect",
+                model=settings.ANTHROPIC_MODEL_FAST,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+            )
+
+    # ------------------------------------------------------------------
     # Sentiment analysis — Haiku
     # ------------------------------------------------------------------
 
@@ -722,6 +827,13 @@ def _first(lst: list | None, default: str) -> str:
     if lst:
         return lst[0]
     return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _format_thread(thread: list[dict]) -> str:

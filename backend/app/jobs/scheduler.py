@@ -305,6 +305,145 @@ async def _send_weekly_review_for_user(user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Meeting prep — every 5 minutes
+# Generates pre-meeting context cards for events starting in the next 20 min.
+# Idempotent on (user_id, event_id) so the overlapping window doesn't dupe.
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("interval", minutes=5, id="generate_meeting_preps")
+async def generate_meeting_preps() -> None:
+    try:
+        users = await get_active_users()
+        if not users:
+            return
+        results = await asyncio.gather(
+            *[_generate_meeting_preps_for_user(u["user_id"]) for u in users],
+            return_exceptions=True,
+        )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Meeting prep generation failed for user %s: %s", user["user_id"], result)
+    except Exception:
+        logger.exception("generate_meeting_preps outer error")
+
+
+async def _generate_meeting_preps_for_user(user_id: str) -> None:
+    """Generate prep cards for any events starting in the next 20 minutes.
+
+    Reads `settings.meeting_prep_mode` to decide whether to also push the card
+    via email. Always writes to `meeting_preps` so the in-app surface has it.
+    """
+    try:
+        # Skip users who opted out
+        prefs = await db.query_one(
+            "SELECT meeting_prep_mode FROM settings WHERE user_id = $1",
+            user_id,
+        ) or {}
+        mode = prefs.get("meeting_prep_mode") or "in_app_only"
+        if mode == "off":
+            return
+
+        from datetime import timedelta as _td
+        from app.middleware.auth import get_google_credentials
+        from app.services.calendar_service import CalendarService
+        from app.services.meeting_prep_service import (
+            meeting_prep_service, _eligible_for_prep, _subject_for,
+        )
+
+        try:
+            creds = await get_google_credentials(user_id)
+        except Exception:
+            return
+        cal = CalendarService(creds)
+
+        now = datetime.now(pytz.UTC)
+        window_end = now + _td(minutes=20)
+        events = await cal.get_events(
+            time_min=now.isoformat(), time_max=window_end.isoformat(),
+        )
+        for event in events:
+            if not _eligible_for_prep(event):
+                continue
+            existing = await db.query_one(
+                "SELECT status, delivery_modes, event_title, event_start, "
+                "content_html, content_text "
+                "FROM meeting_preps WHERE user_id = $1 AND event_id = $2",
+                user_id, event["id"],
+            )
+            if existing and existing.get("status") != "failed":
+                # An existing row still needs an email retry if the user is in
+                # an email mode and the email side hasn't been delivered yet
+                # (transient Gmail send failure or in_app_only → email mode
+                # upgrade after the row was generated). status='failed' falls
+                # through to regenerate so a recovered Anthropic outage doesn't
+                # leave the event stuck on the fallback stub.
+                already_emailed = "email" in (existing.get("delivery_modes") or [])
+                wants_email = mode in ("email_only", "both")
+                can_retry = (
+                    wants_email
+                    and not already_emailed
+                    and existing.get("status") == "generated"
+                    and existing.get("content_html")
+                )
+                if can_retry:
+                    asyncio.create_task(_send_meeting_prep_email(user_id, {
+                        "event_id":    event["id"],
+                        "subject":     _subject_for(
+                            existing.get("event_title"), existing.get("event_start"),
+                        ),
+                        "html":        existing.get("content_html"),
+                        "text":        existing.get("content_text") or "",
+                    }))
+                continue  # don't regenerate — cached row is still authoritative
+
+            prep = await meeting_prep_service.generate_for_event(user_id, event)
+
+            # Optional email push — controlled by per-user setting
+            if mode in ("email_only", "both"):
+                asyncio.create_task(_send_meeting_prep_email(user_id, prep))
+    except Exception:
+        logger.exception("Failed to generate meeting preps for user %s", user_id)
+
+
+async def _send_meeting_prep_email(user_id: str, prep: dict) -> None:
+    """Push a prep card via Gmail. Fire-and-forget."""
+    try:
+        from app.config import settings as _app_settings
+        from app.middleware.auth import get_google_credentials
+        from app.services.gmail_service import GmailService
+        from app.services.polish_service import _wrap_html_shell
+
+        recipient = await db.query_one(
+            "SELECT google_email FROM google_connections WHERE user_id = $1",
+            user_id,
+        )
+        to_email = (recipient or {}).get("google_email")
+        if not to_email or not prep.get("html"):
+            return
+
+        # The cached prep.html is the body only — wrap with the email shell
+        # at send time so the in-app surface stays free of email chrome.
+        email_html = _wrap_html_shell(prep["html"], _app_settings.FRONTEND_URL)
+
+        creds = await get_google_credentials(user_id)
+        gmail = GmailService(creds)
+        await gmail.send_email(
+            to=to_email,
+            subject=prep["subject"],
+            body=prep["text"] or "Pre-meeting prep — open Felix to view.",
+            html_body=email_html,
+        )
+        await db.execute(
+            "UPDATE meeting_preps SET status = 'sent', "
+            "delivery_modes = ARRAY['email','in_app'] "
+            "WHERE user_id = $1 AND event_id = $2",
+            user_id, prep["event_id"],
+        )
+    except Exception:
+        logger.exception("Failed to send meeting prep email for user %s", user_id)
+
+
+# ---------------------------------------------------------------------------
 # Expired OAuth nonce sweep — hourly
 # Nonces are keyed per-attempt so abandoned ones accumulate unless swept.
 # ---------------------------------------------------------------------------

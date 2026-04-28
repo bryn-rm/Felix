@@ -128,7 +128,33 @@ class BriefingService:
         else:
             calendar_summary = "No meetings scheduled today."
 
-        # 5. Relationship alerts — VIPs not contacted recently or deteriorating sentiment
+        # 5b. Commitments due in the next 48h (Commitment Radar)
+        commitments = await db.query(
+            """
+            SELECT direction, counterparty_name, counterparty_email, text, deadline
+            FROM commitments
+            WHERE user_id = $1
+              AND status = 'open'
+              AND confidence >= 0.7
+              AND deadline IS NOT NULL
+              AND deadline <= NOW() + INTERVAL '48 hours'
+            ORDER BY deadline ASC
+            LIMIT 5
+            """,
+            user_id,
+        )
+        commitment_count = len(commitments)
+        if commitments:
+            c_lines = []
+            for c in commitments:
+                who = c.get("counterparty_name") or (c.get("counterparty_email") or "").split("@", 1)[0] or "someone"
+                verb = "you owe" if c.get("direction") == "owed_by_user" else "they owe you"
+                c_lines.append(f"• {verb} {who}: {(c.get('text') or '').strip()[:120]}")
+            commitments_summary = "\n".join(c_lines)
+        else:
+            commitments_summary = "No commitments due in the next two days."
+
+        # 6. Relationship alerts — VIPs not contacted recently or deteriorating sentiment
         relationship_alerts_rows = await db.query(
             """
             SELECT name, email, last_contacted, sentiment_trend, relationship_strength
@@ -171,11 +197,14 @@ class BriefingService:
             "calendar_summary": calendar_summary,
             "follow_up_count": follow_up_count,
             "follow_ups_summary": follow_ups_summary,
+            "commitment_count": commitment_count,
+            "commitments_summary": commitments_summary,
             "relationship_alerts": relationship_alerts,
             # Raw data for JSONB snapshot in briefings table
             "_priority_emails": priority_emails,
             "_calendar_events": calendar_events,
             "_follow_ups": follow_ups,
+            "_commitments": commitments,
             "_user_tz": user_tz,
         }
 

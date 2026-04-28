@@ -16,7 +16,7 @@ Pipeline for each new email:
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app import db
 from app.middleware.auth import get_google_credentials
@@ -80,6 +80,15 @@ async def sync_user_inbox(user_id: str) -> None:
     vip_list: list[str] = user_settings.get("vip_contacts") or []
     style_profile: dict = user_settings.get("style_profile") or {}
 
+    # Snapshot last_sync up front so the sent-mail mirror's "after:" floor
+    # can't be poisoned by _touch_last_sync running before the background
+    # task gets scheduled.
+    last_sync_row = await db.query_one(
+        "SELECT last_sync FROM google_connections WHERE user_id = $1",
+        user_id,
+    )
+    last_sync_at = (last_sync_row or {}).get("last_sync")
+
     # Fetch emails from the last 4 days (read or unread) that haven't been
     # processed yet. The "felix-processed" label prevents double-processing.
     new_emails = await gmail.get_recent_emails(
@@ -87,27 +96,40 @@ async def sync_user_inbox(user_id: str) -> None:
         query="in:inbox newer_than:4d -label:felix-processed",
     )
 
-    if not new_emails:
-        await _touch_last_sync(user_id)
-        return
+    if new_emails:
+        logger.info("User %s: processing %d new email(s)", user_id, len(new_emails))
 
-    logger.info("User %s: processing %d new email(s)", user_id, len(new_emails))
+        # Initialise a fresh label-ID cache per sync run, per user.  A
+        # module-level cache would leak label IDs across users (each user's
+        # Gmail account uses different label IDs for the same label name).
+        label_cache: dict[str, str] = {}
 
-    # Initialise a fresh label-ID cache per sync run, per user.  A module-level
-    # cache would leak label IDs across users (each user's Gmail account uses
-    # different label IDs for the same label name).
-    label_cache: dict[str, str] = {}
+        for email in new_emails:
+            await _process_email(
+                email=email,
+                user_id=user_id,
+                gmail=gmail,
+                vip_list=vip_list,
+                user_name=user_name,
+                style_profile=style_profile,
+                label_cache=label_cache,
+            )
 
-    for email in new_emails:
-        await _process_email(
-            email=email,
-            user_id=user_id,
-            gmail=gmail,
-            vip_list=vip_list,
-            user_name=user_name,
-            style_profile=style_profile,
-            label_cache=label_cache,
-        )
+    # The mirror and catch-up sweeps must run regardless of inbound traffic:
+    # a quiet day with only outbound mail still needs sent_emails populated,
+    # and earlier failed scans need their retry. Scheduling them outside the
+    # `if new_emails` block keeps them firing every cycle.
+    #
+    # Mirror Gmail "in:sent" so commitment detection + weekly stats see the
+    # full picture, not just Felix-assisted drafts. Idempotent — dedupes on
+    # (id, user_id) PK in sent_emails.
+    asyncio.create_task(_mirror_recent_sent(user_id, gmail, last_sync_at))
+
+    # Catch-up sweep: any rows whose commitment scan failed previously will
+    # have commitment_scanned_at IS NULL. Retry up to 20 of each per run; the
+    # 7-day window stops permanently-bad rows from being retried forever.
+    asyncio.create_task(_catch_up_inbound_commitment_scans(user_id))
+    asyncio.create_task(_catch_up_sent_commitment_scans(user_id))
 
     await _touch_last_sync(user_id)
 
@@ -197,6 +219,34 @@ async def _process_email(
         if email.get("thread_id"):
             from app.services.follow_up_engine import follow_up_engine as _fu_engine
             asyncio.create_task(_fu_engine.mark_replied(user_id, email["thread_id"]))
+
+        # 8. Commitment Radar — extract promises in either direction from the
+        #    inbound email. Skipped silently for automated/newsletter senders.
+        #
+        #    We await the scan (rather than fire-and-forget) and stamp
+        #    commitment_scanned_at on success. A failure leaves the column
+        #    NULL so _catch_up_inbound_commitment_scans on the next sync run
+        #    will retry — without this, a transient Anthropic/DB error would
+        #    silently drop the commitment forever (the email is already
+        #    labeled felix-processed and excluded from the next inbox query).
+        if category not in ("automated", "newsletter"):
+            try:
+                from app.services.commitment_service import commitment_service as _commit
+                await _commit.scan_inbound(user_id, {
+                    **email,
+                    "from_email": email.get("from_email", ""),
+                    "from_name":  email.get("from_name", ""),
+                })
+                await db.execute(
+                    "UPDATE emails SET commitment_scanned_at = NOW() "
+                    "WHERE id = $1 AND user_id = $2",
+                    email_id, user_id,
+                )
+            except Exception:
+                logger.warning(
+                    "commitment scan failed for email %s; will retry on next sync",
+                    email_id, exc_info=True,
+                )
 
     except Exception:
         logger.exception("Failed to process email %s for user %s", email_id, user_id)
@@ -371,6 +421,192 @@ async def _touch_last_sync(user_id: str) -> None:
         "UPDATE google_connections SET last_sync = $1 WHERE user_id = $2",
         datetime.now(timezone.utc), user_id,
     )
+
+
+async def _mirror_recent_sent(
+    user_id: str,
+    gmail: GmailService,
+    last_sync_at: datetime | None,
+) -> None:
+    """Mirror Gmail "in:sent" messages into `sent_emails`.
+
+    The query window starts from the last successful sync (minus a small
+    overlap) so that >24h downtime doesn't permanently drop sent mail. Capped
+    at 7 days back so first-time / stale connections don't backfill the entire
+    mailbox. Idempotent: dedupes on (id, user_id) so re-running is safe.
+
+    ``last_sync_at`` is snapshotted by the caller before _touch_last_sync runs,
+    so we can't accidentally read the just-bumped value and collapse the
+    backfill window to the last 10 minutes.
+    """
+    from email.utils import getaddresses
+
+    now = datetime.now(timezone.utc)
+    seven_days_ago = now - timedelta(days=7)
+    one_day_ago = now - timedelta(days=1)
+    if last_sync_at:
+        # Overlap by 10 min so we don't miss anything sent right at the boundary.
+        floor = max(seven_days_ago, last_sync_at - timedelta(minutes=10))
+    else:
+        floor = one_day_ago
+    floor_ts = int(floor.timestamp())
+
+    try:
+        # Pagination + max_total=500 caps blast in pathological cases; the
+        # (id, user_id) PK on sent_emails dedupes overlap with prior runs.
+        sent = await gmail.get_recent_emails(
+            max_results=100,
+            query=f"in:sent after:{floor_ts}",
+            paginate=True,
+            max_total=500,
+        )
+    except Exception:
+        logger.warning("sent mirror: fetch failed for user %s", user_id, exc_info=True)
+        return
+
+    if not sent:
+        return
+
+    from app.services.commitment_service import commitment_service
+
+    for msg in sent:
+        msg_id = msg.get("id")
+        if not msg_id:
+            continue
+
+        existing = await db.query_one(
+            "SELECT 1 FROM sent_emails WHERE id = $1 AND user_id = $2",
+            msg_id, user_id,
+        )
+        if existing:
+            continue
+
+        # Parse the full To + Cc header so group threads (To: a@x, b@y, c@z)
+        # preserve every recipient — parseaddr would have collapsed them to
+        # the first one, dropping context for everyone else on the thread.
+        recipients = getaddresses([msg.get("to") or "", msg.get("cc") or ""])
+        to_emails: list[str] = []
+        to_names: list[str] = []
+        for name, addr in recipients:
+            addr = (addr or "").strip().lower()
+            if not addr or addr in to_emails:
+                continue
+            to_emails.append(addr)
+            to_names.append((name or "").strip())
+
+        await db.upsert(
+            "sent_emails",
+            {
+                "id":                msg_id,
+                "user_id":           user_id,
+                "thread_id":         msg.get("thread_id"),
+                "message_id_header": msg.get("message_id_header", ""),
+                "from_email":        msg.get("from_email", ""),
+                "to_emails":         to_emails,
+                "to_names":          to_names,
+                "subject":           msg.get("subject", ""),
+                "body":              msg.get("body", ""),
+                "snippet":           msg.get("snippet", ""),
+                "sent_at":           msg.get("received_at"),
+                "processed_at":      datetime.now(timezone.utc),
+            },
+            conflict_columns=["id", "user_id"],
+        )
+
+        # Commitment scan on outbound — awaited so a failure leaves
+        # commitment_scanned_at NULL and the catch-up sweep can retry on the
+        # next sync. The PK on sent_emails would otherwise prevent rediscovery.
+        try:
+            await commitment_service.scan_sent(user_id, {
+                **msg,
+                "to_emails": to_emails,
+                "to_names":  to_names,
+            })
+            await db.execute(
+                "UPDATE sent_emails SET commitment_scanned_at = NOW() "
+                "WHERE id = $1 AND user_id = $2",
+                msg_id, user_id,
+            )
+        except Exception:
+            logger.warning(
+                "commitment scan failed for sent message %s; will retry on next sync",
+                msg_id, exc_info=True,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Commitment scan catch-up sweeps
+# Each scheduled inbox sync queues these to retry rows whose first scan
+# attempt failed (commitment_scanned_at IS NULL). Bounded at 20 rows / 7 days
+# so they can't run away if every scan keeps failing.
+# ---------------------------------------------------------------------------
+
+_CATCH_UP_BATCH = 20
+_CATCH_UP_LOOKBACK_DAYS = 7
+
+
+async def _catch_up_inbound_commitment_scans(user_id: str) -> None:
+    try:
+        from app.services.commitment_service import commitment_service as _commit
+        rows = await db.query(
+            f"""
+            SELECT id, from_email, from_name, to_email, subject, body,
+                   received_at, category
+            FROM emails
+            WHERE user_id = $1
+              AND commitment_scanned_at IS NULL
+              AND received_at > NOW() - INTERVAL '{_CATCH_UP_LOOKBACK_DAYS} days'
+              AND COALESCE(category, '') NOT IN ('automated', 'newsletter')
+            ORDER BY received_at DESC
+            LIMIT {_CATCH_UP_BATCH}
+            """,
+            user_id,
+        )
+        for row in rows:
+            try:
+                await _commit.scan_inbound(user_id, dict(row))
+                await db.execute(
+                    "UPDATE emails SET commitment_scanned_at = NOW() "
+                    "WHERE id = $1 AND user_id = $2",
+                    row["id"], user_id,
+                )
+            except Exception:
+                logger.debug(
+                    "catch-up inbound scan still failing for %s", row["id"], exc_info=True,
+                )
+    except Exception:
+        logger.exception("inbound commitment catch-up sweep crashed for user %s", user_id)
+
+
+async def _catch_up_sent_commitment_scans(user_id: str) -> None:
+    try:
+        from app.services.commitment_service import commitment_service as _commit
+        rows = await db.query(
+            f"""
+            SELECT id, from_email, to_emails, to_names, subject, body, sent_at
+            FROM sent_emails
+            WHERE user_id = $1
+              AND commitment_scanned_at IS NULL
+              AND sent_at > NOW() - INTERVAL '{_CATCH_UP_LOOKBACK_DAYS} days'
+            ORDER BY sent_at DESC
+            LIMIT {_CATCH_UP_BATCH}
+            """,
+            user_id,
+        )
+        for row in rows:
+            try:
+                await _commit.scan_sent(user_id, dict(row))
+                await db.execute(
+                    "UPDATE sent_emails SET commitment_scanned_at = NOW() "
+                    "WHERE id = $1 AND user_id = $2",
+                    row["id"], user_id,
+                )
+            except Exception:
+                logger.debug(
+                    "catch-up sent scan still failing for %s", row["id"], exc_info=True,
+                )
+    except Exception:
+        logger.exception("sent commitment catch-up sweep crashed for user %s", user_id)
 
 
 # ---------------------------------------------------------------------------

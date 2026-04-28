@@ -12,6 +12,9 @@ TODAY'S CALENDAR ({meeting_count} meetings):
 FOLLOW-UPS WAITING ({follow_up_count} overdue):
 {follow_ups_summary}
 
+COMMITMENTS DUE SOON ({commitment_count} in next 48h):
+{commitments_summary}
+
 RELATIONSHIP ALERTS:
 {relationship_alerts}
 

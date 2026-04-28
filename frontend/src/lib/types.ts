@@ -101,3 +101,31 @@ export interface AiFeedback {
   correction: string | null;
   notes: string | null;
 }
+
+export interface Commitment {
+  id: string;
+  source_email_id: string | null;
+  source_kind: "inbound" | "sent";
+  direction: "owed_by_user" | "owed_to_user";
+  counterparty_email: string | null;
+  counterparty_name: string | null;
+  text: string;
+  source_quote: string | null;
+  deadline: string | null;
+  confidence: number;
+  status: "open" | "done" | "dropped" | "rescued";
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export interface MeetingPrep {
+  id?: string;
+  subject: string;
+  html: string;
+  text: string;
+  event_id: string;
+  event_title: string | null;
+  event_start: string | null;
+  cached?: boolean;
+  pending?: boolean;
+}

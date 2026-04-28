@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import parseaddr
+from typing import Any
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -33,29 +34,55 @@ class GmailService:
     # Reading
     # ------------------------------------------------------------------
 
-    async def get_recent_emails(self, max_results: int = 50, query: str = "") -> list[dict]:
+    async def get_recent_emails(
+        self,
+        max_results: int = 50,
+        query: str = "",
+        *,
+        paginate: bool = False,
+        max_total: int = 500,
+    ) -> list[dict]:
         """
         Fetch inbox emails matching the query. Default query excludes emails
         already labelled felix-processed to avoid double-processing.
+
+        With ``paginate=True`` the method follows ``nextPageToken`` until the
+        query is exhausted or ``max_total`` messages have been collected — used
+        by the sent-mail mirror so backlogs >max_results aren't truncated.
         """
         q = query or "in:inbox is:unread -label:felix-processed"
 
-        request = self.service.users().messages().list(
-            userId="me", maxResults=max_results, q=q
-        )
-        try:
-            results = await _execute_with_backoff(request, context="list inbox messages")
-        except HttpError as e:
-            _handle_http_error(e, context="list inbox messages")
-            return []
+        ids: list[str] = []
+        page_token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "userId": "me",
+                "maxResults": max_results,
+                "q": q,
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
+            request = self.service.users().messages().list(**kwargs)
+            try:
+                results = await _execute_with_backoff(request, context="list inbox messages")
+            except HttpError as e:
+                _handle_http_error(e, context="list inbox messages")
+                return []
+            for msg in results.get("messages", []):
+                ids.append(msg["id"])
+                if len(ids) >= max_total:
+                    break
+            page_token = results.get("nextPageToken")
+            if not paginate or not page_token or len(ids) >= max_total:
+                break
 
         messages = []
-        for msg in results.get("messages", []):
+        for msg_id in ids:
             try:
-                full = await self._fetch_full_message(msg["id"])
+                full = await self._fetch_full_message(msg_id)
                 messages.append(self._parse_message(full))
             except HttpError as e:
-                logger.warning("Could not fetch message %s: %s", msg["id"], e)
+                logger.warning("Could not fetch message %s: %s", msg_id, e)
 
         return messages
 
@@ -303,6 +330,7 @@ class GmailService:
             "from_email": from_email.lower(),
             "from_name": from_name,
             "to": headers.get("to", ""),
+            "cc": headers.get("cc", ""),
             "subject": headers.get("subject", "(no subject)"),
             "received_at": received_at,
             "body": body[:50_000],  # cap to avoid storing extremely large bodies

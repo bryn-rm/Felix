@@ -22,12 +22,14 @@ import {
   Volume2,
   Loader2,
   Sparkles,
+  Clock,
   RefreshCw,
 } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
-import type { Briefing, Settings } from "@/lib/types";
+import type { Briefing, MeetingPrep, Settings } from "@/lib/types";
 import { useVoiceContext } from "@/components/felix/VoiceContext";
+import { useNextMeetingPrep } from "@/hooks/useMeetingPrep";
 
 // ---------------------------------------------------------------------------
 // Types & helpers
@@ -373,6 +375,96 @@ function BriefingCard({
 }
 
 // ---------------------------------------------------------------------------
+// Next-up meeting prep card
+// ---------------------------------------------------------------------------
+
+function formatStart(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const time = d.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  if (sameDay) {
+    const mins = Math.round((d.getTime() - now.getTime()) / 60_000);
+    if (mins > 0 && mins < 60) return `in ${mins} min · ${time}`;
+    return time;
+  }
+  return d.toLocaleString(undefined, {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/**
+ * Renders prep HTML through DOMPurify. The HTML is model-generated and may
+ * include quoted email content, so we whitelist the same tag set the prompt
+ * asks the model to emit (h3/p/ul/li/strong/em). DOMPurify is dynamically
+ * imported because it is browser-only — same pattern as components/email/
+ * EmailDetail.tsx SafeHtmlBody.
+ */
+function SafePrepBody({ html, fallbackText }: { html: string; fallbackText: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    import("dompurify")
+      .then(({ default: DOMPurify }) => {
+        const clean = DOMPurify.sanitize(html, {
+          ALLOWED_TAGS: ["h3", "p", "ul", "li", "strong", "em"],
+          ALLOWED_ATTR: [],
+        });
+        if (ref.current) {
+          ref.current.innerHTML = clean;
+        }
+      })
+      .catch(() => {
+        if (ref.current) {
+          ref.current.textContent = fallbackText || html;
+        }
+      });
+  }, [html, fallbackText]);
+
+  return (
+    <div
+      ref={ref}
+      className="prose prose-invert prose-sm mt-3 max-w-none text-slate-300 [&_h3]:mt-3 [&_h3]:text-xs [&_h3]:font-semibold [&_h3]:uppercase [&_h3]:tracking-wider [&_h3]:text-amber-300/80 [&_p]:my-1.5 [&_ul]:my-1.5 [&_ul]:pl-5 [&_li]:my-0.5"
+    />
+  );
+}
+
+function NextUpCard({ prep }: { prep: MeetingPrep }) {
+  const when = formatStart(prep.event_start);
+  const title = prep.event_title || "Upcoming meeting";
+  const hasContent = !prep.pending && !!prep.html;
+
+  return (
+    <div className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-[#1a1410] to-[#0d1526] p-5 shadow-[0_0_24px_rgba(245,158,11,0.06)]">
+      <div className="flex items-center gap-2 text-amber-300">
+        <Clock className="h-4 w-4" />
+        <span className="text-[11px] font-semibold uppercase tracking-wider">
+          Next up
+        </span>
+        {when && (
+          <span className="text-[11px] text-slate-500">· {when}</span>
+        )}
+      </div>
+      <p className="mt-2 text-sm font-medium text-slate-100">{title}</p>
+
+      {hasContent ? (
+        <SafePrepBody html={prep.html} fallbackText={prep.text} />
+      ) : (
+        <p className="mt-2 text-xs text-slate-500">
+          Felix will assemble a prep card when the meeting gets closer.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Status bar
 // ---------------------------------------------------------------------------
 
@@ -434,6 +526,9 @@ export default function HomePage() {
   const [sending, setSending] = useState(false);
   const [hasUserSent, setHasUserSent] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Next-up meeting prep — surfaces a card when a meeting is approaching
+  const { prep: nextPrep } = useNextMeetingPrep();
 
   // Voice context — used for the chat mic
   const voice = useVoiceContext();
@@ -609,6 +704,13 @@ export default function HomePage() {
       <div className="mt-5">
         <BriefingCard briefing={briefing} onMutate={refreshBriefing} />
       </div>
+
+      {/* Section B.5 — next-up meeting prep (only when one is on the horizon) */}
+      {nextPrep && (
+        <div className="mt-3">
+          <NextUpCard prep={nextPrep} />
+        </div>
+      )}
 
       {/* Section C — chat */}
       <div className="mt-6 flex min-h-0 flex-1 flex-col">
