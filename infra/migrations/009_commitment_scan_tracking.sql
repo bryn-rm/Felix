@@ -79,3 +79,27 @@ BEGIN
         ALTER TABLE sent_emails DROP COLUMN to_name;
     END IF;
 END$$;
+
+
+-- ── Pending calendar proposals (chat agent gate) ───────────────────────────
+-- The /voice/chat agent's calendar flow is two-step: propose first, then
+-- create on user confirmation. The proposal needs to outlive the turn it was
+-- generated in (the model's tool history is rebuilt from plain text only),
+-- so we persist it server-side. Primary key on user_id means at most one
+-- pending proposal per user — a new propose UPSERTs over the previous one.
+-- A successful create deletes the row (single-use); a 1-hour TTL is enforced
+-- by a created_at filter at read time.
+
+CREATE TABLE IF NOT EXISTS pending_calendar_proposals (
+    user_id    UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    payload    JSONB       NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE pending_calendar_proposals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "users manage own pending calendar proposals"
+    ON pending_calendar_proposals;
+CREATE POLICY "users manage own pending calendar proposals"
+    ON pending_calendar_proposals FOR ALL
+    USING (user_id = auth.uid());

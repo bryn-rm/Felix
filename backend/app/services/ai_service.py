@@ -594,6 +594,132 @@ class AIService:
             )
 
     # ------------------------------------------------------------------
+    # Chat agent loop — Sonnet, tool-using
+    # ------------------------------------------------------------------
+
+    async def answer_with_tools(
+        self,
+        transcript: str,
+        user_name: str,
+        felix_context: str,
+        today_str: str,
+        user_timezone: str,
+        history: list[dict],
+        tools: list[dict],
+        tool_dispatcher,
+        *,
+        user_id: str | None = None,
+        memory_context: str | None = None,
+        max_rounds: int = 4,
+    ) -> str:
+        """
+        Run a tool-using agent loop for the chat / voice surface.
+
+        history is a list of {"role": "user"|"assistant", "content": str} dicts —
+        prior turns of plain text, used so the model can see its own proposals
+        and the user's confirmations across turns. Tool blocks are not threaded
+        across turns.
+        """
+        chat_system = (
+            "You are Felix, an AI chief of staff helping the user with email, calendar, "
+            "and follow-ups.\n\n"
+            "You have tools to search the user's emails (search_emails), read a specific email "
+            "by id (get_email), propose a calendar event (propose_calendar_event), and create "
+            "the previously proposed event (create_calendar_event). Use the email tools whenever "
+            "the user asks something specific — do not guess and do not fall back to a generic "
+            "inbox summary if the answer requires looking at actual email content.\n\n"
+            "Calendar event flow (STRICT — the server enforces this):\n"
+            "  Turn 1: gather the details (search_emails / get_email if needed), then call "
+            "propose_calendar_event. The server stores the proposal. Describe it to the user "
+            "in plain text and ask them to confirm.\n"
+            "  Turn 2: ONLY after the user clearly confirms ('yes', 'go ahead', 'book it'), "
+            "call create_calendar_event (no arguments — the server uses the proposal you "
+            "staged). The server will reject the call if there is no pending proposal or if "
+            "the user has not confirmed.\n"
+            "Never call create_calendar_event on the same turn as propose_calendar_event.\n\n"
+            "For calendar events, infer title, time, duration, and attendees from the email. "
+            "If the email doesn't pin down a time, ask the user — never invent one. Default "
+            "duration is 60 minutes if unstated.\n\n"
+            "Respond conversationally in 1-3 short sentences suitable for chat or text-to-speech. "
+            "No markdown, no bullet points. After creating an event, confirm what you booked "
+            "(title, day, time)."
+        )
+
+        opening_context = (
+            f"What Felix knows about {user_name} right now:\n"
+            f"{felix_context or '(no extra context)'}\n\n"
+            f"Today is {today_str}. User timezone: {user_timezone}.\n\n"
+            f"User said: {transcript}"
+        )
+
+        # Build the message list. Prior turns first (plain text only), then this turn.
+        messages: list[dict] = []
+        for turn in history or []:
+            role = turn.get("role")
+            content = (turn.get("content") or "").strip()
+            if not content or role not in ("user", "assistant"):
+                continue
+            messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": opening_context})
+
+        memory_context = await _auto_memory(memory_context, user_id, feature="voice_general")
+
+        started = time.monotonic()
+        response = None
+        success = True
+        error_message: str | None = None
+        final_text = ""
+
+        try:
+            for _round in range(max_rounds):
+                response = await client.messages.create(
+                    model=settings.ANTHROPIC_MODEL_SMART,
+                    max_tokens=1024,
+                    tools=tools,
+                    **_system_kwarg(memory_context, extra_system=chat_system),
+                    messages=messages,
+                )
+
+                if response.stop_reason != "tool_use":
+                    text_blocks = [
+                        b.text for b in response.content
+                        if getattr(b, "type", None) == "text"
+                    ]
+                    final_text = " ".join(t.strip() for t in text_blocks if t and t.strip())
+                    return final_text or "I'm not sure how to help with that yet."
+
+                # Append the assistant's tool-use turn verbatim, then run each tool.
+                messages.append({"role": "assistant", "content": response.content})
+                tool_results = []
+                for block in response.content:
+                    if getattr(block, "type", None) != "tool_use":
+                        continue
+                    result_str = await tool_dispatcher(block.name, block.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_str,
+                    })
+                messages.append({"role": "user", "content": tool_results})
+
+            # Loop exhausted without a final text answer.
+            return "I looked into that but couldn't get a clear answer — could you give me a bit more to go on?"
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="voice_general",
+                model=settings.ANTHROPIC_MODEL_SMART,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                error_message=error_message,
+            )
+
+    # ------------------------------------------------------------------
     # Follow-up detection — Haiku
     # ------------------------------------------------------------------
 

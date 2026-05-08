@@ -60,8 +60,14 @@ router = APIRouter()
 # /voice/chat — text-in/text-out chat (used by the /home page chat input)
 # ---------------------------------------------------------------------------
 
+class ChatHistoryTurn(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str = Field(..., max_length=4000)
+
+
 class VoiceChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
+    history: list[ChatHistoryTurn] = Field(default_factory=list, max_length=20)
 
 
 class VoiceChatResponse(BaseModel):
@@ -113,6 +119,14 @@ async def voice_chat(
     except Exception:
         logger.exception("parse_voice_intent failed for user %s", user_id)
         intent = {"intent": "general_question", "raw_transcript": message}
+
+    # Pass the most recent chat turns through to handlers that care (the
+    # general_question agent needs them to see its own prior proposals).
+    if body.history:
+        intent["history"] = [
+            {"role": t.role, "content": t.content}
+            for t in body.history[-10:]
+        ]
 
     try:
         response_text = await route_intent(intent, user_id, gmail, user_name)
@@ -251,6 +265,9 @@ async def voice_stream(websocket: WebSocket) -> None:
     async def intent_tts_loop() -> None:
         """Read final transcripts → intent routing → TTS → stream back."""
         utterance_count = 0
+        # Per-session rolling chat history (plain text only) so the general_question
+        # agent can see its own prior proposals when the user replies "yes" by voice.
+        chat_history: list[dict[str, str]] = []
         while True:
             transcript = await transcript_queue.get()
             if not transcript:  # poison pill
@@ -283,12 +300,24 @@ async def voice_stream(websocket: WebSocket) -> None:
                 logger.exception("parse_voice_intent failed for user %s", user_id)
                 intent = {"intent": "general_question", "raw_transcript": transcript}
 
+            # Inject prior turns so confirmation flows ("yes, book it") work over voice.
+            if chat_history:
+                intent["history"] = chat_history[-10:]
+
             # Route to spoken response
             try:
                 response_text = await route_intent(intent, user_id, gmail, user_name)
             except Exception:
                 logger.exception("route_intent failed for user %s", user_id)
                 response_text = "I had trouble handling that. Please try again."
+
+            # Append this turn AFTER routing so the agent doesn't see its own
+            # current message twice.
+            chat_history.append({"role": "user", "content": transcript})
+            chat_history.append({"role": "assistant", "content": response_text})
+            # Cap retention so a long session doesn't grow unbounded.
+            if len(chat_history) > 20:
+                chat_history[:] = chat_history[-20:]
 
             await session_manager.touch_session(
                 user_id, role="felix", text=response_text, session_id=session_id,

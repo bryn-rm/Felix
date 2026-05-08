@@ -617,9 +617,15 @@ export default function HomePage() {
       setMessages((prev) => [...prev, userMsg].slice(-MAX_MESSAGES));
 
       try {
+        // Send the last 10 turns so the agent can see its own prior proposals
+        // (e.g. a proposed calendar event awaiting "yes, book it").
+        const history = messages.slice(-10).map((m) => ({
+          role: m.role === "felix" ? "assistant" : "user",
+          content: m.text,
+        }));
         const res = await api.post<{ response: string; intent: string }>(
           "/voice/chat",
-          { message: trimmed },
+          { message: trimmed, history },
         );
         setMessages((prev) =>
           [
@@ -645,7 +651,7 @@ export default function HomePage() {
         setSending(false);
       }
     },
-    [sending],
+    [sending, messages],
   );
 
   // ── Mic — wire interim transcript into the input field, auto-submit on final ──

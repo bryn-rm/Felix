@@ -300,3 +300,24 @@ CREATE POLICY "users manage own voice sessions"
 
 CREATE INDEX IF NOT EXISTS idx_voice_sessions_user_created
     ON voice_sessions (user_id, created_at DESC);
+
+
+-- ============================================================
+-- PENDING CALENDAR PROPOSALS
+-- Two-step calendar flow for the chat agent: a propose tool stages an event
+-- here, the user confirms in the next turn, and a create tool consumes the
+-- row. Primary key on user_id → at most one pending proposal per user.
+-- TTL is enforced at read time (1 hour); single-use via DELETE on success.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS pending_calendar_proposals (
+    user_id    UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    payload    JSONB       NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE pending_calendar_proposals ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "users manage own pending calendar proposals"
+    ON pending_calendar_proposals FOR ALL
+    USING (user_id = auth.uid());

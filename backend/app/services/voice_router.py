@@ -763,6 +763,7 @@ async def _check_calendar(intent, user_id, gmail, user_name) -> str:
 
 async def _general_question(intent, user_id, gmail, user_name) -> str:
     from app.services.ai_service import ai_service
+    from app.services.chat_tools import TOOLS as CHAT_TOOLS, make_dispatcher
 
     transcript = intent.get("raw_transcript", "")
     if not transcript:
@@ -816,8 +817,8 @@ async def _general_question(intent, user_id, gmail, user_name) -> str:
     except Exception:
         pass
 
+    user_tz = await _get_user_timezone(user_id)
     try:
-        user_tz = await _get_user_timezone(user_id)
         creds = await get_google_credentials(user_id)
         cal = CalendarService(creds)
         events = await cal.get_today_events(user_tz)
@@ -830,6 +831,12 @@ async def _general_question(intent, user_id, gmail, user_name) -> str:
 
     felix_context = "\n".join(context_lines) if context_lines else ""
 
+    # Today's date in the user's timezone for the agent's calendar reasoning.
+    try:
+        today_str = datetime.now(pytz.timezone(user_tz)).strftime("%A %d %b %Y")
+    except Exception:
+        today_str = datetime.now(timezone.utc).strftime("%A %d %b %Y")
+
     # Chat surface — pull Layer 1 profile, Layer 2 recent sessions, and
     # Layer 3 episodes relevant to the transcript.
     chat_memory = await memory_service.build_memory_context(
@@ -840,11 +847,22 @@ async def _general_question(intent, user_id, gmail, user_name) -> str:
         include_episodes=True,
     )
 
+    # Prior chat turns (plain text only) — required so the model can see its own
+    # proposed calendar event when the user replies "yes" in the next turn.
+    history = intent.get("history") or []
+
+    dispatcher = make_dispatcher(user_id, latest_user_turn=transcript)
+
     try:
-        return await ai_service.answer_general_voice_question(
+        return await ai_service.answer_with_tools(
             transcript=transcript,
             user_name=user_name,
             felix_context=felix_context,
+            today_str=today_str,
+            user_timezone=user_tz,
+            history=history,
+            tools=CHAT_TOOLS,
+            tool_dispatcher=dispatcher,
             user_id=user_id,
             memory_context=chat_memory,
         )

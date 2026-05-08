@@ -25,9 +25,16 @@ Possible intents:
 - check_calendar    : user wants to READ what is already on their calendar (extract
                       timeframe). Use this only when the user is asking what's
                       scheduled — never when they are asking to add something.
-- general_question  : anything that does not fit the above categories. Do NOT use
-                      this as a fallback for calendar/scheduling requests — those
-                      must be classified as schedule_meeting.
+- general_question  : anything that does not fit the above categories. Also use
+                      this for any question that requires looking up specific email
+                      content ("what did Alice say about X", "did I get the invoice
+                      from Acme") and for compound requests that need to read an
+                      email before acting on the calendar or follow-ups ("add the
+                      tennis match from John's email to my calendar"). The handler
+                      has tools to search emails and create events. Do NOT use this
+                      as a fallback for plain calendar/scheduling requests where
+                      the user dictated all the details — those must be
+                      schedule_meeting.
 
 Return a JSON object:
 {{
