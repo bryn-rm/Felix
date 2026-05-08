@@ -35,6 +35,9 @@ async def route_intent(
     Returns a spoken-language sentence (or short paragraph) for TTS.
     """
     name = intent.get("intent", "")
+    if _should_route_schedule_followup_to_agent(intent):
+        name = "general_question"
+        intent["intent"] = name
 
     handlers = {
         "read_emails":        _read_emails,
@@ -81,6 +84,13 @@ MONTH_NAME_TO_NUMBER = {
     "november": 11,
     "december": 12,
 }
+_CONTEXTUAL_CALENDAR_REFERENCE_RE = re.compile(
+    r"\b(add|book|schedule|put|create)\b.*\b("
+    r"both|that|this|it|them|those|these|the first|the second|the last|"
+    r"booking|bookings|one|ones"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 async def _get_user_timezone(user_id: str) -> str:
@@ -146,6 +156,19 @@ def _format_time_for_speech(dt_value) -> str:
     hour = dt.hour % 12 or 12
     suffix = "am" if dt.hour < 12 else "pm"
     return f"{hour}{minute_part}{suffix}"
+
+
+def _should_route_schedule_followup_to_agent(intent: dict) -> bool:
+    """
+    Contextual calendar requests like "add both to my calendar" need the
+    tool-using agent because the direct scheduler only sees the latest turn.
+    """
+    if intent.get("intent") != "schedule_meeting" or not intent.get("history"):
+        return False
+    transcript = intent.get("raw_transcript") or ""
+    if _CONTEXTUAL_CALENDAR_REFERENCE_RE.search(transcript):
+        return True
+    return not any(intent.get(key) for key in ("date_iso", "start_time", "end_time"))
 
 
 # ---------------------------------------------------------------------------

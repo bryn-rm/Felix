@@ -653,12 +653,16 @@ class AIService:
         )
 
         # Build the message list. Prior turns first (plain text only), then this turn.
+        # Keep the window bounded so contextual references survive without
+        # letting a long session dominate the tool-call prompt.
         messages: list[dict] = []
-        for turn in history or []:
+        for turn in (history or [])[-15:]:
             role = turn.get("role")
             content = (turn.get("content") or "").strip()
             if not content or role not in ("user", "assistant"):
                 continue
+            if len(content) > 4000:
+                content = content[:4000]
             messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": opening_context})
 

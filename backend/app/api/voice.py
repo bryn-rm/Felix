@@ -55,6 +55,58 @@ from app.services.voice_service import voice_service
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+MAX_CHAT_HISTORY_TURNS = 15
+
+
+def _session_history_for_agent(user_id: str, latest_message: str) -> list[dict[str, str]]:
+    """
+    Return recent plain-text turns from the active session, excluding the current
+    user message that /voice/chat just appended.
+    """
+    session = session_manager.get_active_session(user_id) or {}
+    turns: list[dict[str, str]] = []
+    for message in session.get("messages") or []:
+        role = message.get("role")
+        text = (message.get("text") or "").strip()
+        if role == "felix":
+            role = "assistant"
+        if role not in ("user", "assistant") or not text:
+            continue
+        turns.append({"role": role, "content": text})
+
+    if turns and turns[-1]["role"] == "user" and turns[-1]["content"] == latest_message:
+        turns = turns[:-1]
+    return turns[-MAX_CHAT_HISTORY_TURNS:]
+
+
+def _request_history_for_agent(history: list["ChatHistoryTurn"]) -> list[dict[str, str]]:
+    return [
+        {"role": turn.role, "content": turn.content.strip()}
+        for turn in history[-MAX_CHAT_HISTORY_TURNS:]
+        if turn.content.strip()
+    ]
+
+
+def _merge_chat_history(*histories: list[dict[str, str]]) -> list[dict[str, str]]:
+    """
+    Pick the richest recent-turn source. The active server session covers normal
+    chats; client history covers process restarts and older clients.
+    """
+    cleaned_histories: list[list[dict[str, str]]] = []
+    for history in histories:
+        cleaned: list[dict[str, str]] = []
+        for turn in history:
+            role = turn.get("role")
+            content = (turn.get("content") or "").strip()
+            if role not in ("user", "assistant") or not content:
+                continue
+            cleaned.append({"role": role, "content": content})
+        if cleaned:
+            cleaned_histories.append(cleaned)
+    if not cleaned_histories:
+        return []
+    return max(cleaned_histories, key=len)[-MAX_CHAT_HISTORY_TURNS:]
+
 
 # ---------------------------------------------------------------------------
 # /voice/chat — text-in/text-out chat (used by the /home page chat input)
@@ -120,13 +172,15 @@ async def voice_chat(
         logger.exception("parse_voice_intent failed for user %s", user_id)
         intent = {"intent": "general_question", "raw_transcript": message}
 
-    # Pass the most recent chat turns through to handlers that care (the
-    # general_question agent needs them to see its own prior proposals).
-    if body.history:
-        intent["history"] = [
-            {"role": t.role, "content": t.content}
-            for t in body.history[-10:]
-        ]
+    # Pass recent chat turns through to handlers that care. Use both the
+    # client payload and the server-side active session so contextual follow-ups
+    # still work if the client omits or truncates history.
+    history = _merge_chat_history(
+        _request_history_for_agent(body.history),
+        _session_history_for_agent(user_id, message),
+    )
+    if history:
+        intent["history"] = history
 
     try:
         response_text = await route_intent(intent, user_id, gmail, user_name)
