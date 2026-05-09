@@ -27,11 +27,15 @@ logger = logging.getLogger(__name__)
 
 # A user turn must contain one of these substrings (after lowercasing) for
 # create_calendar_event to be allowed to actually write to Google Calendar.
-# Kept narrow on purpose — the agent must propose first, and the user must
-# clearly confirm in plain language.
+# Covers the natural ways people confirm a calendar proposal in chat — short
+# affirmations ("yes"), explicit instructions ("book it", "add both"), and the
+# common "add (it|both|all|them|that|to|the event) (to (my )?calendar)?" shape.
 _CONFIRMATION_PATTERNS = re.compile(
-    r"\b(yes|yep|yeah|yup|sure|ok(ay)?|please do|do it|go ahead|book it|confirm|"
-    r"add it|create it|schedule it|sounds good|that works|perfect)\b",
+    r"\b(yes|yep|yeah|yup|sure|ok(ay)?|please do|do it|go ahead|book (it|both|them|all)|"
+    r"confirm|create (it|both|them|all|the event|the events)|"
+    r"schedule (it|both|them|all|the event|the events)|"
+    r"add (it|both|them|all|that|the event|the events|to (my )?calendar)|"
+    r"sounds good|that works|perfect)\b",
     re.IGNORECASE,
 )
 # Negation guard so "no, don't book it" or "not sure" doesn't pass the
@@ -134,15 +138,25 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "create_calendar_event",
         "description": (
-            "Create the most recently proposed event on the user's primary Google Calendar. "
-            "Takes no arguments — the server pulls the pending proposal staged by your last "
-            "propose_calendar_event call. The server will reject this if there is no pending "
-            "proposal or if the user has not just confirmed (e.g. 'yes', 'go ahead', 'book it'). "
-            "Never call this on the same turn as propose_calendar_event."
+            "Create proposed event(s) on the user's primary Google Calendar. With no arguments, "
+            "creates ALL pending proposals for the user — use this when the user confirms "
+            "everything you proposed (e.g. 'yes', 'add both', 'book them'). Pass `proposal_id` "
+            "to create just one specific proposal (use the id returned by propose_calendar_event). "
+            "The server rejects this call if there are no pending proposals or if the user has "
+            "not just confirmed in plain language. Never call this on the same turn as "
+            "propose_calendar_event."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "proposal_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional id of a specific pending proposal to create. Omit to create "
+                        "all pending proposals."
+                    ),
+                },
+            },
         },
     },
 ]
@@ -229,8 +243,9 @@ async def _get_email(user_id: str, email_id: str) -> dict:
 #
 # The agent's calendar flow is two-step: propose first, create on user
 # confirmation. The model rebuilds tool history from plain text only, so any
-# token returned to it in turn N is gone by turn N+1 — instead we persist the
-# pending proposal in `pending_calendar_proposals`, keyed by user_id.
+# token returned to it in turn N is gone by turn N+1 — instead we persist
+# pending proposals in `pending_calendar_proposals`. Multiple rows per user
+# are allowed so "add both" can stage and create two events together.
 # ---------------------------------------------------------------------------
 
 def _looks_like_confirmation(text: str) -> bool:
@@ -261,24 +276,26 @@ async def _propose_calendar_event(
         "attendees": cleaned_attendees,
         "description": description or "",
     }
-    # UPSERT — a new proposal overwrites the prior pending one for this user.
-    # Reset created_at so the TTL clock starts fresh.
-    await db.execute(
+    # Append a new proposal — multiple pending proposals per user are allowed
+    # so the agent can stage several events ("propose A, propose B") before the
+    # user confirms with a single "add both".
+    row = await db.query_one(
         """
         INSERT INTO pending_calendar_proposals (user_id, payload, created_at)
         VALUES ($1, $2::jsonb, NOW())
-        ON CONFLICT (user_id) DO UPDATE
-          SET payload    = EXCLUDED.payload,
-              created_at = EXCLUDED.created_at
+        RETURNING id
         """,
         user_id, json.dumps(payload),
     )
     return {
         "proposed": True,
+        "proposal_id": str(row["id"]) if row else None,
         "event": payload,
         "note": (
             "Now describe this event to the user in plain text and ask them to confirm. "
-            "Once they confirm in their next turn, call create_calendar_event (no arguments)."
+            "If you have multiple events to stage, call propose_calendar_event again before "
+            "you reply. Once the user confirms in their next turn, call create_calendar_event "
+            "(no arguments creates all pending proposals; pass proposal_id for a specific one)."
         ),
     }
 
@@ -286,17 +303,31 @@ async def _propose_calendar_event(
 async def _create_calendar_event(
     user_id: str,
     latest_user_turn: str,
+    proposal_id: str | None = None,
 ) -> dict:
-    row = await db.query_one(
-        f"""
-        SELECT payload
-        FROM pending_calendar_proposals
-        WHERE user_id = $1
-          AND created_at > NOW() - INTERVAL '{_PROPOSAL_TTL_SECONDS} seconds'
-        """,
-        user_id,
-    )
-    if not row:
+    if proposal_id:
+        rows = await db.query(
+            f"""
+            SELECT id, payload
+            FROM pending_calendar_proposals
+            WHERE user_id = $1
+              AND id = $2::uuid
+              AND created_at > NOW() - INTERVAL '{_PROPOSAL_TTL_SECONDS} seconds'
+            """,
+            user_id, proposal_id,
+        )
+    else:
+        rows = await db.query(
+            f"""
+            SELECT id, payload
+            FROM pending_calendar_proposals
+            WHERE user_id = $1
+              AND created_at > NOW() - INTERVAL '{_PROPOSAL_TTL_SECONDS} seconds'
+            ORDER BY created_at ASC
+            """,
+            user_id,
+        )
+    if not rows:
         return {
             "error": (
                 "No pending proposal. Call propose_calendar_event first, then ask the user "
@@ -307,52 +338,68 @@ async def _create_calendar_event(
         return {
             "error": (
                 "User has not confirmed in the latest turn. Ask them to confirm "
-                "(e.g. 'yes' or 'go ahead') before calling create_calendar_event again."
+                "(e.g. 'yes', 'go ahead', 'add to calendar') before calling "
+                "create_calendar_event again."
             )
         }
-
-    payload = row["payload"]
-    if isinstance(payload, str):
-        # asyncpg may return JSONB as text depending on codec setup.
-        payload = json.loads(payload)
 
     try:
         creds = await get_google_credentials(user_id)
     except Exception:
         return {"error": "No Google calendar access. Ask the user to reconnect Google in Settings."}
 
-    event_body: dict[str, Any] = {
-        "summary": payload["title"],
-        "start": {"dateTime": payload["start_iso"], "timeZone": payload["timezone"]},
-        "end":   {"dateTime": payload["end_iso"],   "timeZone": payload["timezone"]},
-    }
-    if payload.get("description"):
-        event_body["description"] = payload["description"]
-    if payload.get("attendees"):
-        event_body["attendees"] = [{"email": a} for a in payload["attendees"]]
-
     cal = CalendarService(creds)
-    try:
-        created = await cal.create_event(event_body, user_timezone=payload["timezone"])
-    except Exception as e:
-        # Leave the row in place so the user can retry by re-confirming.
-        logger.exception("create_calendar_event tool failed for user %s", user_id)
-        return {"error": f"Calendar create failed: {type(e).__name__}"}
+    created_events: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
 
-    # Single-use — drop the pending row now that the event is on the calendar.
-    await db.execute(
-        "DELETE FROM pending_calendar_proposals WHERE user_id = $1",
-        user_id,
-    )
+    for row in rows:
+        payload = row["payload"]
+        if isinstance(payload, str):
+            # asyncpg may return JSONB as text depending on codec setup.
+            payload = json.loads(payload)
 
-    return {
+        event_body: dict[str, Any] = {
+            "summary": payload["title"],
+            "start": {"dateTime": payload["start_iso"], "timeZone": payload["timezone"]},
+            "end":   {"dateTime": payload["end_iso"],   "timeZone": payload["timezone"]},
+        }
+        if payload.get("description"):
+            event_body["description"] = payload["description"]
+        if payload.get("attendees"):
+            event_body["attendees"] = [{"email": a} for a in payload["attendees"]]
+
+        try:
+            created = await cal.create_event(event_body, user_timezone=payload["timezone"])
+        except Exception as e:
+            # Leave this row in place so the user can retry by re-confirming.
+            logger.exception("create_calendar_event tool failed for user %s", user_id)
+            failed.append({"proposal_id": str(row["id"]), "error": type(e).__name__})
+            continue
+
+        # Single-use — drop this pending row now that the event is on the calendar.
+        await db.execute(
+            "DELETE FROM pending_calendar_proposals WHERE id = $1",
+            row["id"],
+        )
+        created_events.append({
+            "id": created.get("id"),
+            "title": created.get("title") or payload["title"],
+            "start": created.get("start") or payload["start_iso"],
+            "end": created.get("end") or payload["end_iso"],
+            "html_link": created.get("html_link"),
+        })
+
+    if not created_events and failed:
+        return {"error": f"Calendar create failed: {failed[0]['error']}"}
+
+    result: dict[str, Any] = {
         "ok": True,
-        "id": created.get("id"),
-        "title": created.get("title") or payload["title"],
-        "start": created.get("start") or payload["start_iso"],
-        "end": created.get("end") or payload["end_iso"],
-        "html_link": created.get("html_link"),
+        "created": created_events,
+        "count": len(created_events),
     }
+    if failed:
+        result["failed"] = failed
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +466,7 @@ def make_dispatcher(
                     result = await _create_calendar_event(
                         user_id,
                         latest_user_turn=latest_user_turn,
+                        proposal_id=(args.get("proposal_id") or None),
                     )
             else:
                 result = {"error": f"Unknown tool: {name}"}

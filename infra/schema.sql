@@ -306,15 +306,20 @@ CREATE INDEX IF NOT EXISTS idx_voice_sessions_user_created
 -- PENDING CALENDAR PROPOSALS
 -- Two-step calendar flow for the chat agent: a propose tool stages an event
 -- here, the user confirms in the next turn, and a create tool consumes the
--- row. Primary key on user_id → at most one pending proposal per user.
--- TTL is enforced at read time (1 hour); single-use via DELETE on success.
+-- row(s). Multiple pending proposals per user are allowed so "add both" can
+-- stage two events together. TTL is enforced at read time (1 hour); rows are
+-- DELETEd once they are turned into Google Calendar events.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS pending_calendar_proposals (
-    user_id    UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     payload    JSONB       NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_pending_calendar_proposals_user_created
+    ON pending_calendar_proposals(user_id, created_at DESC);
 
 ALTER TABLE pending_calendar_proposals ENABLE ROW LEVEL SECURITY;
 

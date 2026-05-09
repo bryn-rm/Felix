@@ -85,16 +85,20 @@ END$$;
 -- The /voice/chat agent's calendar flow is two-step: propose first, then
 -- create on user confirmation. The proposal needs to outlive the turn it was
 -- generated in (the model's tool history is rebuilt from plain text only),
--- so we persist it server-side. Primary key on user_id means at most one
--- pending proposal per user — a new propose UPSERTs over the previous one.
--- A successful create deletes the row (single-use); a 1-hour TTL is enforced
--- by a created_at filter at read time.
+-- so we persist it server-side. Multiple proposals per user are allowed so
+-- "add both" style flows can stage two events and create them together. The
+-- create tool deletes the row(s) it consumed; a 1-hour TTL is enforced by a
+-- created_at filter at read time.
 
 CREATE TABLE IF NOT EXISTS pending_calendar_proposals (
-    user_id    UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     payload    JSONB       NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_pending_calendar_proposals_user_created
+    ON pending_calendar_proposals(user_id, created_at DESC);
 
 ALTER TABLE pending_calendar_proposals ENABLE ROW LEVEL SECURITY;
 
