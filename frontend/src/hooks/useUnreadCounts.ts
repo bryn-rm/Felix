@@ -2,6 +2,9 @@
 
 import useSWR from "swr";
 import { api } from "@/lib/api";
+import { useSessionReady } from "@/hooks/useSessionReady";
+import { inboxDebug } from "@/lib/inbox-debug";
+import { authAwareRetry } from "@/lib/swr-auth-retry";
 
 interface EmailCounts {
   action_required: number;
@@ -9,14 +12,21 @@ interface EmailCounts {
 }
 
 async function fetchCounts(): Promise<EmailCounts> {
-  return api.get<EmailCounts>("/emails/counts");
+  inboxDebug("swr:fire", { url: "/emails/counts" });
+  return api.get<EmailCounts>("/emails/counts", { skipAuthRedirect: true });
 }
 
 export function useUnreadCounts() {
-  const { data, error } = useSWR<EmailCounts>("emails-counts", fetchCounts, {
-    refreshInterval: 2 * 60 * 1000, // 2 minutes
-    fallbackData: { action_required: 0, overdue_followups: 0 },
-  });
+  const ready = useSessionReady();
+  const { data, error } = useSWR<EmailCounts>(
+    ready ? "emails-counts" : null,
+    fetchCounts,
+    {
+      refreshInterval: 2 * 60 * 1000, // 2 minutes
+      fallbackData: { action_required: 0, overdue_followups: 0 },
+      onErrorRetry: authAwareRetry,
+    },
+  );
 
   return {
     actionRequired: data?.action_required ?? 0,

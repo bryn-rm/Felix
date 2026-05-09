@@ -1,9 +1,22 @@
 import { getFreshAccessToken } from "@/lib/auth-session";
+import { inboxDebug } from "@/lib/inbox-debug";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 // Guard against multiple simultaneous 401/403 responses each trying to redirect
 let _redirecting = false;
+
+/**
+ * Navigate the browser to the appropriate auth-recovery page for a given
+ * status code, exactly once per page load. Exposed so SWR retry handlers
+ * can trigger the same redirect after their retry budget is exhausted.
+ */
+export function redirectForAuthStatus(status: number): void {
+  if (typeof window === "undefined" || _redirecting) return;
+  if (status !== 401 && status !== 403) return;
+  _redirecting = true;
+  window.location.href = status === 403 ? "/connect" : "/login";
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -20,6 +33,20 @@ export class ApiError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Per-call options
+// ---------------------------------------------------------------------------
+
+export interface ApiOptions {
+  /**
+   * Suppress the global 401→/login and 403→/connect navigation for this
+   * call. Use when the caller is responsible for its own auth-error
+   * recovery (e.g. an SWR hook with a retry policy that wants to retry
+   * transient 403s before giving up). Errors are still thrown as normal.
+   */
+  skipAuthRedirect?: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -29,6 +56,7 @@ async function getAuthHeader(): Promise<string> {
     return `Bearer ${token}`;
   }
 
+  inboxDebug("api:no-session");
   throw new ApiError(401, "No active session");
 }
 
@@ -52,6 +80,7 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
+  options?: ApiOptions,
 ): Promise<T> {
   let authorization = await getAuthHeader();
   let res = await doFetch(method, path, body, authorization);
@@ -75,15 +104,10 @@ async function request<T>(
     } catch {
       // keep statusText
     }
+    inboxDebug("api:status", { path, status: res.status });
     const err = new ApiError(res.status, message);
-    if (typeof window !== "undefined" && !_redirecting) {
-      if (res.status === 401) {
-        _redirecting = true;
-        window.location.href = "/login";
-      } else if (res.status === 403) {
-        _redirecting = true;
-        window.location.href = "/connect";
-      }
+    if (!options?.skipAuthRedirect) {
+      redirectForAuthStatus(res.status);
     }
     throw err;
   }
@@ -98,11 +122,16 @@ async function request<T>(
 // ---------------------------------------------------------------------------
 
 export const api = {
-  get: <T>(path: string) => request<T>("GET", path),
-  post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
-  put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),
-  patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
-  del: <T>(path: string) => request<T>("DELETE", path),
+  get: <T>(path: string, options?: ApiOptions) =>
+    request<T>("GET", path, undefined, options),
+  post: <T>(path: string, body?: unknown, options?: ApiOptions) =>
+    request<T>("POST", path, body, options),
+  put: <T>(path: string, body?: unknown, options?: ApiOptions) =>
+    request<T>("PUT", path, body, options),
+  patch: <T>(path: string, body?: unknown, options?: ApiOptions) =>
+    request<T>("PATCH", path, body, options),
+  del: <T>(path: string, options?: ApiOptions) =>
+    request<T>("DELETE", path, undefined, options),
 
   /** Returns a ReadableStream for the streaming draft endpoint. */
   streamDraft: async (emailId: string): Promise<ReadableStream<Uint8Array>> => {

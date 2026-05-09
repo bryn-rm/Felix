@@ -2,6 +2,9 @@
 
 import useSWRInfinite from "swr/infinite";
 import { api } from "@/lib/api";
+import { useSessionReady } from "@/hooks/useSessionReady";
+import { inboxDebug } from "@/lib/inbox-debug";
+import { authAwareRetry } from "@/lib/swr-auth-retry";
 import type { Email } from "@/lib/types";
 
 interface EmailsPage {
@@ -15,7 +18,10 @@ interface UseEmailsOptions {
 }
 
 export function useEmails({ category, limit = 20 }: UseEmailsOptions = {}) {
+  const ready = useSessionReady();
+
   const getKey = (pageIndex: number, prev: EmailsPage | null) => {
+    if (!ready) return null;
     // Stop fetching when the last page had fewer items than the limit
     if (prev && prev.emails.length < limit) return null;
     const params = new URLSearchParams();
@@ -27,8 +33,14 @@ export function useEmails({ category, limit = 20 }: UseEmailsOptions = {}) {
 
   const { data, error, isLoading, size, setSize } = useSWRInfinite<EmailsPage>(
     getKey,
-    (url: string) => api.get<EmailsPage>(url),
-    { refreshInterval: 2 * 60 * 1000 },
+    (url: string) => {
+      inboxDebug("swr:fire", { url });
+      return api.get<EmailsPage>(url, { skipAuthRedirect: true });
+    },
+    {
+      refreshInterval: 2 * 60 * 1000,
+      onErrorRetry: authAwareRetry,
+    },
   );
 
   const emails: Email[] = data ? data.flatMap((page) => page.emails) : [];
@@ -37,7 +49,7 @@ export function useEmails({ category, limit = 20 }: UseEmailsOptions = {}) {
   return {
     emails,
     total,
-    isLoading,
+    isLoading: isLoading || !ready,
     error: error as Error | undefined,
     hasMore: emails.length < total,
     loadMore: () => setSize(size + 1),
