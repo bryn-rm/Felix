@@ -333,12 +333,18 @@ meeting_prep_service = MeetingPrepService()
 
 
 def _eligible_for_prep(event: dict) -> bool:
-    """Skip events that aren't worth a prep card."""
+    """Skip events that aren't worth a prep card.
+
+    Requires a real meeting link OR another participant — solo blocks and
+    self-only invites don't need a prep.
+    """
     if event.get("is_all_day"):
         return False
-    if not (event.get("attendees") or []):
-        return False
     if event.get("status") in {"cancelled"}:
+        return False
+    has_link = bool((event.get("hangout_link") or "").strip())
+    attendee_count = len(event.get("attendees") or [])
+    if not (has_link or attendee_count >= 2):
         return False
     return True
 

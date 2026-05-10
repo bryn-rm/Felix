@@ -10,8 +10,13 @@ import { useEffect } from "react";
 export default function ServiceWorkerRegistrar() {
   useEffect(() => {
     if ("serviceWorker" in navigator) {
+      const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
+      const swUrl = apiBase
+        ? `/sw.js?apiBase=${encodeURIComponent(apiBase)}`
+        : "/sw.js";
+
       navigator.serviceWorker
-        .register("/sw.js")
+        .register(swUrl)
         .then((reg) => {
           if (process.env.NODE_ENV === "development") {
             console.log("[Felix] Service worker registered:", reg.scope);

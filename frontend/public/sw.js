@@ -2,26 +2,43 @@
  * Felix Service Worker
  *
  * Strategy:
- *   - Static assets (JS/CSS/images): cache-first (stale-while-revalidate)
- *   - API calls (/api/, wss://): always network-only — never cache user data
- *   - Navigation requests: network-first, fallback to offline shell
+ *   - Immutable Next.js static assets: stale-while-revalidate
+ *   - API/authenticated/user-data requests: network-only, never cached
+ *   - Navigation requests: network-only
  */
 
-const CACHE_NAME = "felix-v1";
+const CACHE_NAME = "felix-v2";
+const USER_DATA_PATH_PREFIXES = [
+  "/emails",
+  "/calendar",
+  "/briefing",
+  "/contacts",
+  "/follow-ups",
+  "/commitments",
+  "/templates",
+  "/memory",
+  "/meetings",
+  "/eval",
+  "/admin",
+  "/auth",
+  "/voice",
+  "/polish",
+  "/settings",
+];
 
-// Assets to pre-cache on install (update this list after each build)
-const PRECACHE_URLS = ["/", "/offline.html"];
+let API_ORIGIN = "";
+try {
+  const apiBase = new URL(self.location.href).searchParams.get("apiBase");
+  API_ORIGIN = apiBase ? new URL(apiBase).origin : "";
+} catch {
+  API_ORIGIN = "";
+}
 
 // ---------------------------------------------------------------------------
-// Install — pre-cache shell
+// Install — activate this worker immediately
 // ---------------------------------------------------------------------------
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches
-      .open(CACHE_NAME)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
-      .then(() => self.skipWaiting()),
-  );
+  event.waitUntil(self.skipWaiting());
 });
 
 // ---------------------------------------------------------------------------
@@ -49,25 +66,28 @@ self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Never intercept API calls, WebSocket upgrades, or non-GET requests
+  // Never intercept API calls, authenticated requests, user-data routes,
+  // WebSocket upgrades, navigations, or non-GET requests.
   if (
     request.method !== "GET" ||
+    request.mode === "navigate" ||
+    request.headers.has("Authorization") ||
+    (API_ORIGIN !== "" && url.origin === API_ORIGIN) ||
     url.pathname.startsWith("/api/") ||
+    USER_DATA_PATH_PREFIXES.some((prefix) => url.pathname.startsWith(prefix)) ||
     url.protocol === "ws:" ||
     url.protocol === "wss:"
   ) {
     return;
   }
 
-  // Navigation requests: network-first, fall back to cached shell
-  if (request.mode === "navigate") {
-    event.respondWith(
-      fetch(request).catch(() => caches.match("/") || caches.match("/offline.html")),
-    );
+  // Only immutable Next.js build assets are cacheable. Everything else falls
+  // through to the browser so private backend responses cannot enter Cache Storage.
+  if (url.origin !== self.location.origin || !url.pathname.startsWith("/_next/static/")) {
     return;
   }
 
-  // Static assets: stale-while-revalidate
+  // Immutable Next.js static assets: stale-while-revalidate
   event.respondWith(
     caches.open(CACHE_NAME).then((cache) =>
       cache.match(request).then((cached) => {

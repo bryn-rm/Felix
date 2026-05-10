@@ -24,6 +24,9 @@ import {
   Sparkles,
   Clock,
   RefreshCw,
+  ChevronDown,
+  ChevronUp,
+  X,
 } from "lucide-react";
 
 import { api, ApiError } from "@/lib/api";
@@ -435,7 +438,72 @@ function SafePrepBody({ html, fallbackText }: { html: string; fallbackText: stri
   );
 }
 
-function NextUpCard({ prep }: { prep: MeetingPrep }) {
+const PREP_DISMISSED_KEY = "felix.nextPrep.dismissed";
+const PREP_MINIMIZED_KEY = "felix.nextPrep.minimized";
+
+function readEventIdSet(key: string): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeEventIdSet(key: string, set: Set<string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(Array.from(set)));
+  } catch {
+    /* ignore quota / privacy-mode errors */
+  }
+}
+
+function useNextPrepCardState(eventId: string | undefined) {
+  const [dismissed, setDismissed] = useState<Set<string>>(() => readEventIdSet(PREP_DISMISSED_KEY));
+  const [minimized, setMinimized] = useState<Set<string>>(() => readEventIdSet(PREP_MINIMIZED_KEY));
+
+  const isDismissed = !!eventId && dismissed.has(eventId);
+  const isMinimized = !!eventId && minimized.has(eventId);
+
+  const dismiss = useCallback(() => {
+    if (!eventId) return;
+    setDismissed((prev) => {
+      const next = new Set(prev);
+      next.add(eventId);
+      writeEventIdSet(PREP_DISMISSED_KEY, next);
+      return next;
+    });
+  }, [eventId]);
+
+  const toggleMinimize = useCallback(() => {
+    if (!eventId) return;
+    setMinimized((prev) => {
+      const next = new Set(prev);
+      if (next.has(eventId)) next.delete(eventId);
+      else next.add(eventId);
+      writeEventIdSet(PREP_MINIMIZED_KEY, next);
+      return next;
+    });
+  }, [eventId]);
+
+  return { isDismissed, isMinimized, dismiss, toggleMinimize };
+}
+
+function NextUpCard({
+  prep,
+  minimized,
+  onToggleMinimize,
+  onDismiss,
+}: {
+  prep: MeetingPrep;
+  minimized: boolean;
+  onToggleMinimize: () => void;
+  onDismiss: () => void;
+}) {
   const when = formatStart(prep.event_start);
   const title = prep.event_title || "Upcoming meeting";
   const hasContent = !prep.pending && !!prep.html;
@@ -450,16 +518,39 @@ function NextUpCard({ prep }: { prep: MeetingPrep }) {
         {when && (
           <span className="text-[11px] text-slate-500">· {when}</span>
         )}
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onToggleMinimize}
+            aria-label={minimized ? "Expand prep card" : "Minimize prep card"}
+            aria-expanded={!minimized}
+            className="rounded p-1 text-slate-500 transition hover:bg-amber-500/10 hover:text-amber-300"
+          >
+            {minimized ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronUp className="h-3.5 w-3.5" />
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss prep card"
+            className="rounded p-1 text-slate-500 transition hover:bg-amber-500/10 hover:text-amber-300"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
       <p className="mt-2 text-sm font-medium text-slate-100">{title}</p>
 
-      {hasContent ? (
+      {!minimized && (hasContent ? (
         <SafePrepBody html={prep.html} fallbackText={prep.text} />
       ) : (
         <p className="mt-2 text-xs text-slate-500">
           Felix will assemble a prep card when the meeting gets closer.
         </p>
-      )}
+      ))}
     </div>
   );
 }
@@ -529,6 +620,8 @@ export default function HomePage() {
 
   // Next-up meeting prep — surfaces a card when a meeting is approaching
   const { prep: nextPrep } = useNextMeetingPrep();
+  const { isDismissed: prepDismissed, isMinimized: prepMinimized, dismiss: dismissPrep, toggleMinimize: toggleMinimizePrep } =
+    useNextPrepCardState(nextPrep?.event_id);
 
   // Voice context — used for the chat mic
   const voice = useVoiceContext();
@@ -712,9 +805,14 @@ export default function HomePage() {
       </div>
 
       {/* Section B.5 — next-up meeting prep (only when one is on the horizon) */}
-      {nextPrep && (
+      {nextPrep && !prepDismissed && (
         <div className="mt-3">
-          <NextUpCard prep={nextPrep} />
+          <NextUpCard
+            prep={nextPrep}
+            minimized={prepMinimized}
+            onToggleMinimize={toggleMinimizePrep}
+            onDismiss={dismissPrep}
+          />
         </div>
       )}
 
