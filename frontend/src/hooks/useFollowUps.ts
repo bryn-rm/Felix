@@ -2,6 +2,7 @@
 
 import useSWR from "swr";
 import { api } from "@/lib/api";
+import { isOverdue } from "@/lib/follow-ups";
 import type { FollowUp } from "@/lib/types";
 
 export type FollowUpFilter = "all" | "waiting" | "overdue" | "closed";
@@ -11,12 +12,6 @@ export interface FollowUpCounts {
   waiting: number;
   overdue: number;
   closed: number;
-}
-
-function isOverdue(fu: FollowUp): boolean {
-  if (fu.status === "closed") return false;
-  if (!fu.follow_up_by) return false;
-  return new Date(fu.follow_up_by) < new Date();
 }
 
 export function useFollowUps(filter: FollowUpFilter = "all") {
@@ -32,13 +27,13 @@ export function useFollowUps(filter: FollowUpFilter = "all") {
     filter === "all"
       ? all
       : filter === "overdue"
-        ? all.filter(isOverdue)
+        ? all.filter((fu) => isOverdue(fu))
         : all.filter((fu) => fu.status === filter);
 
   const counts: FollowUpCounts = {
     all: all.length,
     waiting: all.filter((fu) => fu.status === "waiting" && !isOverdue(fu)).length,
-    overdue: all.filter(isOverdue).length,
+    overdue: all.filter((fu) => isOverdue(fu)).length,
     closed: all.filter((fu) => fu.status === "closed").length,
   };
 

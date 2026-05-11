@@ -13,6 +13,7 @@ import {
   BookOpen,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { isOverdue } from "@/lib/follow-ups";
 import { useEmails } from "@/hooks/useEmails";
 import type { CalendarEvent, Briefing, FollowUp } from "@/lib/types";
 
@@ -399,18 +400,21 @@ function WaitingOnWidget() {
 
 interface FollowUpsResponse {
   follow_ups: FollowUp[];
-  total: number;
+  count: number;
 }
 
 function FollowUpAlertsWidget() {
   const router = useRouter();
   const { data, isLoading, error } = useSWR<FollowUpsResponse>(
-    "followups-overdue",
-    () => api.get<FollowUpsResponse>("/follow-ups/?status=overdue"),
+    "/follow-ups?status=waiting",
+    (url: string) => api.get<FollowUpsResponse>(url),
     { refreshInterval: 2 * 60 * 1000 },
   );
 
-  const count = data?.total ?? 0;
+  // "Overdue" is derived client-side from waiting items past their deadline —
+  // the backend has no overdue status. GET /follow-ups doesn't paginate, so
+  // filtering the full waiting set yields an accurate count.
+  const overdueCount = (data?.follow_ups ?? []).filter((fu) => isOverdue(fu)).length;
 
   return (
     <Widget title="Follow-up Alerts" icon={AlertCircle}>
@@ -425,16 +429,16 @@ function FollowUpAlertsWidget() {
         <p className="text-xs text-slate-500">Could not load follow-ups.</p>
       )}
 
-      {!isLoading && !error && count === 0 && (
+      {!isLoading && !error && overdueCount === 0 && (
         <p className="text-xs text-slate-500">
           No overdue follow-ups — great work!
         </p>
       )}
 
-      {!isLoading && !error && count > 0 && (
+      {!isLoading && !error && overdueCount > 0 && (
         <>
           <p className="text-2xl font-bold text-orange-400">
-            {count}
+            {overdueCount}
             <span className="ml-1.5 text-sm font-normal text-slate-400">
               overdue
             </span>
