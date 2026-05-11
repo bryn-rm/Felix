@@ -12,6 +12,8 @@ export interface Email {
   sentiment: string | null;
   topic: string | null;
   triage_json: Record<string, unknown> | null;
+  read: boolean;
+  archived: boolean;
 }
 
 export interface Draft {

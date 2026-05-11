@@ -10,6 +10,7 @@ Endpoints:
   GET  /emails/stats                  — counts per category for dashboard
   GET  /emails/{id}                   — single email + attached draft
   GET  /emails/{id}/thread            — full Gmail thread
+  PATCH /emails/{id}                  — toggle read / archived (syncs to Gmail)
   POST /emails/{id}/draft             — generate / regenerate draft (SSE stream)
   PATCH /emails/{id}/draft            — save user's edited draft text
   POST /emails/{id}/send              — send approved draft via Gmail
@@ -53,6 +54,11 @@ class RegenerateRequest(BaseModel):
     user_intent: str = ""   # e.g. "decline politely", "ask for more time"
 
 
+class EmailPatch(BaseModel):
+    read: bool | None = None
+    archived: bool | None = None
+
+
 # ---------------------------------------------------------------------------
 # GET /emails
 # ---------------------------------------------------------------------------
@@ -62,6 +68,7 @@ async def list_emails(
     category: str | None = Query(None, description="Filter by triage category"),
     urgency: str | None = Query(None),
     draft_pending: bool | None = Query(None, description="Only emails with a pending draft"),
+    include_archived: bool = Query(False, description="Include archived emails in the result"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
     current_user: dict = Depends(get_current_user),
@@ -69,12 +76,16 @@ async def list_emails(
     """
     List processed emails from the local DB, newest first.
     The background sync job keeps this table up to date.
+    Archived emails are excluded by default — pass include_archived=true to see them.
     """
     await _ensure_google_connected(current_user["id"])
 
     conditions = ["e.user_id = $1"]
     args: list = [current_user["id"]]
     idx = 2
+
+    if not include_archived:
+        conditions.append("e.archived = FALSE")
 
     if category:
         conditions.append(f"e.category = ${idx}")
@@ -108,7 +119,7 @@ async def list_emails(
         SELECT
             e.id, e.thread_id, e.from_email, e.from_name, e.to_email,
             e.subject, e.snippet, e.received_at, e.category, e.urgency,
-            e.sentiment, e.topic, e.draft_generated,
+            e.sentiment, e.topic, e.draft_generated, e.read, e.archived,
             d.id        AS draft_id,
             d.status    AS draft_status
         FROM emails e
@@ -128,12 +139,13 @@ async def list_emails_trailing_slash(
     category: str | None = Query(None, description="Filter by triage category"),
     urgency: str | None = Query(None),
     draft_pending: bool | None = Query(None, description="Only emails with a pending draft"),
+    include_archived: bool = Query(False, description="Include archived emails in the result"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
     current_user: dict = Depends(get_current_user),
 ):
     """Alias for clients requesting /emails/ with a trailing slash."""
-    return await list_emails(category, urgency, draft_pending, limit, offset, current_user)
+    return await list_emails(category, urgency, draft_pending, include_archived, limit, offset, current_user)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +262,73 @@ async def get_thread(
     gmail = GmailService(creds)
     messages = await gmail.get_thread(email["thread_id"])
     return {"thread_id": email["thread_id"], "messages": messages}
+
+
+# ---------------------------------------------------------------------------
+# PATCH /emails/{email_id}  — toggle read / archived
+# ---------------------------------------------------------------------------
+
+@router.patch("/{email_id}")
+async def update_email(
+    email_id: str,
+    body: EmailPatch,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Toggle the read and/or archived state of an email. Mirrors the change to
+    Gmail (UNREAD / INBOX labels) so the user's actual mailbox stays in sync.
+
+    Gmail is updated first; if that succeeds, the local row is updated. If
+    Gmail fails (502), the local row is left untouched and the client can retry.
+    """
+    if body.read is None and body.archived is None:
+        raise HTTPException(status_code=422, detail="Provide at least one of read or archived")
+
+    email = await db.query_one(
+        "SELECT id FROM emails WHERE id = $1 AND user_id = $2",
+        email_id, current_user["id"],
+    )
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    add_labels: list[str] = []
+    remove_labels: list[str] = []
+    if body.read is True:
+        remove_labels.append("UNREAD")
+    elif body.read is False:
+        add_labels.append("UNREAD")
+    if body.archived is True:
+        remove_labels.append("INBOX")
+    elif body.archived is False:
+        add_labels.append("INBOX")
+
+    creds = await get_google_credentials(current_user["id"])
+    gmail = GmailService(creds)
+    try:
+        if add_labels:
+            await gmail.apply_labels(email_id, add_labels)
+        if remove_labels:
+            await gmail.remove_labels(email_id, remove_labels)
+    except Exception as exc:
+        logger.exception("Gmail label modify failed for email %s", email_id)
+        raise HTTPException(status_code=502, detail=f"Gmail modify failed: {exc}")
+
+    set_parts: list[str] = []
+    values: list = []
+    if body.read is not None:
+        set_parts.append(f"read = ${len(values) + 1}")
+        values.append(body.read)
+    if body.archived is not None:
+        set_parts.append(f"archived = ${len(values) + 1}")
+        values.append(body.archived)
+    values.extend([email_id, current_user["id"]])
+    await db.execute(
+        f"UPDATE emails SET {', '.join(set_parts)} "
+        f"WHERE id = ${len(values) - 1} AND user_id = ${len(values)}",
+        *values,
+    )
+
+    return {"updated": True, "read": body.read, "archived": body.archived}
 
 
 # ---------------------------------------------------------------------------
