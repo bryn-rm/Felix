@@ -86,12 +86,14 @@ export interface Settings {
   style_profile: Record<string, unknown> | null;
 }
 
+export type TemplateCategory = "reply" | "outreach" | "follow_up" | "other";
+
 export interface Template {
   id: string;
   name: string;
   subject_template: string;
   body_template: string;
-  category: string | null;
+  category: TemplateCategory | null;
 }
 
 export interface AiFeedback {

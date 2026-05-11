@@ -3,18 +3,18 @@
 import { useRef, useState } from "react";
 import { X, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { Template } from "@/lib/types";
+import type { Template, TemplateCategory } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const CATEGORIES = [
+const CATEGORIES: ReadonlyArray<{ value: TemplateCategory; label: string }> = [
   { value: "reply", label: "Reply" },
   { value: "outreach", label: "Outreach" },
   { value: "follow_up", label: "Follow-up" },
   { value: "other", label: "Other" },
-] as const;
+];
 
 const PLACEHOLDERS = [
   { key: "{{name}}", desc: "Contact name" },
@@ -48,7 +48,9 @@ export function TemplateEditor({ template, onClose, onSave }: TemplateEditorProp
   const isEdit = !!template;
 
   const [name, setName] = useState(template?.name ?? "");
-  const [category, setCategory] = useState(template?.category ?? "reply");
+  const [category, setCategory] = useState<TemplateCategory>(
+    template?.category ?? "reply",
+  );
   const [subject, setSubject] = useState(template?.subject_template ?? "");
   const [body, setBody] = useState(template?.body_template ?? "");
   const [errors, setErrors] = useState<ValidationErrors>({});
@@ -175,7 +177,7 @@ export function TemplateEditor({ template, onClose, onSave }: TemplateEditorProp
             </label>
             <select
               value={category}
-              onChange={(e) => setCategory(e.target.value)}
+              onChange={(e) => setCategory(e.target.value as TemplateCategory)}
               className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none"
             >
               {CATEGORIES.map((c) => (

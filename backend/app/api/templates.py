@@ -14,6 +14,7 @@ Endpoints:
 
 import logging
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -23,6 +24,8 @@ from app.middleware.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+TemplateCategory = Literal["reply", "outreach", "follow_up", "other"]
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +37,7 @@ class TemplateCreate(BaseModel):
     subject_template: str = ""
     body_template: str
     tags: list[str] = []
+    category: TemplateCategory | None = None
 
 
 class TemplateUpdate(BaseModel):
@@ -41,6 +45,7 @@ class TemplateUpdate(BaseModel):
     subject_template: str | None = None
     body_template: str | None = None
     tags: list[str] | None = None
+    category: TemplateCategory | None = None
 
 
 class TemplateUseRequest(BaseModel):
@@ -57,7 +62,7 @@ async def list_templates(current_user: dict = Depends(get_current_user)):
     """Return all templates for this user, ordered by most-used then most-recent."""
     rows = await db.query(
         """
-        SELECT id, name, subject_template, body_template, tags, use_count, created_at, updated_at
+        SELECT id, name, subject_template, body_template, tags, category, use_count, created_at, updated_at
         FROM smart_templates
         WHERE user_id = $1
         ORDER BY use_count DESC, updated_at DESC
@@ -85,6 +90,7 @@ async def create_template(
             "subject_template": body.subject_template,
             "body_template":    body.body_template,
             "tags":             body.tags,
+            "category":         body.category,
             "created_at":       datetime.now(timezone.utc).isoformat(),
             "updated_at":       datetime.now(timezone.utc).isoformat(),
         },
