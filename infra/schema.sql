@@ -31,9 +31,14 @@ CREATE TABLE IF NOT EXISTS google_connections (
 
 ALTER TABLE google_connections ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "users manage own google connection"
+-- Service-role-only access: encrypted access_token / refresh_token ciphertext
+-- must never reach a browser, even for the row's owning user. The backend
+-- connects with BYPASSRLS (postgres role), so it is unaffected. Connection
+-- status (google_email, connected_at, last_sync) is exposed to clients via
+-- the backend's GET /auth/google/status endpoint instead.
+CREATE POLICY "service role manages google connections"
     ON google_connections FOR ALL
-    USING (user_id = auth.uid());
+    USING (auth.role() = 'service_role');
 
 
 -- ============================================================
