@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from app import db
@@ -99,9 +100,9 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "propose_calendar_event",
         "description": (
-            "Stage a calendar event for the user to confirm. This does NOT write to the "
-            "calendar — it just records the proposal server-side. After calling this, "
-            "describe the proposed event to the user in plain text and ask them to confirm. "
+            "Prepare a calendar event as an internal pending offer. This does NOT write to "
+            "the calendar and should not be described as staged, queued, or pending. After "
+            "calling this, describe the event details and ask if the user wants it added. "
             "If they confirm in a follow-up turn, call create_calendar_event (no arguments)."
         ),
         "input_schema": {
@@ -276,9 +277,8 @@ async def _propose_calendar_event(
         "attendees": cleaned_attendees,
         "description": description or "",
     }
-    # Append a new proposal — multiple pending proposals per user are allowed
-    # so the agent can stage several events ("propose A, propose B") before the
-    # user confirms with a single "add both".
+    # Append a new pending offer. Multiple rows are allowed so the agent can
+    # prepare several events before the user confirms with a single "add both".
     row = await db.query_one(
         """
         INSERT INTO pending_calendar_proposals (user_id, payload, created_at)
@@ -292,21 +292,68 @@ async def _propose_calendar_event(
         "proposal_id": str(row["id"]) if row else None,
         "event": payload,
         "note": (
-            "Now describe this event to the user in plain text and ask them to confirm. "
-            "If you have multiple events to stage, call propose_calendar_event again before "
-            "you reply. Once the user confirms in their next turn, call create_calendar_event "
-            "(no arguments creates all pending proposals; pass proposal_id for a specific one)."
+            "Now describe the event details to the user in plain text and ask whether they "
+            "want it added to their calendar. Do not mention staging, queuing, pending "
+            "offers, or this internal tool. If you have multiple events to offer, call "
+            "propose_calendar_event again before you reply. Once the user confirms in their "
+            "next turn, call create_calendar_event (no arguments creates all pending "
+            "proposals; pass proposal_id for a specific one)."
         ),
     }
 
 
-async def _create_calendar_event(
-    user_id: str,
-    latest_user_turn: str,
-    proposal_id: str | None = None,
-) -> dict:
+def _payload_key(payload: dict[str, Any]) -> tuple:
+    attendees = tuple(sorted(a.strip().lower() for a in payload.get("attendees") or [] if a))
+    return (
+        (payload.get("title") or "").strip().lower(),
+        (payload.get("start_iso") or "").strip(),
+        (payload.get("end_iso") or "").strip(),
+        (payload.get("timezone") or "").strip(),
+        attendees,
+        (payload.get("description") or "").strip(),
+    )
+
+
+def _row_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = row["payload"]
+    if isinstance(payload, str):
+        return json.loads(payload)
+    return payload
+
+
+def _format_event_when(start: str | None) -> str:
+    if not start:
+        return ""
+    try:
+        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    minute = "" if dt.minute == 0 else f":{dt.minute:02d}"
+    hour = dt.hour % 12 or 12
+    suffix = "am" if dt.hour < 12 else "pm"
+    return f" on {dt.strftime('%A %d %b')} at {hour}{minute}{suffix}"
+
+
+def _format_created_event_message(created_events: list[dict[str, Any]]) -> str:
+    if not created_events:
+        return "I had trouble creating that calendar event. Please try again."
+
+    if len(created_events) == 1:
+        event = created_events[0]
+        title = event.get("title") or "that event"
+        return f"Done, I added {title} to your calendar{_format_event_when(event.get('start'))}."
+
+    parts = []
+    for event in created_events[:3]:
+        title = event.get("title") or "that event"
+        parts.append(f"{title}{_format_event_when(event.get('start'))}")
+    suffix = "" if len(created_events) <= 3 else f", and {len(created_events) - 3} more"
+    return f"Done, I added {len(created_events)} events to your calendar: {'; '.join(parts)}{suffix}."
+
+
+async def _pending_calendar_rows(user_id: str, proposal_id: str | None = None) -> list[dict[str, Any]]:
     if proposal_id:
-        rows = await db.query(
+        return await db.query(
             f"""
             SELECT id, payload
             FROM pending_calendar_proposals
@@ -316,17 +363,48 @@ async def _create_calendar_event(
             """,
             user_id, proposal_id,
         )
-    else:
-        rows = await db.query(
-            f"""
-            SELECT id, payload
-            FROM pending_calendar_proposals
-            WHERE user_id = $1
-              AND created_at > NOW() - INTERVAL '{_PROPOSAL_TTL_SECONDS} seconds'
-            ORDER BY created_at ASC
-            """,
-            user_id,
+
+    return await db.query(
+        f"""
+        SELECT id, payload
+        FROM pending_calendar_proposals
+        WHERE user_id = $1
+          AND created_at > NOW() - INTERVAL '{_PROPOSAL_TTL_SECONDS} seconds'
+        ORDER BY created_at ASC
+        """,
+        user_id,
+    )
+
+
+async def _delete_pending_rows(rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        await db.execute(
+            "DELETE FROM pending_calendar_proposals WHERE id = $1",
+            row["id"],
         )
+
+
+async def _create_calendar_event(
+    user_id: str,
+    latest_user_turn: str,
+    proposal_id: str | None = None,
+) -> dict:
+    rows = await _pending_calendar_rows(user_id, proposal_id)
+    return await _create_calendar_events_from_rows(
+        user_id,
+        latest_user_turn=latest_user_turn,
+        rows=rows,
+        dedupe=proposal_id is None,
+    )
+
+
+async def _create_calendar_events_from_rows(
+    user_id: str,
+    *,
+    latest_user_turn: str,
+    rows: list[dict[str, Any]],
+    dedupe: bool = True,
+) -> dict:
     if not rows:
         return {
             "error": (
@@ -351,13 +429,23 @@ async def _create_calendar_event(
     cal = CalendarService(creds)
     created_events: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
+    rows_to_create: list[tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = []
+    seen: dict[tuple, tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = {}
 
     for row in rows:
-        payload = row["payload"]
-        if isinstance(payload, str):
-            # asyncpg may return JSONB as text depending on codec setup.
-            payload = json.loads(payload)
+        payload = _row_payload(row)
+        key = _payload_key(payload)
+        if not dedupe:
+            rows_to_create.append((row, payload, [row]))
+            continue
+        if key in seen:
+            seen[key][2].append(row)
+            continue
+        group = (row, payload, [row])
+        seen[key] = group
+        rows_to_create.append(group)
 
+    for row, payload, duplicate_rows in rows_to_create:
         event_body: dict[str, Any] = {
             "summary": payload["title"],
             "start": {"dateTime": payload["start_iso"], "timeZone": payload["timezone"]},
@@ -376,11 +464,8 @@ async def _create_calendar_event(
             failed.append({"proposal_id": str(row["id"]), "error": type(e).__name__})
             continue
 
-        # Single-use — drop this pending row now that the event is on the calendar.
-        await db.execute(
-            "DELETE FROM pending_calendar_proposals WHERE id = $1",
-            row["id"],
-        )
+        # Single-use — drop the consumed row and any identical duplicate offers.
+        await _delete_pending_rows(duplicate_rows)
         created_events.append({
             "id": created.get("id"),
             "title": created.get("title") or payload["title"],
@@ -400,6 +485,32 @@ async def _create_calendar_event(
     if failed:
         result["failed"] = failed
     return result
+
+
+async def try_confirm_pending_calendar_proposals(user_id: str, latest_user_turn: str) -> str | None:
+    """
+    Deterministic fast path for "yes, add it" after Felix has already offered a
+    calendar add. Returns None when this turn should continue through the LLM.
+    """
+    if not _looks_like_confirmation(latest_user_turn):
+        return None
+
+    rows = await _pending_calendar_rows(user_id)
+    if not rows:
+        return None
+
+    result = await _create_calendar_events_from_rows(
+        user_id,
+        latest_user_turn=latest_user_turn,
+        rows=rows,
+    )
+    if result.get("ok"):
+        return _format_created_event_message(result.get("created") or [])
+
+    error = result.get("error") or "Calendar create failed"
+    if "No Google calendar access" in error:
+        return "I can't access your calendar right now. Reconnect Google in Settings and try again."
+    return "I had trouble creating that calendar event. Please try again."
 
 
 # ---------------------------------------------------------------------------

@@ -786,11 +786,19 @@ async def _check_calendar(intent, user_id, gmail, user_name) -> str:
 
 async def _general_question(intent, user_id, gmail, user_name) -> str:
     from app.services.ai_service import ai_service
-    from app.services.chat_tools import TOOLS as CHAT_TOOLS, make_dispatcher
+    from app.services.chat_tools import (
+        TOOLS as CHAT_TOOLS,
+        make_dispatcher,
+        try_confirm_pending_calendar_proposals,
+    )
 
     transcript = intent.get("raw_transcript", "")
     if not transcript:
         return "I didn't quite catch that. Could you say that again?"
+
+    confirmed_calendar_add = await try_confirm_pending_calendar_proposals(user_id, transcript)
+    if confirmed_calendar_add:
+        return confirmed_calendar_add
 
     # Build a small "what Felix knows" snapshot so the answer can reference
     # the user's actual state instead of being purely generic.
