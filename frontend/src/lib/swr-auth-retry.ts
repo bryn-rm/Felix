@@ -21,10 +21,14 @@ interface RetryConfig {
  * Shared `onErrorRetry` for SWR hooks that hit auth-gated endpoints.
  *
  * Behaviour:
- *  - 401 / 403: retry up to AUTH_MAX_RETRIES with 0.5 / 1 / 2 s backoff.
- *    On exhaustion, navigate to /login (401) or /connect (403). This
- *    closes the gap left by callers that pass `{ skipAuthRedirect: true }`
- *    to the api client to opt out of its eager redirect.
+ *  - 401: retry up to AUTH_MAX_RETRIES with 0.5 / 1 / 2 s backoff. On
+ *    exhaustion, navigate to /login. The retries cover the brief window
+ *    after tab focus where the cached access token is expired but
+ *    Supabase hasn't refreshed yet.
+ *  - 403: treat as terminal. Every 403 from these endpoints means Google
+ *    is disconnected or the refresh token was revoked — retrying just
+ *    hammers the backend. The error is left on SWR's `error` slot so the
+ *    UI can surface a reconnect prompt.
  *  - Other errors (network, 5xx, etc.): mirror SWR's default exponential
  *    backoff using the hook's configured `errorRetryCount` /
  *    `errorRetryInterval`, with the same jitter formula SWR uses
@@ -41,7 +45,9 @@ export function authAwareRetry(
   const status = err instanceof ApiError ? err.status : undefined;
   inboxDebug("swr:error", { key, status, retryCount });
 
-  if (status === 401 || status === 403) {
+  if (status === 403) return;
+
+  if (status === 401) {
     if (retryCount > AUTH_MAX_RETRIES) {
       redirectForAuthStatus(status);
       return;

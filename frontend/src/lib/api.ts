@@ -1,21 +1,26 @@
 import { getFreshAccessToken } from "@/lib/auth-session";
+import {
+  clearGoogleDisconnected,
+  markGoogleDisconnected,
+} from "@/lib/google-connection-status";
 import { inboxDebug } from "@/lib/inbox-debug";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
-// Guard against multiple simultaneous 401/403 responses each trying to redirect
+// Guard against multiple simultaneous 401 responses each trying to redirect
 let _redirecting = false;
 
 /**
- * Navigate the browser to the appropriate auth-recovery page for a given
- * status code, exactly once per page load. Exposed so SWR retry handlers
- * can trigger the same redirect after their retry budget is exhausted.
+ * Navigate to /login on 401, exactly once per page load. 403 is handled
+ * via a global "Google disconnected" signal instead, so the user can see
+ * and act on the reconnect prompt without being yanked off the current
+ * page (especially /settings, where disconnect/reconnect lives).
  */
 export function redirectForAuthStatus(status: number): void {
   if (typeof window === "undefined" || _redirecting) return;
-  if (status !== 401 && status !== 403) return;
+  if (status !== 401) return;
   _redirecting = true;
-  window.location.href = status === 403 ? "/connect" : "/login";
+  window.location.href = "/login";
 }
 
 // ---------------------------------------------------------------------------
@@ -106,11 +111,15 @@ async function request<T>(
     }
     inboxDebug("api:status", { path, status: res.status });
     const err = new ApiError(res.status, message);
-    if (!options?.skipAuthRedirect) {
+    if (res.status === 403) {
+      markGoogleDisconnected();
+    } else if (!options?.skipAuthRedirect) {
       redirectForAuthStatus(res.status);
     }
     throw err;
   }
+
+  clearGoogleDisconnected();
 
   // 204 No Content
   if (res.status === 204) return undefined as T;

@@ -15,6 +15,7 @@ import {
   Bell,
 } from "lucide-react";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { GoogleDisconnectedBanner } from "@/components/layout/GoogleDisconnectedBanner";
 import { VoiceProvider, useVoiceContext } from "@/components/felix/VoiceContext";
 import { VoiceModal } from "@/components/felix/VoiceModal";
 import { FloatingVoiceFab } from "@/components/felix/FloatingVoiceFab";
@@ -108,6 +109,8 @@ function ShellInner({ userEmail, displayName, children }: AppShellProps) {
             </div>
           </div>
         </header>
+
+        <GoogleDisconnectedBanner />
 
         {/* Page content — extra bottom padding on mobile so the bottom nav doesn't overlap */}
         <main className="flex-1 overflow-y-auto pb-20 md:pb-0">{children}</main>
