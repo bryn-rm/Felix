@@ -19,6 +19,7 @@ from typing import Any, AsyncGenerator
 from anthropic import AsyncAnthropic
 
 from app.config import settings
+from app.prompts._helpers import wrap_untrusted
 from app.prompts.briefing import BRIEFING_PROMPT
 from app.prompts.commitment_detection import COMMITMENT_DETECTION_PROMPT
 from app.prompts.draft import DRAFT_PROMPT
@@ -547,11 +548,16 @@ class AIService:
         knows about the user (inbox counts, top contacts, today's calendar) that
         the model can reference when answering.
         """
-        user_message = f"User ({user_name}) said: {transcript}"
+        user_message = (
+            f"User ({user_name}) said:\n"
+            + wrap_untrusted(transcript, "user_speech")
+        )
         if felix_context:
             user_message = (
-                f"What Felix knows about {user_name} right now:\n{felix_context}\n\n"
-                f"{user_message}"
+                f"What Felix knows about {user_name} right now:\n"
+                + wrap_untrusted(felix_context, "context")
+                + "\n\n"
+                + user_message
             )
 
         started = time.monotonic()
@@ -659,9 +665,10 @@ class AIService:
 
         opening_context = (
             f"What Felix knows about {user_name} right now:\n"
-            f"{felix_context or '(no extra context)'}\n\n"
-            f"Today is {today_str}. User timezone: {user_timezone}.\n\n"
-            f"User said: {transcript}"
+            + wrap_untrusted(felix_context or "(no extra context)", "context")
+            + f"\n\nToday is {today_str}. User timezone: {user_timezone}.\n\n"
+            + "User said:\n"
+            + wrap_untrusted(transcript, "user_speech")
         )
 
         # Build the message list. Prior turns first (plain text only), then this turn.
@@ -714,7 +721,7 @@ class AIService:
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": result_str,
+                        "content": wrap_untrusted(result_str, "tool_output"),
                     })
                 messages.append({"role": "user", "content": tool_results})
 
