@@ -10,20 +10,28 @@ Mirrors the GmailService pattern exactly:
 import logging
 from datetime import datetime, timedelta, timezone
 
+import httplib2
 import pytz
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from app.services.google_api import execute_with_backoff as _execute_with_backoff
+
+# Socket-level timeout for the underlying HTTP transport. Shorter than the
+# wait_for cap in execute_with_backoff (25s) so the socket times out first
+# and the worker thread exits cleanly instead of being orphaned.
+_HTTP_SOCKET_TIMEOUT = 20
 
 logger = logging.getLogger(__name__)
 
 
 class CalendarService:
     def __init__(self, credentials):
+        authed_http = AuthorizedHttp(credentials, http=httplib2.Http(timeout=_HTTP_SOCKET_TIMEOUT))
         self.service = build(
             "calendar", "v3",
-            credentials=credentials,
+            http=authed_http,
             cache_discovery=True,
         )
 
