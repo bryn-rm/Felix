@@ -52,6 +52,7 @@ export default async function AppLayout({
       const res = await fetch(`${apiBase}/auth/google/status`, {
         headers: { Authorization: `Bearer ${session.access_token}` },
         cache: "no-store",
+        signal: AbortSignal.timeout(8000),
       });
       if (res.ok) {
         const status = (await res.json()) as { connected?: boolean };

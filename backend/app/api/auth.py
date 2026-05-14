@@ -207,16 +207,23 @@ async def google_callback(
 
         # Exchange code → tokens
         logger.info("[callback] exchanging code with Google (redirect_uri=%s)", settings.GOOGLE_REDIRECT_URI)
-        async with httpx.AsyncClient() as client:
-            token_response = await client.post(
-                GOOGLE_TOKEN_URL,
-                data={
-                    "code": code,
-                    "client_id": settings.GOOGLE_CLIENT_ID,
-                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                    "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-                    "grant_type": "authorization_code",
-                },
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                token_response = await client.post(
+                    GOOGLE_TOKEN_URL,
+                    data={
+                        "code": code,
+                        "client_id": settings.GOOGLE_CLIENT_ID,
+                        "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+                        "grant_type": "authorization_code",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("[callback] Google token exchange HTTP error: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail="Google token exchange failed to respond. Please try connecting again.",
             )
 
         logger.info("[callback] Google token exchange response: status=%d", token_response.status_code)
@@ -252,10 +259,17 @@ async def google_callback(
             )
 
         # Fetch the Google account email for display purposes
-        async with httpx.AsyncClient() as client:
-            userinfo_resp = await client.get(
-                GOOGLE_USERINFO_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                userinfo_resp = await client.get(
+                    GOOGLE_USERINFO_URL,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("[callback] Google userinfo HTTP error: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail="Could not retrieve your Google userinfo. Please try connecting again.",
             )
         if userinfo_resp.status_code == 200:
             try:
