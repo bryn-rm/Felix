@@ -151,7 +151,10 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
 
     # Fall back to Supabase network call
     try:
-        result = await asyncio.to_thread(_get_supabase().auth.get_user, token)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(_get_supabase().auth.get_user, token),
+            timeout=5.0,
+        )
         if not result or not result.user:
             raise HTTPException(status_code=401, detail="Invalid token")
         user = {
@@ -163,6 +166,8 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
         return user
     except HTTPException:
         raise
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=401, detail="Unauthorized")
     except Exception:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
