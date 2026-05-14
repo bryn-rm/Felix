@@ -901,7 +901,7 @@ async def _claude_json(*, feature: str, prompt: str, user_id: str | None, max_to
 
     from app.services.ai_service import log_ai_call
 
-    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=120.0, max_retries=2)
     started = time.monotonic()
     response = None
     success = True

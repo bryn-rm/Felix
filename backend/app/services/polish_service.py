@@ -19,7 +19,7 @@ from app.services import memory_service
 logger = logging.getLogger(__name__)
 
 
-_client = AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY)
+_client = AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY, timeout=120.0, max_retries=2)
 
 
 _POLISH_DRAFT_SYSTEM = (

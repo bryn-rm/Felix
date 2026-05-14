@@ -259,7 +259,7 @@ async def _summarise_conversation(user_id: str, conversation: str) -> dict:
     from app.prompts.memory import SESSION_SUMMARY_PROMPT
     from app.services.ai_service import log_ai_call
 
-    _client = AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY)
+    _client = AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY, timeout=30.0, max_retries=1)
 
     started = _time.monotonic()
     response = None

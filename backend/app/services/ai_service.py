@@ -31,7 +31,7 @@ from app.prompts.voice_intent import VOICE_INTENT_PROMPT
 
 logger = logging.getLogger(__name__)
 
-client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=120.0, max_retries=2)
 
 
 # ---------------------------------------------------------------------------
