@@ -1,3 +1,5 @@
+from app.prompts._helpers import wrap_untrusted
+
 MEETING_PREP_PROMPT = """You are Felix, an AI chief of staff. Write a short pre-meeting prep card for {user_name} for the meeting starting at {event_start_local} ({event_timezone}).
 
 OUTPUT FORMAT
@@ -29,7 +31,7 @@ Location / link: {event_location}
 Attendees: {attendees_summary}
 
 CONTEXT FOR EACH ATTENDEE
-{per_attendee_context}
+""" + wrap_untrusted("{per_attendee_context}", "context") + """
 
 OPEN COMMITMENTS — owed by {user_name} to attendees:
 {owed_by_user_list}
@@ -38,10 +40,10 @@ OPEN COMMITMENTS — owed to {user_name} by attendees:
 {owed_to_user_list}
 
 RECENT EMAIL THREADS WITH ATTENDEES (most recent first):
-{recent_threads}
+""" + wrap_untrusted("{recent_threads}", "emails") + """
 
 PAST MEETING EPISODES WITH THESE PEOPLE (if any):
-{past_episodes}
+""" + wrap_untrusted("{past_episodes}", "episodes") + """
 
 Now write the prep card HTML. Output the HTML only — no markdown fences, no preamble.
 """

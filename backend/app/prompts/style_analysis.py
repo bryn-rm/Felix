@@ -1,7 +1,9 @@
+from app.prompts._helpers import wrap_untrusted
+
 STYLE_ANALYSIS_PROMPT = """Analyse these sent emails and extract a writing style profile for this person.
 
 EMAILS (separated by ---):
-{emails}
+""" + wrap_untrusted("{emails}", "emails") + """
 
 Return a JSON object with exactly these fields — no explanation, no markdown:
 {{

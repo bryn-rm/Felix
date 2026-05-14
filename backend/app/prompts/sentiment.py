@@ -1,8 +1,11 @@
+from app.prompts._helpers import wrap_untrusted
+
 SENTIMENT_PROMPT = """Analyse the emotional tone and urgency of this email.
 
 From: {sender}
 Subject: {subject}
-Body: {body}
+Body:
+""" + wrap_untrusted("{body}", "email") + """
 
 Return a JSON object:
 {{

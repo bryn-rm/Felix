@@ -1,10 +1,13 @@
+from app.prompts._helpers import wrap_untrusted
+
 MEETING_NOTES_PROMPT = """You are generating structured meeting notes from a transcript.
 
 Meeting: {meeting_title}
-Attendees: {attendees}
+Attendees:
+""" + wrap_untrusted("{attendees}", "attendees") + """
 
 Transcript:
-{transcript}
+""" + wrap_untrusted("{transcript}", "transcript") + """
 
 Return a JSON object with exactly these fields:
 {{

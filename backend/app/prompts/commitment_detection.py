@@ -1,3 +1,5 @@
+from app.prompts._helpers import wrap_untrusted
+
 COMMITMENT_DETECTION_PROMPT = """Analyse the email below and extract any commitments — concrete promises with a deliverable, made by either the SENDER or the RECIPIENT. Ignore vague pleasantries ("we should catch up", "let's chat soon") and statements of intent without a specific deliverable.
 
 CONTEXT
@@ -8,13 +10,16 @@ CONTEXT
 - The other party (counterparty) name: {counterparty_name}
 
 EMAIL
-From:    {from_email}
-To:      {to_email}
-Subject: {subject}
-Date:    {sent_at}
-
-Body:
-{body}
+""" + wrap_untrusted(
+    "From:    {from_email}\n"
+    "To:      {to_email}\n"
+    "Subject: {subject}\n"
+    "Date:    {sent_at}\n"
+    "\n"
+    "Body:\n"
+    "{body}",
+    "emails",
+) + """
 
 EXTRACTION RULES
 - A commitment is a sentence containing: "I'll …", "I will …", "we'll …", "we will …", "I can …", "I'm going to …", "you'll have …", "I'll send …", "I'll get back to you …", or equivalent. \
