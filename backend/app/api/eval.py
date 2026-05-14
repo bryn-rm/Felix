@@ -3,7 +3,7 @@ Eval / observability routes.
 
 Endpoints (mounted at /eval):
   POST /eval/feedback           — store a user rating for an AI response
-  GET  /eval/feedback/summary   — aggregated stats per feature (last 7 days)
+  GET  /eval/feedback/summary   — aggregated stats per feature, last 7 days (admin only)
 
 Endpoints (mounted at /admin):
   GET  /admin/parse-errors      — last 20 parse errors from ai_calls (admin only)
@@ -145,10 +145,14 @@ async def get_feedback_summary(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Aggregated AI performance stats per feature for the last 7 days.
-    Returns one row per feature with call counts, latency, success/parse-error
-    rates, and user-rating breakdowns.
+    Aggregated AI performance stats per feature for the last 7 days, across
+    ALL users. Returns one row per feature with call counts, latency,
+    success/parse-error rates, and org-wide user-rating breakdowns.
+    Requires ADMIN_EMAILS match.
     """
+    _require_admin(current_user)
+    await _log_admin_access(current_user["id"], current_user.get("email", ""), "/eval/feedback/summary")
+
     rows = await db.query(
         """
         SELECT
@@ -173,12 +177,10 @@ async def get_feedback_summary(
         FROM ai_calls ac
         LEFT JOIN ai_feedback ef
                ON ef.ai_call_id = ac.id
-              AND ef.user_id = $1
         WHERE ac.created_at >= NOW() - INTERVAL '7 days'
         GROUP BY ac.feature
         ORDER BY ac.feature
         """,
-        current_user["id"],
     )
     return rows
 
