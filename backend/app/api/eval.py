@@ -16,6 +16,7 @@ Admin access is gated by the ADMIN_EMAILS environment variable (comma-separated)
 import logging
 import re
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -89,7 +90,7 @@ def _redact_error_message(msg: str | None, max_len: int = 200) -> str:
 class FeedbackCreate(BaseModel):
     ai_call_id: str | None = None
     feature: str
-    rating: int           # 1 = good, 2 = edited, 0 = wrong / corrected
+    rating: Literal[1, 2, 3]  # 1 = wrong / corrected, 2 = edited, 3 = good
     correction: str | None = None
     notes: str | None = None
 
@@ -172,9 +173,9 @@ async def get_feedback_summary(
             )                                                             AS parse_error_pct,
             ROUND(AVG(ef.rating), 2)                                      AS avg_user_rating,
             COUNT(ef.id)                                                  AS rated_count,
-            SUM(CASE WHEN ef.rating = 1              THEN 1 ELSE 0 END)  AS good_count,
-            SUM(CASE WHEN ef.correction IS NOT NULL  THEN 1 ELSE 0 END)  AS edited_count,
-            SUM(CASE WHEN ef.rating = 0              THEN 1 ELSE 0 END)  AS wrong_count
+            SUM(CASE WHEN ef.rating = 3              THEN 1 ELSE 0 END)  AS good_count,
+            SUM(CASE WHEN ef.rating = 2              THEN 1 ELSE 0 END)  AS edited_count,
+            SUM(CASE WHEN ef.rating = 1              THEN 1 ELSE 0 END)  AS wrong_count
         FROM ai_calls ac
         LEFT JOIN ai_feedback ef
                ON ef.ai_call_id = ac.id
