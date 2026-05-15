@@ -47,7 +47,7 @@ function RelationshipBar({ strength }: { strength: number }) {
 function SentimentIcon({ trend }: { trend: string | null }) {
   if (trend === "improving")
     return <TrendingUp className="h-4 w-4 text-emerald-400" />;
-  if (trend === "declining")
+  if (trend === "deteriorating")
     return <TrendingDown className="h-4 w-4 text-red-400" />;
   return <Minus className="h-4 w-4 text-slate-400" />;
 }

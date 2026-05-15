@@ -369,7 +369,7 @@ export default function ContactProfilePage() {
                   className={`ml-1.5 font-medium ${
                     contact.sentiment_trend === "improving"
                       ? "text-emerald-400"
-                      : contact.sentiment_trend === "declining"
+                      : contact.sentiment_trend === "deteriorating"
                         ? "text-red-400"
                         : "text-slate-400"
                   }`}

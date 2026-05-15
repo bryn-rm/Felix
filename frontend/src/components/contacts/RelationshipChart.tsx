@@ -21,7 +21,7 @@ interface RelationshipChartProps {
 
 function trendColor(trend: string | null | undefined): string {
   if (trend === "improving") return "#22c55e"; // green-500
-  if (trend === "declining") return "#ef4444"; // red-500
+  if (trend === "deteriorating") return "#ef4444"; // red-500
   return "#94a3b8"; // slate-400
 }
 
@@ -98,7 +98,7 @@ export function generateSentimentHistory(
     let score: number;
     if (trend === "improving") {
       score = Math.max(0.1, Math.min(0.99, baseScore - 0.15 + progress * 0.25 + jitter));
-    } else if (trend === "declining") {
+    } else if (trend === "deteriorating") {
       score = Math.max(0.05, Math.min(0.95, baseScore + 0.1 - progress * 0.2 + jitter));
     } else {
       score = Math.max(0.1, Math.min(0.9, baseScore + jitter));

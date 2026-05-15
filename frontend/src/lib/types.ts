@@ -26,6 +26,8 @@ export interface Draft {
   sent_at: string | null;
 }
 
+export type SentimentTrend = "improving" | "stable" | "deteriorating";
+
 export interface Contact {
   email: string;
   name: string | null;
@@ -35,7 +37,7 @@ export interface Contact {
   relationship_strength: number;
   total_emails: number;
   last_contacted: string | null;
-  sentiment_trend: string | null;
+  sentiment_trend: SentimentTrend | null;
   topics_discussed: string[];
   open_commitments: string[];
   their_open_commitments: string[];
