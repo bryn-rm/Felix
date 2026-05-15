@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 from app import db
 from app.config import settings
 from app.middleware.auth import (
+    _verify_jwt_locally,
     get_current_user,
     get_google_credentials,
     get_supabase_client,
@@ -510,9 +511,31 @@ async def _authenticate_ws(websocket: WebSocket) -> dict | None:
         await websocket.close(code=4001)
         return None
 
+    # Fast path: when SUPABASE_JWT_SECRET is configured, verify the JWT
+    # locally and never reach the network. The fallback below is gated on the
+    # secret being absent at startup — NOT on local verification failing at
+    # request time. A failure-mode fallback would let an attacker bypass
+    # signature verification by submitting a token that fails locally but
+    # happens to authenticate against Supabase's side.
+    if settings.SUPABASE_JWT_SECRET:
+        try:
+            payload = _verify_jwt_locally(token)
+        except HTTPException:
+            payload = None  # expired token — reject below
+        if payload and payload.get("sub"):
+            return {"id": payload["sub"], "email": payload.get("email", "")}
+        await websocket.send_json({"type": "error", "message": "Unauthorized"})
+        await websocket.close(code=4001)
+        return None
+
+    # Fallback: secret not configured (local dev / preview deploys). Wrap the
+    # synchronous Supabase HTTP call in wait_for so a Supabase outage can't
+    # hang the connect indefinitely.
     try:
-        # get_user() is synchronous HTTP — run in a thread to avoid blocking the event loop.
-        result = await asyncio.to_thread(get_supabase_client().auth.get_user, token)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(get_supabase_client().auth.get_user, token),
+            timeout=5.0,
+        )
         if not result or not result.user:
             raise ValueError("No user returned")
         return {"id": result.user.id, "email": result.user.email}
