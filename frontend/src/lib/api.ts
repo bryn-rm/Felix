@@ -164,8 +164,15 @@ export const api = {
       } catch {
         // keep statusText
       }
+      if (res.status === 403) {
+        markGoogleDisconnected();
+      } else {
+        redirectForAuthStatus(res.status);
+      }
       throw new ApiError(res.status, message);
     }
+
+    clearGoogleDisconnected();
 
     if (!res.body) {
       throw new ApiError(500, "No response body for streaming draft");

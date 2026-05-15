@@ -7,6 +7,7 @@
 import "@testing-library/jest-dom";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { DraftPanel } from "@/components/email/DraftPanel";
+import type { Draft } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -18,8 +19,16 @@ jest.mock("next/navigation", () => ({
 }));
 
 // We control what useDraft returns per-test via draftHookValue
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let draftHookValue: any;
+type DraftHookValue = {
+  draft: Partial<Draft> | null;
+  draftText: string;
+  state: "loading" | "generating" | "ready" | "sending" | "sent" | "error";
+  error: string | null;
+  send: jest.Mock<Promise<void>, [string]>;
+  discard: jest.Mock<Promise<void>, []>;
+};
+
+let draftHookValue: DraftHookValue;
 jest.mock("@/hooks/useDraft", () => ({
   useDraft: () => draftHookValue,
 }));
@@ -28,7 +37,7 @@ jest.mock("@/hooks/useDraft", () => ({
 // Fixture factory
 // ---------------------------------------------------------------------------
 
-function makeDraftHook(overrides: Record<string, unknown> = {}) {
+function makeDraftHook(overrides: Partial<DraftHookValue> = {}): DraftHookValue {
   return {
     draft: null,
     draftText: "",

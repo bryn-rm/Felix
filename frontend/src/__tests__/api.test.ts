@@ -187,3 +187,13 @@ describe("api.get", () => {
     expect(markGoogleDisconnected).not.toHaveBeenCalled();
   });
 });
+
+describe("api.streamDraft", () => {
+  it("marks Google disconnected on a 403 response", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: "Google not connected" }));
+
+    await expect(api.streamDraft("email-1")).rejects.toMatchObject({ status: 403 });
+
+    expect(markGoogleDisconnected).toHaveBeenCalledTimes(1);
+  });
+});

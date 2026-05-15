@@ -4,6 +4,7 @@
 import "@testing-library/jest-dom";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { EmailCard } from "@/components/inbox/EmailCard";
+import type { Email } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -25,26 +26,25 @@ jest.mock("@/lib/api", () => ({
 // Fixture factory
 // ---------------------------------------------------------------------------
 
-function makeEmail(overrides: Record<string, unknown> = {}) {
+function makeEmail(overrides: Partial<Email> = {}): Email {
   return {
     id: "email-1",
     thread_id: "thread-1",
-    user_id: "user-1",
-    gmail_id: "gmail-1",
     from_email: "alice@example.com",
     from_name: "Alice Sender",
-    to_email: "me@example.com",
     subject: "Test Subject",
+    body: null,
     snippet: "Email snippet text",
     received_at: new Date(Date.now() - 30 * 60_000).toISOString(),
     category: "action_required",
     urgency: "medium",
     sentiment: null,
     topic: null,
-    draft_generated: false,
+    triage_json: null,
+    read: false,
+    archived: false,
     ...overrides,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any;
+  };
 }
 
 // ---------------------------------------------------------------------------
