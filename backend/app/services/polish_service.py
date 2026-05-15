@@ -189,7 +189,7 @@ class PolishService:
               AND e.category = 'action_required'
               AND NOT EXISTS (
                   SELECT 1 FROM drafts d
-                  WHERE d.email_id = e.id AND d.status = 'sent'
+                  WHERE d.email_id = e.id AND d.user_id = e.user_id AND d.status = 'sent'
               )
             ORDER BY e.received_at DESC
             LIMIT 10
