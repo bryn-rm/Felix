@@ -80,32 +80,35 @@ def _session_history_for_agent(user_id: str, latest_message: str) -> list[dict[s
 
 
 def _request_history_for_agent(history: list["ChatHistoryTurn"]) -> list[dict[str, str]]:
+    # Only user turns from the client payload are honored. Assistant turns are
+    # canonical on the server side; accepting client-supplied assistant turns
+    # would let a forged history inject fabricated assistant claims that the
+    # tool agent then trusts and acts on.
     return [
         {"role": turn.role, "content": turn.content.strip()}
         for turn in history[-MAX_CHAT_HISTORY_TURNS:]
-        if turn.content.strip()
+        if turn.role == "user" and turn.content.strip()
     ]
 
 
-def _merge_chat_history(*histories: list[dict[str, str]]) -> list[dict[str, str]]:
+def _merge_chat_history(
+    client_history: list[dict[str, str]],
+    session_history: list[dict[str, str]],
+) -> list[dict[str, str]]:
     """
-    Pick the richest recent-turn source. The active server session covers normal
-    chats; client history covers process restarts and older clients.
+    Session history is canonical. Client-supplied user turns only fill in on
+    cold start (when the server has no session-side history yet).
     """
-    cleaned_histories: list[list[dict[str, str]]] = []
-    for history in histories:
-        cleaned: list[dict[str, str]] = []
-        for turn in history:
-            role = turn.get("role")
-            content = (turn.get("content") or "").strip()
-            if role not in ("user", "assistant") or not content:
-                continue
-            cleaned.append({"role": role, "content": content})
-        if cleaned:
-            cleaned_histories.append(cleaned)
-    if not cleaned_histories:
-        return []
-    return max(cleaned_histories, key=len)[-MAX_CHAT_HISTORY_TURNS:]
+    if session_history:
+        return session_history[-MAX_CHAT_HISTORY_TURNS:]
+    cleaned: list[dict[str, str]] = []
+    for turn in client_history:
+        role = turn.get("role")
+        content = (turn.get("content") or "").strip()
+        if role != "user" or not content:
+            continue
+        cleaned.append({"role": role, "content": content})
+    return cleaned[-MAX_CHAT_HISTORY_TURNS:]
 
 
 # ---------------------------------------------------------------------------
