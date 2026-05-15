@@ -201,9 +201,13 @@ async def google_callback(
 
         logger.info("[callback] nonce verified successfully for user_id=%s", user_id)
 
-        # Consume the nonce (one-time use). Delete by nonce, not by user_id,
-        # so a successful callback doesn't cancel a parallel in-flight attempt.
-        await db.execute("DELETE FROM oauth_nonces WHERE nonce = $1", nonce)
+        # Consume the nonce (one-time use). Keyed on nonce so a successful
+        # callback doesn't cancel a parallel in-flight attempt; user_id is
+        # redundant (nonce is unique) but keeps the SQL safe-by-inspection.
+        await db.execute(
+            "DELETE FROM oauth_nonces WHERE nonce = $1 AND user_id = $2",
+            nonce, user_id,
+        )
 
         # Exchange code → tokens
         logger.info("[callback] exchanging code with Google (redirect_uri=%s)", settings.GOOGLE_REDIRECT_URI)
