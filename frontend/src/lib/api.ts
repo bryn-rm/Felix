@@ -111,7 +111,7 @@ async function request<T>(
     }
     inboxDebug("api:status", { path, status: res.status });
     const err = new ApiError(res.status, message);
-    if (res.status === 403) {
+    if (res.status === 403 && !options?.skipAuthRedirect) {
       markGoogleDisconnected();
     } else if (!options?.skipAuthRedirect) {
       redirectForAuthStatus(res.status);

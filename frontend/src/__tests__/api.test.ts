@@ -18,8 +18,14 @@ jest.mock("@/lib/supabase", () => ({
   },
 }));
 
+jest.mock("@/lib/google-connection-status", () => ({
+  clearGoogleDisconnected: jest.fn(),
+  markGoogleDisconnected: jest.fn(),
+}));
+
 import { supabase } from "@/lib/supabase";
 import { api, ApiError } from "@/lib/api";
+import { markGoogleDisconnected } from "@/lib/google-connection-status";
 
 const futureExpiry = () => Math.floor(Date.now() / 1000) + 3600;
 const expiredExpiry = () => Math.floor(Date.now() / 1000) - 60;
@@ -46,6 +52,7 @@ function makeResponse(status: number, body: unknown): Response {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  jest.clearAllMocks();
   mockGetSession.mockReset();
   mockRefreshSession.mockReset();
   mockGetSession.mockResolvedValue({
@@ -160,5 +167,23 @@ describe("api.get", () => {
 
     expect(caught).toBeInstanceOf(ApiError);
     expect((caught as ApiError).status).toBe(500);
+  });
+
+  it("marks Google disconnected on an ordinary 403 response", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: "Forbidden" }));
+
+    await expect(api.get("/google-protected")).rejects.toMatchObject({ status: 403 });
+
+    expect(markGoogleDisconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mark Google disconnected when auth redirects are skipped", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: "Admin access required" }));
+
+    await expect(
+      api.get("/admin/me", { skipAuthRedirect: true }),
+    ).rejects.toMatchObject({ status: 403 });
+
+    expect(markGoogleDisconnected).not.toHaveBeenCalled();
   });
 });

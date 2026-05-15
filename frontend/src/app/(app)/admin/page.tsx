@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Admin dashboard — only visible to the user whose email matches
- * NEXT_PUBLIC_ADMIN_EMAIL. All other users are redirected to /dashboard.
+ * Admin dashboard — visible only after the backend confirms admin access.
+ * All other users are redirected to /dashboard.
  *
  * Sections:
  *  1. AI Performance table   — GET /eval/feedback/summary
@@ -13,10 +13,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
-import { api } from "@/lib/api";
-
-const ADMIN_EMAIL = process.env.NEXT_PUBLIC_ADMIN_EMAIL ?? "";
+import { api, ApiError } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -121,13 +118,29 @@ export default function AdminPage() {
 
   // ── Auth check ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!ADMIN_EMAIL || session?.user?.email !== ADMIN_EMAIL) {
-        router.replace("/dashboard");
-      } else {
-        setAuthorized(true);
-      }
-    });
+    let cancelled = false;
+
+    api
+      .get<{ admin: boolean }>("/admin/me", { skipAuthRedirect: true })
+      .then(() => {
+        if (!cancelled) {
+          setAuthorized(true);
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setAuthorized(false);
+        setLoading(false);
+        if (err instanceof ApiError && err.status === 401) {
+          router.replace("/login");
+        } else {
+          router.replace("/dashboard");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   // ── Fetch data once authorised ─────────────────────────────────────────────
@@ -143,12 +156,17 @@ export default function AdminPage() {
         setParseErrors(pe ?? []);
         setPromptVersions(pv ?? []);
       })
-      .catch(() => {})
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 403) {
+          setAuthorized(false);
+          router.replace("/dashboard");
+        }
+      })
       .finally(() => setLoading(false));
-  }, [authorized]);
+  }, [authorized, router]);
 
-  // Still verifying session
-  if (authorized === null) return null;
+  // Still verifying access, or redirecting after denial.
+  if (authorized !== true) return null;
 
   // Feedback summary sorted by Wrong % descending (worst performers first)
   const feedbackRows = [...summary]

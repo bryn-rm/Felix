@@ -6,6 +6,7 @@ Endpoints (mounted at /eval):
   GET  /eval/feedback/summary   — aggregated stats per feature, last 7 days (admin only)
 
 Endpoints (mounted at /admin):
+  GET  /admin/me                — verify current user has admin access
   GET  /admin/parse-errors      — last 20 parse errors from ai_calls (admin only)
   GET  /admin/prompt-versions   — performance grouped by prompt_version + feature (admin only)
 
@@ -188,6 +189,18 @@ async def get_feedback_summary(
 # ---------------------------------------------------------------------------
 # /admin routes
 # ---------------------------------------------------------------------------
+
+
+@admin_router.get("/me")
+async def get_admin_me(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Lightweight admin authorization probe for the frontend.
+    Returns 200 only when the authenticated user matches ADMIN_EMAILS.
+    """
+    _require_admin(current_user)
+    return {"admin": True}
 
 
 @admin_router.get("/parse-errors")
