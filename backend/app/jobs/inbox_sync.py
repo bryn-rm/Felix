@@ -13,7 +13,6 @@ Pipeline for each new email:
   5. Update google_connections.last_sync
 """
 
-import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -24,6 +23,7 @@ from app.services import memory_service
 from app.services.ai_service import ai_service
 from app.services.gmail_service import GmailService
 from app.services.relationship_engine import relationship_engine
+from app.utils.background import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -123,13 +123,13 @@ async def sync_user_inbox(user_id: str) -> None:
     # Mirror Gmail "in:sent" so commitment detection + weekly stats see the
     # full picture, not just Felix-assisted drafts. Idempotent — dedupes on
     # (id, user_id) PK in sent_emails.
-    asyncio.create_task(_mirror_recent_sent(user_id, gmail, last_sync_at))
+    spawn(_mirror_recent_sent(user_id, gmail, last_sync_at), name="inbox_sent_mirror")
 
     # Catch-up sweep: any rows whose commitment scan failed previously will
     # have commitment_scanned_at IS NULL. Retry up to 20 of each per run; the
     # 7-day window stops permanently-bad rows from being retried forever.
-    asyncio.create_task(_catch_up_inbound_commitment_scans(user_id))
-    asyncio.create_task(_catch_up_sent_commitment_scans(user_id))
+    spawn(_catch_up_inbound_commitment_scans(user_id), name="commitment_catchup_inbound")
+    spawn(_catch_up_sent_commitment_scans(user_id), name="commitment_catchup_sent")
 
     await _touch_last_sync(user_id)
 
@@ -206,19 +206,19 @@ async def _process_email(
         #    Pass the full email dict so update_contact gets from_email, from_name,
         #    and received_at in one call.  (A second partial call was removed here
         #    because it caused total_emails to be incremented twice per email.)
-        asyncio.create_task(relationship_engine.update_contact(user_id, email))
+        spawn(relationship_engine.update_contact(user_id, email), name="relationship_update")
 
         # 7. Layer 3 — distil interesting emails into episodic memory
         #    (fire-and-forget). The distiller filters by importance, so routine
         #    automated / FYI traffic is silently dropped.
         if category in ("action_required", "vip"):
-            asyncio.create_task(_distil_email_episode(user_id, email, category))
+            spawn(_distil_email_episode(user_id, email, category), name="episode_distil")
 
         # 6. Phase 5 — auto-close any follow-ups that just got a reply.
         #    If this inbound email is part of a thread we were tracking, mark replied.
         if email.get("thread_id"):
             from app.services.follow_up_engine import follow_up_engine as _fu_engine
-            asyncio.create_task(_fu_engine.mark_replied(user_id, email["thread_id"]))
+            spawn(_fu_engine.mark_replied(user_id, email["thread_id"]), name="followup_mark_replied")
 
         # 8. Commitment Radar — extract promises in either direction from the
         #    inbound email. Skipped silently for automated/newsletter senders.

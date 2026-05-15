@@ -8,7 +8,6 @@ Endpoints:
   POST /briefing/{id}/listened   — mark a briefing as played
 """
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -18,6 +17,7 @@ from app import db
 from app.middleware.auth import get_current_user
 from app.services.briefing_service import briefing_service
 from app.services.timezone_utils import local_date_for_user
+from app.utils.background import spawn
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -97,7 +97,7 @@ async def trigger_briefing(current_user: dict = Depends(get_current_user)):
         except Exception:
             logger.exception("Manual briefing generation failed for user %s", user_id)
 
-    asyncio.create_task(_run())
+    spawn(_run(), name="briefing_manual")
 
     return {
         "status": "generating",

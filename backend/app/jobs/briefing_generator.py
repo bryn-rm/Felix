@@ -1,8 +1,9 @@
 """
 Morning briefing generation job — Phase 4.
 
-Called by the scheduler via asyncio.create_task() when a user's configured
-briefing time arrives. Must never raise — exceptions are caught and logged.
+Called by the scheduler via the background.spawn() helper when a user's
+configured briefing time arrives. Must never raise — exceptions are caught
+and logged.
 """
 
 import logging

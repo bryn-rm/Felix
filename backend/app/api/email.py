@@ -17,7 +17,6 @@ Endpoints:
   DELETE /emails/{id}/draft           — discard draft
 """
 
-import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -32,6 +31,7 @@ from app.middleware.rate_limit import check_monthly_ai_budget, limiter
 from app.services.ai_service import ai_service
 from app.services.follow_up_engine import follow_up_engine as _fu_engine
 from app.services.gmail_service import GmailService
+from app.utils.background import spawn
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -552,8 +552,9 @@ async def send_email(
         "to_email":  email.get("from_email") or "",
         "received_at": sent_at,   # use the actual send time for deadline calculations
     }
-    asyncio.create_task(
-        _fu_engine.process_sent_email(current_user["id"], _sent_email_dict)
+    spawn(
+        _fu_engine.process_sent_email(current_user["id"], _sent_email_dict),
+        name="followup_detection_sent",
     )
 
     return {"sent": True, "gmail_message_id": result.get("id")}

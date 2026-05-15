@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import settings as _settings
+from app.utils.background import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,10 @@ async def touch_session(
         current_session_id = existing["session_id"]
 
     if stale_session is not None:
-        asyncio.create_task(_finalise_session(user_id, stale_session, reason="idle-timeout"))
+        spawn(
+            _finalise_session(user_id, stale_session, reason="idle-timeout"),
+            name="session_finalise_idle",
+        )
 
     return current_session_id
 
@@ -192,7 +196,7 @@ async def _finalise_session(user_id: str, session: dict[str, Any], *, reason: st
     if summary_text and open_items:
         try:
             from app.services import memory_service
-            asyncio.create_task(
+            spawn(
                 memory_service.distil_and_store_episode(
                     user_id=user_id,
                     episode_type="chat",
@@ -203,7 +207,8 @@ async def _finalise_session(user_id: str, session: dict[str, Any], *, reason: st
                     source_id=session.get("session_id"),
                     occurred_at=_now(),
                     min_importance=0.4,
-                )
+                ),
+                name="session_episode_distil",
             )
         except Exception:
             logger.debug("session → episode promotion failed", exc_info=True)

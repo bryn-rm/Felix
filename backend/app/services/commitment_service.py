@@ -24,7 +24,6 @@ Resolution is manual in v1 via `resolve(user_id, commitment_id, status)`.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -32,6 +31,7 @@ from typing import Any
 from app import db
 from app.services import memory_service
 from app.services.ai_service import ai_service
+from app.utils.background import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -222,13 +222,13 @@ class CommitmentService:
 
         # Fan-out (best-effort): denormalise to contacts and memory.
         if confidence >= SURFACE_CONFIDENCE_FLOOR:
-            asyncio.create_task(_denormalise_to_contact(
+            spawn(_denormalise_to_contact(
                 user_id=user_id,
                 counterparty_email=counterparty_email,
                 direction=item["direction"],
                 text=text,
-            ))
-            asyncio.create_task(_write_commitment_episode(
+            ), name="commitment_denormalise")
+            spawn(_write_commitment_episode(
                 user_id=user_id,
                 counterparty_email=counterparty_email,
                 counterparty_name=counterparty_name,
@@ -236,7 +236,7 @@ class CommitmentService:
                 text=text,
                 deadline=deadline,
                 source_email_id=source_email_id,
-            ))
+            ), name="commitment_episode")
 
         return row
 
@@ -281,12 +281,12 @@ class CommitmentService:
             commitment_id, user_id, status,
         )
         if row:
-            asyncio.create_task(_remove_from_contact_denorm(
+            spawn(_remove_from_contact_denorm(
                 user_id=user_id,
                 counterparty_email=row.get("counterparty_email") or "",
                 direction=row.get("direction") or "",
                 text=row.get("text") or "",
-            ))
+            ), name="commitment_denormalise_remove")
         return row
 
 

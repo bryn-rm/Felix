@@ -16,6 +16,7 @@ from app.services.timezone_utils import local_date_for_user
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app import db
+from app.utils.background import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,7 @@ async def _maybe_generate_briefing(user: dict) -> None:
             local_today,
         )
         if not already_done:
-            asyncio.create_task(_generate_briefing_for_user(user["user_id"]))
+            spawn(_generate_briefing_for_user(user["user_id"]), name="briefing_generate")
 
 
 async def _generate_briefing_for_user(user_id: str) -> None:
@@ -258,7 +259,7 @@ async def _maybe_send_digest(user: dict) -> None:
         "Digest time reached for user %s at %s (local: %s)",
         user["user_id"], rounded_hhmm, current_hhmm,
     )
-    asyncio.create_task(_send_digest_for_user(user["user_id"]))
+    spawn(_send_digest_for_user(user["user_id"]), name="digest_send")
 
 
 async def _send_digest_for_user(user_id: str) -> None:
@@ -386,21 +387,21 @@ async def _generate_meeting_preps_for_user(user_id: str) -> None:
                     and existing.get("content_html")
                 )
                 if can_retry:
-                    asyncio.create_task(_send_meeting_prep_email(user_id, {
+                    spawn(_send_meeting_prep_email(user_id, {
                         "event_id":    event["id"],
                         "subject":     _subject_for(
                             existing.get("event_title"), existing.get("event_start"),
                         ),
                         "html":        existing.get("content_html"),
                         "text":        existing.get("content_text") or "",
-                    }))
+                    }), name="meeting_prep_email_retry")
                 continue  # don't regenerate — cached row is still authoritative
 
             prep = await meeting_prep_service.generate_for_event(user_id, event)
 
             # Optional email push — controlled by per-user setting
             if mode in ("email_only", "both"):
-                asyncio.create_task(_send_meeting_prep_email(user_id, prep))
+                spawn(_send_meeting_prep_email(user_id, prep), name="meeting_prep_email")
     except Exception:
         logger.exception("Failed to generate meeting preps for user %s", user_id)
 
