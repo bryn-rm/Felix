@@ -151,7 +151,7 @@ export function useDraft(emailId: string): UseDraftReturn {
       setError(err instanceof Error ? err.message : "Failed to discard draft.");
       setState("error");
     }
-  }, [draft]);
+  }, [draft, emailId]);
 
   return { draft, draftText, state, error, send, discard };
 }
