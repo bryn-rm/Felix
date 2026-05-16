@@ -127,7 +127,9 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
     Returns the authenticated user dict on success.
     Raises HTTP 401 on any failure.
     """
-    token = authorization.removeprefix("Bearer ").strip()
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing auth token")
+    token = authorization[7:].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Missing auth token")
 
