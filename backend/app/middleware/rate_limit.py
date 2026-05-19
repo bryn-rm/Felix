@@ -13,6 +13,7 @@ from slowapi.util import get_remote_address
 
 from app import db
 from app.config import settings
+from app.errors import error_envelope
 
 
 def _get_user_id_from_request(request: Request) -> str:
@@ -52,7 +53,7 @@ def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
     """
     return JSONResponse(
         status_code=429,
-        content={"detail": "Rate limit exceeded. Please slow down."},
+        content=error_envelope(429, "Rate limit exceeded. Please slow down."),
     )
 
 

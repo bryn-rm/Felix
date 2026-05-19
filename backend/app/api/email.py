@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app import db
+from app.errors import error_envelope
 from app.middleware.auth import get_current_user, get_google_credentials
 from app.middleware.rate_limit import check_monthly_ai_budget, limiter
 from app.services.ai_service import ai_service
@@ -415,7 +416,7 @@ async def generate_draft(
                 yield f"data: {json.dumps({'chunk': chunk})}\n\n"
         except Exception:
             logger.exception("Draft streaming failed for email %s", email_id)
-            yield f"data: {json.dumps({'error': 'Draft generation failed'})}\n\n"
+            yield f"data: {json.dumps(error_envelope(500, 'Draft generation failed'))}\n\n"
             return
 
         # Atomic upsert — avoids TOCTOU race if background sync generates a

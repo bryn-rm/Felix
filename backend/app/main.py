@@ -11,14 +11,18 @@ via Depends(get_current_user). The only exception is the health check.
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import db
 from app.api import auth, briefing, calendar, commitments, contacts, email, follow_ups, meetings, memory, polish, settings, templates, voice
 from app.api.eval import router as eval_router, admin_router
 from app.config import settings as app_settings
+from app.errors import error_envelope
 from app.jobs.scheduler import scheduler
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 
@@ -68,6 +72,64 @@ app = FastAPI(
 # Rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+
+# ---------------------------------------------------------------------------
+# Unified error envelope: every non-2xx response is {"code", "message"}.
+# Without these handlers we'd ship four shapes side-by-side:
+#   - HTTPException        → {"detail": "..."}
+#   - RequestValidationError → {"detail": [{loc, msg, ...}, ...]}
+#   - SlowAPI 429          → {"detail": "Rate limit..."}
+#   - bare 500             → {"detail": "Internal Server Error"}
+# which forces every consumer to special-case the body shape.
+# ---------------------------------------------------------------------------
+
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    detail = exc.detail
+    # exc.detail can be any JSON-serialisable value; coerce to a single string.
+    if isinstance(detail, str):
+        message = detail
+    elif detail is None:
+        message = "Error"
+    else:
+        message = str(detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_envelope(exc.status_code, message),
+        headers=getattr(exc, "headers", None),
+    )
+
+
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    errors = exc.errors()
+    if errors:
+        first = errors[0]
+        loc = ".".join(str(p) for p in first.get("loc", []) if p != "body") or "body"
+        message = f"{loc}: {first.get('msg', 'Invalid value')}"
+    else:
+        message = "Invalid request"
+    return JSONResponse(
+        status_code=422,
+        content=error_envelope(422, message, code="validation_error"),
+    )
+
+
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Catches anything not already matched (DB outages, KeyError, asyncio bugs…).
+    # Log with traceback for debugging; return a generic envelope so we don't
+    # leak internals (connection strings, file paths) to the client.
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content=error_envelope(500, "Internal server error"),
+    )
+
+
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 # CORS — only allow the configured frontend origin in production
 _frontend_origin = app_settings.FRONTEND_URL.rstrip("/")
