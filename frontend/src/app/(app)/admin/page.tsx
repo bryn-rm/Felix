@@ -11,7 +11,7 @@
  *  4. User Feedback summary  — derived from /eval/feedback/summary, worst-first
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
 
@@ -61,6 +61,27 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       {children}
     </div>
   );
+}
+
+function ErrorPanel({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return (
+    <div className="flex items-center justify-between rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+      <span className="truncate">Failed to load: {error}</span>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="ml-3 shrink-0 rounded bg-red-500/20 px-2 py-1 text-xs font-semibold text-red-200 hover:bg-red-500/30"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) return `${err.status} ${err.message}`;
+  if (err instanceof Error) return err.message;
+  return "Unknown error";
 }
 
 function Th({ children }: { children: React.ReactNode }) {
@@ -116,6 +137,10 @@ export default function AdminPage() {
   const [parseErrors, setParseErrors] = useState<ParseError[]>([]);
   const [promptVersions, setPromptVersions] = useState<PromptVersionRow[]>([]);
 
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [parseErrorsError, setParseErrorsError] = useState<string | null>(null);
+  const [promptVersionsError, setPromptVersionsError] = useState<string | null>(null);
+
   // ── Auth check ─────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -143,27 +168,58 @@ export default function AdminPage() {
     };
   }, [router]);
 
-  // ── Fetch data once authorised ─────────────────────────────────────────────
+  // ── Per-endpoint loaders ──────────────────────────────────────────────────
+  // Each loader owns its own data + error state, so one failing endpoint
+  // doesn't blank the other sections. A 403 on any endpoint means admin
+  // access was revoked mid-session → redirect.
+  const handleAdminRevoked = useCallback(
+    (err: unknown): boolean => {
+      if (err instanceof ApiError && err.status === 403) {
+        setAuthorized(false);
+        router.replace("/dashboard");
+        return true;
+      }
+      return false;
+    },
+    [router],
+  );
+
+  const loadSummary = useCallback(async () => {
+    setSummaryError(null);
+    try {
+      const s = await api.get<SummaryRow[]>("/eval/feedback/summary");
+      setSummary(s ?? []);
+    } catch (err) {
+      if (!handleAdminRevoked(err)) setSummaryError(errorMessage(err));
+    }
+  }, [handleAdminRevoked]);
+
+  const loadParseErrors = useCallback(async () => {
+    setParseErrorsError(null);
+    try {
+      const pe = await api.get<ParseError[]>("/admin/parse-errors");
+      setParseErrors(pe ?? []);
+    } catch (err) {
+      if (!handleAdminRevoked(err)) setParseErrorsError(errorMessage(err));
+    }
+  }, [handleAdminRevoked]);
+
+  const loadPromptVersions = useCallback(async () => {
+    setPromptVersionsError(null);
+    try {
+      const pv = await api.get<PromptVersionRow[]>("/admin/prompt-versions");
+      setPromptVersions(pv ?? []);
+    } catch (err) {
+      if (!handleAdminRevoked(err)) setPromptVersionsError(errorMessage(err));
+    }
+  }, [handleAdminRevoked]);
+
   useEffect(() => {
     if (!authorized) return;
-    Promise.all([
-      api.get<SummaryRow[]>("/eval/feedback/summary"),
-      api.get<ParseError[]>("/admin/parse-errors"),
-      api.get<PromptVersionRow[]>("/admin/prompt-versions"),
-    ])
-      .then(([s, pe, pv]) => {
-        setSummary(s ?? []);
-        setParseErrors(pe ?? []);
-        setPromptVersions(pv ?? []);
-      })
-      .catch((err: unknown) => {
-        if (err instanceof ApiError && err.status === 403) {
-          setAuthorized(false);
-          router.replace("/dashboard");
-        }
-      })
-      .finally(() => setLoading(false));
-  }, [authorized, router]);
+    Promise.allSettled([loadSummary(), loadParseErrors(), loadPromptVersions()]).finally(
+      () => setLoading(false),
+    );
+  }, [authorized, loadSummary, loadParseErrors, loadPromptVersions]);
 
   // Still verifying access, or redirecting after denial.
   if (authorized !== true) return null;
@@ -195,6 +251,11 @@ export default function AdminPage() {
         <>
           {/* ── 1. AI Performance ─────────────────────────────────────────── */}
           <Section title="AI Performance — last 7 days">
+            {summaryError && (
+              <div className="mb-3">
+                <ErrorPanel error={summaryError} onRetry={loadSummary} />
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
@@ -239,6 +300,11 @@ export default function AdminPage() {
 
           {/* ── 2. Parse Error Log ────────────────────────────────────────── */}
           <Section title="Parse Error Log — latest 20">
+            {parseErrorsError && (
+              <div className="mb-3">
+                <ErrorPanel error={parseErrorsError} onRetry={loadParseErrors} />
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
@@ -277,6 +343,11 @@ export default function AdminPage() {
 
           {/* ── 3. Prompt Versions ────────────────────────────────────────── */}
           <Section title="Prompt Version Performance">
+            {promptVersionsError && (
+              <div className="mb-3">
+                <ErrorPanel error={promptVersionsError} onRetry={loadPromptVersions} />
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
@@ -314,7 +385,13 @@ export default function AdminPage() {
           </Section>
 
           {/* ── 4. User Feedback Summary ──────────────────────────────────── */}
+          {/* Derived from /eval/feedback/summary — surface its error here too. */}
           <Section title="User Feedback Summary — worst performers first">
+            {summaryError && (
+              <div className="mb-3">
+                <ErrorPanel error={summaryError} onRetry={loadSummary} />
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
