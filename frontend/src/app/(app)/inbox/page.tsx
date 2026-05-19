@@ -1,9 +1,12 @@
 "use client";
 
 import { useState } from "react";
+import useSWR from "swr";
 import { Search } from "lucide-react";
 import { EmailList } from "@/components/inbox/EmailList";
-import { useEmails } from "@/hooks/useEmails";
+import { api } from "@/lib/api";
+import { useSessionReady } from "@/hooks/useSessionReady";
+import { authAwareRetry } from "@/lib/swr-auth-retry";
 
 // ---------------------------------------------------------------------------
 // Tab definitions
@@ -19,10 +22,25 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]["key"];
 
-// Lightweight hook just to get the count for each tab badge
+interface EmailStats {
+  by_category: Record<string, number>;
+  pending_drafts: number;
+}
+
+// Shared SWR call — every TabButton mounts with the same key, so SWR
+// dedupes into a single stats request for the whole tab bar. Keep the
+// archived filter aligned with EmailList/useEmails defaults.
 function useTabCount(category: string) {
-  const { total } = useEmails({ category, limit: 1 });
-  return total;
+  const ready = useSessionReady();
+  const { data } = useSWR<EmailStats>(
+    ready ? "/emails/stats?include_archived=false" : null,
+    (url: string) => api.get<EmailStats>(url, { skipAuthRedirect: true }),
+    {
+      refreshInterval: 2 * 60 * 1000,
+      onErrorRetry: authAwareRetry,
+    },
+  );
+  return data?.by_category?.[category] ?? 0;
 }
 
 function TabButton({

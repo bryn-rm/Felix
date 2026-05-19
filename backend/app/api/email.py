@@ -154,15 +154,22 @@ async def list_emails_trailing_slash(
 # ---------------------------------------------------------------------------
 
 @router.get("/stats")
-async def email_stats(current_user: dict = Depends(get_current_user)):
+async def email_stats(
+    include_archived: bool = Query(False, description="Include archived emails in the counts"),
+    current_user: dict = Depends(get_current_user),
+):
     """
     Return email counts per category. Used by the dashboard widgets.
     """
+    conditions = ["user_id = $1"]
+    if not include_archived:
+        conditions.append("archived = FALSE")
+
     rows = await db.query(
-        """
+        f"""
         SELECT category, COUNT(*) AS count
         FROM emails
-        WHERE user_id = $1
+        WHERE {" AND ".join(conditions)}
         GROUP BY category
         """,
         current_user["id"],

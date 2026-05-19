@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import useSWR from "swr";
 import Link from "next/link";
 import {
   Mic,
@@ -607,9 +608,18 @@ export default function HomePage() {
   const [meetingsToday, setMeetingsToday] = useState<number | null>(null);
   const [displayName, setDisplayName] = useState<string>("");
 
-  // Briefing data
-  const [briefing, setBriefing] = useState<Briefing | null>(null);
-  const [briefingLoaded, setBriefingLoaded] = useState(false);
+  // Briefing data — shared SWR key so dashboard + /briefing dedupe and a
+  // mutate here invalidates the other consumers.
+  const {
+    data: briefingData,
+    isLoading: briefingLoading,
+    mutate: mutateBriefing,
+  } = useSWR<{ briefing: Briefing | null }>(
+    "/briefing/today",
+    (url: string) => api.get<{ briefing: Briefing | null }>(url),
+  );
+  const briefing = briefingData?.briefing ?? null;
+  const briefingLoaded = !briefingLoading;
 
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -627,20 +637,8 @@ export default function HomePage() {
   const voice = useVoiceContext();
   const micActiveRef = useRef(false);
 
-  const refreshBriefing = useCallback(async () => {
-    try {
-      const res = await api.get<{ briefing: Briefing | null }>(
-        "/briefing/today",
-      );
-      setBriefing(res.briefing);
-    } catch {
-      setBriefing(null);
-    } finally {
-      setBriefingLoaded(true);
-    }
-  }, []);
-
-  // Boot — fetch settings + counts + calendar in parallel
+  // Boot — fetch settings + counts + calendar in parallel.
+  // Briefing is handled by SWR above so it shares cache across pages.
   useEffect(() => {
     let cancelled = false;
     async function boot() {
@@ -648,7 +646,6 @@ export default function HomePage() {
         api.get<Settings>("/settings"),
         api.get<CountsResponse>("/emails/counts"),
         api.get<CalendarTodayResponse>("/calendar/today"),
-        api.get<{ briefing: Briefing | null }>("/briefing/today"),
       ]);
       if (cancelled) return;
 
@@ -663,10 +660,6 @@ export default function HomePage() {
       if (settled[2].status === "fulfilled") {
         setMeetingsToday(settled[2].value.events?.length ?? 0);
       }
-      if (settled[3].status === "fulfilled") {
-        setBriefing(settled[3].value.briefing);
-      }
-      setBriefingLoaded(true);
       setBootLoading(false);
     }
     boot();
@@ -801,7 +794,7 @@ export default function HomePage() {
 
       {/* Section B — briefing card */}
       <div className="mt-5">
-        <BriefingCard briefing={briefing} onMutate={refreshBriefing} />
+        <BriefingCard briefing={briefing} onMutate={async () => { await mutateBriefing(); }} />
       </div>
 
       {/* Section B.5 — next-up meeting prep (only when one is on the horizon) */}

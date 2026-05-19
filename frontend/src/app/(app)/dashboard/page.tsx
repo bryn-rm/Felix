@@ -99,8 +99,8 @@ function Widget({
 
 function MorningBriefingCard() {
   const { data: briefingData, isLoading } = useSWR<{ briefing: Briefing | null }>(
-    "briefing-today",
-    () => api.get<{ briefing: Briefing | null }>("/briefing/today"),
+    "/briefing/today",
+    (url: string) => api.get<{ briefing: Briefing | null }>(url),
     { refreshInterval: 5 * 60 * 1000 },
   );
   const briefing = briefingData?.briefing;
