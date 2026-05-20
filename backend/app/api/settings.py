@@ -28,6 +28,18 @@ router = APIRouter()
 _DIGEST_TIME_RE = re.compile(r"^([01]\d|2[0-3]):(00|30)$")
 _BRIEFING_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_MEETING_PREP_MODES = {"off", "email_only", "in_app_only", "both"}
+
+# Columns in `settings` that are nullable in the DB schema — only these may
+# be cleared by sending an explicit null in PATCH /settings. For every other
+# field a null is dropped, matching the long-standing "null means don't update"
+# contract and avoiding 500s on NOT NULL columns (timezone, briefing_time, …).
+_NULLABLE_SETTINGS_FIELDS = {
+    "display_name",
+    "style_profile",
+    "energy_profile",
+    "felix_voice_id",
+}
 
 
 def _parse_time(value: str) -> time:
@@ -43,6 +55,7 @@ class SettingsUpdate(BaseModel):
     digest_times: list[str] | None = None
     energy_profile: dict | None = None
     felix_voice_id: str | None = None
+    meeting_prep_mode: str | None = None  # off | email_only | in_app_only | both
 
     @field_validator("timezone")
     @classmethod
@@ -50,6 +63,16 @@ class SettingsUpdate(BaseModel):
         if v is not None and v not in pytz.all_timezones:
             raise ValueError(
                 f"Unknown timezone '{v}'. Use a valid IANA timezone name (e.g. 'Europe/London')."
+            )
+        return v
+
+    @field_validator("meeting_prep_mode")
+    @classmethod
+    def validate_meeting_prep_mode(cls, v: str | None) -> str | None:
+        if v is not None and v not in _MEETING_PREP_MODES:
+            raise ValueError(
+                f"Invalid meeting_prep_mode '{v}'. Must be one of "
+                f"{sorted(_MEETING_PREP_MODES)}."
             )
         return v
 
@@ -118,11 +141,19 @@ async def update_settings(
     current_user: dict = Depends(get_current_user),
 ):
     """Partially update user settings."""
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    # exclude_unset → only the keys the client sent, so an explicit
+    # {"felix_voice_id": null} can clear an override. We then drop nulls for
+    # NOT NULL columns to preserve the older "null means don't update" contract
+    # (otherwise a bad client payload like {"timezone": null} would 500).
+    sent = body.model_dump(exclude_unset=True)
+    updates = {
+        k: v for k, v in sent.items()
+        if v is not None or k in _NULLABLE_SETTINGS_FIELDS
+    }
     if not updates:
         return {"updated": False}
 
-    if "briefing_time" in updates:
+    if "briefing_time" in updates and updates["briefing_time"] is not None:
         updates["briefing_time"] = _parse_time(updates["briefing_time"])
 
     updates["user_id"] = current_user["id"]

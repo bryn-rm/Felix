@@ -19,7 +19,12 @@ import {
 import { api, ApiError } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
 import { clearAllSWR } from "@/components/auth/AuthSync";
-import type { Settings } from "@/lib/types";
+import type {
+  Settings,
+  MeetingPrepMode,
+  EnergyProfile,
+  StyleProfile,
+} from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -241,20 +246,65 @@ function Field({
 }
 
 // ---------------------------------------------------------------------------
-// Style profile types
+// Meeting-prep mode options
 // ---------------------------------------------------------------------------
 
-interface StyleProfile {
-  last_analyzed?: string;
-  formality_score?: number;
-  avg_word_count?: number;
-  common_greetings?: string[];
-  common_sign_offs?: string[];
-}
+// Felix voice options for the dropdown. Add ElevenLabs voice ids here as
+// `{ id, label }` pairs; the empty-id entry means "use the system default".
+const VOICE_OPTIONS: { id: string; label: string }[] = [
+  { id: "", label: "System default" },
+  // TODO: add ElevenLabs voice options here, e.g.
+  // { id: "21m00Tcm4TlvDq8ikWAM", label: "Rachel" },
+];
+
+const MEETING_PREP_MODES: { value: MeetingPrepMode; label: string; hint: string }[] = [
+  { value: "in_app_only", label: "In-app only", hint: "Show prep cards in Felix; no emails." },
+  { value: "email_only", label: "Email only", hint: "Send prep emails; nothing in-app." },
+  { value: "both", label: "Both", hint: "Email and in-app card." },
+  { value: "off", label: "Off", hint: "Disable meeting prep." },
+];
 
 interface GoogleStatus {
   connected: boolean;
   google_email?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Energy-profile helpers (HH:MM-HH:MM windows, comma-separated)
+// ---------------------------------------------------------------------------
+
+const WINDOW_RE = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
+
+function windowsToString(windows: string[] | undefined): string {
+  return (windows ?? []).join(", ");
+}
+
+// Convert "HH:MM" to minutes-since-midnight for ordering checks.
+function hhmmToMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function parseWindows(raw: string): { ok: true; value: string[] } | { ok: false; error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: true, value: [] };
+  const parts = trimmed.split(",").map((p) => p.trim()).filter(Boolean);
+  for (const p of parts) {
+    if (!WINDOW_RE.test(p)) {
+      return { ok: false, error: `Invalid window "${p}". Use HH:MM-HH:MM (e.g. 09:00-12:00).` };
+    }
+    // Windows are same-day intervals on the backend; reject zero-length or
+    // wraparound ranges so /free-slots and focus-block creation get usable
+    // bounds instead of silently producing nothing.
+    const [start, end] = p.split("-");
+    if (hhmmToMinutes(end) <= hhmmToMinutes(start)) {
+      return {
+        ok: false,
+        error: `Window "${p}" must end after it starts (same day).`,
+      };
+    }
+  }
+  return { ok: true, value: parts };
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +359,15 @@ export default function SettingsPage() {
   const [vipInput, setVipInput] = useState("");
   const [vipError, setVipError] = useState<string | null>(null);
 
+  const [meetingPrepMode, setMeetingPrepMode] =
+    useState<MeetingPrepMode>("in_app_only");
+
+  const [deepWorkInput, setDeepWorkInput] = useState("");
+  const [meetingsInput, setMeetingsInput] = useState("");
+  const [energyError, setEnergyError] = useState<string | null>(null);
+
+  const [felixVoiceId, setFelixVoiceId] = useState("");
+
   // Analyse-style state
   const [analysing, setAnalysing] = useState(false);
   const [analyseMessage, setAnalyseMessage] = useState(
@@ -322,6 +381,9 @@ export default function SettingsPage() {
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [savingVip, setSavingVip] = useState(false);
+  const [savingMeetingPrep, setSavingMeetingPrep] = useState(false);
+  const [savingEnergy, setSavingEnergy] = useState(false);
+  const [savingVoice, setSavingVoice] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
 
   // Initialize from fetched settings
@@ -334,6 +396,10 @@ export default function SettingsPage() {
       setDigestMode(settings.digest_mode);
       setDigestTimes(settings.digest_times);
       setVipContacts(settings.vip_contacts);
+      setMeetingPrepMode(settings.meeting_prep_mode ?? "in_app_only");
+      setDeepWorkInput(windowsToString(settings.energy_profile?.deep_work));
+      setMeetingsInput(windowsToString(settings.energy_profile?.meetings));
+      setFelixVoiceId(settings.felix_voice_id ?? "");
     }
   }, [settings]);
 
@@ -393,6 +459,37 @@ export default function SettingsPage() {
   function toggleDigestTime(t: string) {
     setDigestTimes((prev) =>
       prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
+    );
+  }
+
+  function saveMeetingPrepMode(mode: MeetingPrepMode) {
+    setMeetingPrepMode(mode);
+    patchSettings({ meeting_prep_mode: mode }, setSavingMeetingPrep);
+  }
+
+  function saveEnergyProfile() {
+    const dw = parseWindows(deepWorkInput);
+    const mt = parseWindows(meetingsInput);
+    if (!dw.ok) {
+      setEnergyError(dw.error);
+      return;
+    }
+    if (!mt.ok) {
+      setEnergyError(mt.error);
+      return;
+    }
+    setEnergyError(null);
+    const profile: EnergyProfile =
+      dw.value.length === 0 && mt.value.length === 0
+        ? {}
+        : { deep_work: dw.value, meetings: mt.value };
+    patchSettings({ energy_profile: profile }, setSavingEnergy);
+  }
+
+  function saveFelixVoiceId() {
+    patchSettings(
+      { felix_voice_id: felixVoiceId.trim() || null },
+      setSavingVoice,
     );
   }
 
@@ -489,7 +586,7 @@ export default function SettingsPage() {
   }
 
   // ---- Style profile data ----
-  const styleProfile = settings?.style_profile as StyleProfile | null;
+  const styleProfile: StyleProfile | null = settings?.style_profile ?? null;
 
   // ---- Render ----
 
@@ -636,6 +733,99 @@ export default function SettingsPage() {
                 <Save className="h-3.5 w-3.5" />
               )}
               {savingSchedule ? "Saving…" : "Save schedule"}
+            </button>
+          </div>
+        </Section>
+
+        <Divider />
+
+        {/* ================================================================
+            Meeting Prep
+        ================================================================ */}
+        <Section title="Meeting Prep">
+          <p className="text-xs text-slate-500">
+            Where Felix delivers pre-meeting prep cards.
+          </p>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {MEETING_PREP_MODES.map((opt) => {
+              const active = meetingPrepMode === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  onClick={() => saveMeetingPrepMode(opt.value)}
+                  disabled={savingMeetingPrep}
+                  className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors disabled:opacity-50 ${
+                    active
+                      ? "border-indigo-500 bg-indigo-600/20 text-indigo-200"
+                      : "border-slate-600 bg-slate-800/40 text-slate-300 hover:border-slate-500"
+                  }`}
+                >
+                  <p className="font-medium">{opt.label}</p>
+                  <p className="text-xs text-slate-500">{opt.hint}</p>
+                </button>
+              );
+            })}
+          </div>
+        </Section>
+
+        <Divider />
+
+        {/* ================================================================
+            Energy Profile
+        ================================================================ */}
+        <Section title="Energy Profile">
+          <p className="text-xs text-slate-500">
+            Tells Felix when to protect focus time and when to suggest
+            meetings. Use <code className="text-slate-400">HH:MM-HH:MM</code>,
+            comma-separated.
+          </p>
+
+          <Field
+            label="Deep work windows"
+            hint="Excluded from /free-slots; used to suggest focus blocks."
+          >
+            <input
+              value={deepWorkInput}
+              onChange={(e) => {
+                setDeepWorkInput(e.target.value);
+                setEnergyError(null);
+              }}
+              placeholder="09:00-12:00, 14:00-15:30"
+              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
+            />
+          </Field>
+
+          <Field
+            label="Meeting windows"
+            hint="When Felix is allowed to propose meetings (defaults to 09:00-18:00)."
+          >
+            <input
+              value={meetingsInput}
+              onChange={(e) => {
+                setMeetingsInput(e.target.value);
+                setEnergyError(null);
+              }}
+              placeholder="13:00-17:00"
+              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
+            />
+          </Field>
+
+          {energyError && (
+            <p className="text-xs text-red-400">{energyError}</p>
+          )}
+
+          <div className="flex justify-end">
+            <button
+              onClick={saveEnergyProfile}
+              disabled={savingEnergy}
+              className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {savingEnergy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Save className="h-3.5 w-3.5" />
+              )}
+              {savingEnergy ? "Saving…" : "Save energy profile"}
             </button>
           </div>
         </Section>
@@ -875,6 +1065,59 @@ export default function SettingsPage() {
             )}
             {analysing ? analyseMessage : "Re-analyse my writing style"}
           </button>
+        </Section>
+
+        <Divider />
+
+        {/* ================================================================
+            Voice
+        ================================================================ */}
+        <Section title="Voice">
+          <p className="text-xs text-slate-500">
+            Override the ElevenLabs voice used for briefings and the voice
+            assistant.
+          </p>
+          <Field
+            label="Felix voice"
+            hint="Pick a voice or fall back to the system default."
+          >
+            {/*
+              The dropdown surfaces any value the backend has set — including
+              ids that are no longer in VOICE_OPTIONS — so users don't silently
+              lose a previously-saved choice when the list changes.
+            */}
+            <select
+              value={felixVoiceId}
+              onChange={(e) => setFelixVoiceId(e.target.value)}
+              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none"
+            >
+              {VOICE_OPTIONS.map((v) => (
+                <option key={v.id || "default"} value={v.id}>
+                  {v.label}
+                </option>
+              ))}
+              {felixVoiceId &&
+                !VOICE_OPTIONS.some((v) => v.id === felixVoiceId) && (
+                  <option value={felixVoiceId}>
+                    Current ({felixVoiceId})
+                  </option>
+                )}
+            </select>
+          </Field>
+          <div className="flex justify-end">
+            <button
+              onClick={saveFelixVoiceId}
+              disabled={savingVoice}
+              className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {savingVoice ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Save className="h-3.5 w-3.5" />
+              )}
+              {savingVoice ? "Saving…" : "Save voice"}
+            </button>
+          </div>
         </Section>
 
         <Divider />

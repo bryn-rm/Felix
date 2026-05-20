@@ -271,12 +271,14 @@ class MeetingPrepService:
         Generates on-demand if the next meeting is within 60 minutes and no
         cached row exists yet.
         """
-        # Honor the per-user opt-out before any DB / calendar / Sonnet work.
-        # Mirrors the scheduler check in jobs/scheduler.py:_generate_meeting_preps_for_user.
+        # Honor the per-user delivery surface before any DB / calendar / Sonnet work.
+        # `off` disables prep entirely; `email_only` opts out of the in-app card
+        # (the scheduler still emails it). Mirrors jobs/scheduler.py.
         mode_row = await db.query_one(
             "SELECT meeting_prep_mode FROM settings WHERE user_id = $1", user_id,
         ) or {}
-        if (mode_row.get("meeting_prep_mode") or "in_app_only") == "off":
+        mode = mode_row.get("meeting_prep_mode") or "in_app_only"
+        if mode in ("off", "email_only"):
             return None
 
         try:

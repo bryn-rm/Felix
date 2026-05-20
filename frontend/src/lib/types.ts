@@ -80,6 +80,22 @@ export interface Briefing {
   listened_at: string | null;
 }
 
+export type MeetingPrepMode = "off" | "email_only" | "in_app_only" | "both";
+
+export interface EnergyProfile {
+  deep_work?: string[]; // e.g. ["09:00-12:00"]
+  meetings?: string[];  // e.g. ["14:00-17:00"]
+}
+
+export interface StyleProfile {
+  last_analyzed?: string;
+  formality_score?: number;
+  avg_word_count?: number;
+  common_greetings?: string[];
+  common_sign_offs?: string[];
+  [key: string]: unknown;
+}
+
 export interface Settings {
   display_name: string | null;
   timezone: string;
@@ -87,7 +103,10 @@ export interface Settings {
   digest_mode: boolean;
   digest_times: string[];
   vip_contacts: string[];
-  style_profile: Record<string, unknown> | null;
+  style_profile: StyleProfile | null;
+  meeting_prep_mode: MeetingPrepMode;
+  energy_profile: EnergyProfile | null;
+  felix_voice_id: string | null;
 }
 
 export type TemplateCategory = "reply" | "outreach" | "follow_up" | "other";
