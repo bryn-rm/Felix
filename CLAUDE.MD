@@ -1,7 +1,5 @@
 # Felix — AI Email & Calendar Chief of Staff
 
-Full detailed plan is in FELIX_BUILD_PLAN.md — read that first before doing anything.
-
 ## Stack
 - Frontend: Next.js 14.2 (App Router), React 18, TypeScript, Tailwind CSS 3.4
 - Backend: FastAPI (Python), Cloud Run (GCP), Dockerfile at backend/Dockerfile
@@ -20,11 +18,65 @@ Full detailed plan is in FELIX_BUILD_PLAN.md — read that first before doing an
 - Background jobs iterate over get_active_users() — never hardcoded to one user
 - All settings (timezone, briefing time, style profile, VIP contacts) are per-user rows in settings table
 
+## Behavioral guidelines
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+### 1. Think Before Coding
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them — don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+### 2. Simplicity First
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+### 3. Surgical Changes
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it — don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
 ## Project structure
-```
+
 felix/
 ├── CLAUDE.md
-├── FELIX_BUILD_PLAN.md
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -80,24 +132,20 @@ felix/
 │       ├── hooks/                 # useEmails, useCalendar, useDraft, useFollowUps, useVoice, useUnreadCounts
 │       └── lib/                   # api.ts, supabase.ts, supabase-server.ts, types.ts
 └── infra/
-    ├── schema.sql                 # full DB schema (10 tables, all with RLS)
-    └── migrations/                # incremental SQL migrations (001–005)
-```
+        ├── schema.sql                 # full DB schema (10 tables, all with RLS)
+        └── migrations/                # incremental SQL migrations + new tables (001–013)
 
-## Database tables (infra/schema.sql)
-google_connections, settings, emails, drafts, follow_ups, contacts, meetings, briefings, voice_sessions
+## Database tables (infra/schema.sql, infra/migrations)
+- Auth & connections: google_connections, oauth_nonces
+- User config: settings
+- Email: emails, sent_emails, drafts, follow_ups, smart_templates
+- Calendar: meetings, meeting_preps, pending_calendar_proposals
+- Contacts & commitments: contacts, commitments
+- Briefings & voice: briefings, voice_sessions
+- Memory: user_memory, memory_episodes, memory_operations, session_summaries
+- AI ops: ai_calls, ai_feedback, eval_runs
+- Admin: admin_audit
 
 ## Testing
 - Backend: `cd backend && pytest` (pytest + pytest-asyncio + freezegun)
 - Frontend: `cd frontend && npm test` (Jest + React Testing Library)
-
-## Build phases — do these in order
-Phase 1: Auth + Google Connection
-Phase 2: Inbox Triage + Draft Replies
-Phase 3: Voice Layer
-Phase 4: Calendar Integration
-Phase 5: Follow-up Engine
-Phase 6: Relationship Intelligence
-Phase 7: Extra Features + Polish
-
-## Start each session by reading both this file and FELIX_BUILD_PLAN.md
