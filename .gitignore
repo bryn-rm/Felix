@@ -109,3 +109,4 @@ temp/
 CODEBASE_REVIEW.md
 CLAUDE_CODEBASE_REVIEW.md
 *_REVIEW.md*.tsbuildinfo
+.codex
