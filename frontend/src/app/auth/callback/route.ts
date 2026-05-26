@@ -5,6 +5,22 @@ export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
 
+  // Google/Supabase append an OAuth error here instead of a code — e.g. a user who
+  // isn't on the OAuth test-users list, or who declined consent. Forward the real
+  // reason so /login can show a tailored message. The full param set is logged so
+  // the exact value Supabase passes through can be confirmed against a live denied
+  // flow (the /login mapping matches defensively on "denied" regardless).
+  const oauthError = searchParams.get("error") ?? searchParams.get("error_code");
+  if (oauthError) {
+    console.log(
+      "[callback] oauth error params:",
+      Object.fromEntries(searchParams.entries()),
+    );
+    return NextResponse.redirect(
+      new URL(`/login?error=${encodeURIComponent(oauthError)}`, origin),
+    );
+  }
+
   if (!code) {
     console.log("[callback] no code in URL, redirecting to /login");
     return NextResponse.redirect(new URL("/login?error=missing_code", origin));

@@ -1,7 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+
+// Public link to the external access-request form (Tally/Google Form/etc.). When
+// unset the "Request access" link is hidden entirely — fail closed, never render a
+// dead link.
+const REQUEST_ACCESS_URL = process.env.NEXT_PUBLIC_REQUEST_ACCESS_URL;
+
+function oauthErrorMessage(code: string): string {
+  // Match on the provider reason rather than an exact code: the precise value
+  // Supabase forwards for a non-test-user / declined consent is logged in
+  // /auth/callback and should be confirmed against a live denied flow.
+  if (/denied/i.test(code)) {
+    return "We couldn't sign you in — your Google account may not be on the invite list yet. You can request access below.";
+  }
+  if (code === "missing_code") {
+    return "Sign-in didn't complete. Please try again.";
+  }
+  return "Something went wrong signing you in. Please try again.";
+}
 
 const features = [
   { label: "INBOX", desc: "Triages and prioritises so you only see what matters" },
@@ -12,6 +30,22 @@ const features = [
 export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Surface an OAuth error forwarded by /auth/callback (e.g. ?error=access_denied),
+  // then strip it from the URL so it doesn't persist on refresh or when shared.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("error");
+    if (!code) return;
+    setError(oauthErrorMessage(code));
+    params.delete("error");
+    const query = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}${query ? `?${query}` : ""}`,
+    );
+  }, []);
 
   async function handleSignIn() {
     setLoading(true);
@@ -236,6 +270,25 @@ export default function LoginPage() {
               <span style={{ fontSize: "11px" }}>✕</span> Cancel anytime
             </span>
           </div>
+
+          {/* Request access — only shown when an external form URL is configured */}
+          {REQUEST_ACCESS_URL && (
+            <p
+              className="mt-6 text-center text-xs"
+              style={{ color: "var(--felix-text-dim)" }}
+            >
+              Not on the invite list yet?{" "}
+              <a
+                href={REQUEST_ACCESS_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline underline-offset-2"
+                style={{ color: "var(--felix-accent)" }}
+              >
+                Request access
+              </a>
+            </p>
+          )}
 
           {/* Footer */}
           <p
