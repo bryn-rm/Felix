@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # (briefing audio). Most voices in the ElevenLabs library do; custom clones
     # may need verification in the ElevenLabs voice library settings.
     FELIX_VOICE_ID: str
+    # JSON array of approved selectable voices, e.g.
+    # [{"id":"21m00Tcm4TlvDq8ikWAM","label":"Rachel"}]
+    FELIX_VOICE_CATALOG: str = ""
 
     # Supabase
     SUPABASE_URL: str

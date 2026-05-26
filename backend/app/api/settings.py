@@ -6,6 +6,8 @@ briefing_time and upserts them here. The settings page also reads and
 updates these values.
 """
 
+import json
+import logging
 import re
 from datetime import datetime, time, timezone
 
@@ -14,11 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
 from app import db
+from app.config import settings
 from app.middleware.auth import get_current_user, get_google_credentials
 from app.services.ai_service import ai_service
 from app.services.gmail_service import GmailService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +49,45 @@ _NULLABLE_SETTINGS_FIELDS = {
 def _parse_time(value: str) -> time:
     """Convert HH:MM string into a datetime.time object for Postgres TIME columns."""
     return time.fromisoformat(value.strip())
+
+
+def _configured_voice_options() -> list[dict[str, str]]:
+    """Return approved ElevenLabs voices from FELIX_VOICE_CATALOG."""
+    raw = (settings.FELIX_VOICE_CATALOG or "").strip()
+    if not raw:
+        return []
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Invalid FELIX_VOICE_CATALOG JSON; no extra voices will be shown")
+        return []
+
+    if not isinstance(parsed, list):
+        logger.warning("FELIX_VOICE_CATALOG must be a JSON array")
+        return []
+
+    voices: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        voice_id = str(item.get("id") or "").strip()
+        label = str(item.get("label") or "").strip()
+        if not voice_id or not label or voice_id in seen:
+            continue
+        seen.add(voice_id)
+        voices.append({"id": voice_id, "label": label})
+    return voices
+
+
+def _voice_options_with_default(current_voice_id: str | None = None) -> list[dict[str, str]]:
+    """Return dropdown options, preserving an already-saved legacy voice id."""
+    voices = [{"id": "", "label": "System default"}, *_configured_voice_options()]
+    configured_ids = {voice["id"] for voice in voices}
+    if current_voice_id and current_voice_id not in configured_ids:
+        voices.append({"id": current_voice_id, "label": f"Current ({current_voice_id})"})
+    return voices
 
 
 class SettingsUpdate(BaseModel):
@@ -110,9 +153,23 @@ class VIPUpdate(BaseModel):
         return v
 
 
+class VoiceOptionsResponse(BaseModel):
+    voices: list[dict[str, str]]
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@router.get("/voices", response_model=VoiceOptionsResponse)
+async def get_voice_options(current_user: dict = Depends(get_current_user)):
+    """Return the approved ElevenLabs voice choices for the settings dropdown."""
+    row = await db.query_one(
+        "SELECT felix_voice_id FROM settings WHERE user_id = $1", current_user["id"]
+    )
+    current_voice_id = (row or {}).get("felix_voice_id") or None
+    return {"voices": _voice_options_with_default(current_voice_id)}
+
 
 @router.get("")
 async def get_settings(current_user: dict = Depends(get_current_user)):
@@ -155,6 +212,24 @@ async def update_settings(
 
     if "briefing_time" in updates and updates["briefing_time"] is not None:
         updates["briefing_time"] = _parse_time(updates["briefing_time"])
+
+    if "felix_voice_id" in updates:
+        requested_voice_id = (updates["felix_voice_id"] or "").strip()
+        if not requested_voice_id:
+            updates["felix_voice_id"] = None
+        else:
+            row = await db.query_one(
+                "SELECT felix_voice_id FROM settings WHERE user_id = $1",
+                current_user["id"],
+            )
+            current_voice_id = (row or {}).get("felix_voice_id") or None
+            allowed_ids = {voice["id"] for voice in _configured_voice_options()}
+            if requested_voice_id not in allowed_ids and requested_voice_id != current_voice_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail="felix_voice_id must be one of the configured voice options.",
+                )
+            updates["felix_voice_id"] = requested_voice_id
 
     updates["user_id"] = current_user["id"]
     updates["updated_at"] = datetime.now(timezone.utc)

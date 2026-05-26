@@ -54,6 +54,9 @@ ANTHROPIC_MODEL_FAST=claude-haiku-4-5-20251001   # leave as-is
 # Voice ID: pick any voice from elevenlabs.io/voice-library, copy its ID from the URL
 ELEVENLABS_API_KEY=xxxx
 FELIX_VOICE_ID=xxxx
+# Optional approved voices shown in Settings → Voice.
+# Add voices here locally, or set the same env var in Railway/production.
+FELIX_VOICE_CATALOG='[{"id":"21m00Tcm4TlvDq8ikWAM","label":"Rachel"}]'
 
 # ── Supabase ──────────────────────────────────────────────────
 # From Supabase dashboard → Settings → API
@@ -268,6 +271,9 @@ Run `npm run build` from the `frontend/` directory to see TypeScript/build error
 
 ### ElevenLabs errors in backend logs
 If you don't have an ElevenLabs account, the voice briefing audio generation will fail — but everything else will work. The config requires `ELEVENLABS_API_KEY` and `FELIX_VOICE_ID` to be non-empty, so put any placeholder string in `.env` to unblock startup, then add real values when you want voice features.
+
+### Add voices to the Settings dropdown
+Add approved ElevenLabs voices to `FELIX_VOICE_CATALOG` as JSON, then restart/redeploy the backend. For local development this lives in `backend/.env`; for production set the same variable in Railway. Each entry needs an ElevenLabs voice `id` and a user-facing `label`.
 
 ---
 

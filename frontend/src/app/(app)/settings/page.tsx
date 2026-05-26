@@ -249,14 +249,6 @@ function Field({
 // Meeting-prep mode options
 // ---------------------------------------------------------------------------
 
-// Felix voice options for the dropdown. Add ElevenLabs voice ids here as
-// `{ id, label }` pairs; the empty-id entry means "use the system default".
-const VOICE_OPTIONS: { id: string; label: string }[] = [
-  { id: "", label: "System default" },
-  // TODO: add ElevenLabs voice options here, e.g.
-  // { id: "21m00Tcm4TlvDq8ikWAM", label: "Rachel" },
-];
-
 const MEETING_PREP_MODES: { value: MeetingPrepMode; label: string; hint: string }[] = [
   { value: "in_app_only", label: "In-app only", hint: "Show prep cards in Felix; no emails." },
   { value: "email_only", label: "Email only", hint: "Send prep emails; nothing in-app." },
@@ -267,6 +259,15 @@ const MEETING_PREP_MODES: { value: MeetingPrepMode; label: string; hint: string 
 interface GoogleStatus {
   connected: boolean;
   google_email?: string;
+}
+
+interface VoiceOption {
+  id: string;
+  label: string;
+}
+
+interface VoiceOptionsResponse {
+  voices: VoiceOption[];
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +330,11 @@ export default function SettingsPage() {
       api.get<GoogleStatus>(url),
     );
 
+  const { data: voiceOptionsData, isLoading: loadingVoices } =
+    useSWR<VoiceOptionsResponse>("/settings/voices", (url: string) =>
+      api.get<VoiceOptionsResponse>(url),
+    );
+
   // ---- Toast ----
   const [toasts, setToasts] = useState<ToastMsg[]>([]);
 
@@ -367,6 +373,13 @@ export default function SettingsPage() {
   const [energyError, setEnergyError] = useState<string | null>(null);
 
   const [felixVoiceId, setFelixVoiceId] = useState("");
+  const voiceOptions = voiceOptionsData?.voices ?? [
+    { id: "", label: "System default" },
+  ];
+  const displayedVoiceOptions =
+    felixVoiceId && !voiceOptions.some((v) => v.id === felixVoiceId)
+      ? [...voiceOptions, { id: felixVoiceId, label: `Current (${felixVoiceId})` }]
+      : voiceOptions;
 
   // Analyse-style state
   const [analysing, setAnalysing] = useState(false);
@@ -1081,27 +1094,17 @@ export default function SettingsPage() {
             label="Felix voice"
             hint="Pick a voice or fall back to the system default."
           >
-            {/*
-              The dropdown surfaces any value the backend has set — including
-              ids that are no longer in VOICE_OPTIONS — so users don't silently
-              lose a previously-saved choice when the list changes.
-            */}
             <select
               value={felixVoiceId}
               onChange={(e) => setFelixVoiceId(e.target.value)}
+              disabled={loadingVoices}
               className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none"
             >
-              {VOICE_OPTIONS.map((v) => (
+              {displayedVoiceOptions.map((v) => (
                 <option key={v.id || "default"} value={v.id}>
                   {v.label}
                 </option>
               ))}
-              {felixVoiceId &&
-                !VOICE_OPTIONS.some((v) => v.id === felixVoiceId) && (
-                  <option value={felixVoiceId}>
-                    Current ({felixVoiceId})
-                  </option>
-                )}
             </select>
           </Field>
           <div className="flex justify-end">

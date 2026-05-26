@@ -73,6 +73,84 @@ def test_valid_settings_update_succeeds(client: TestClient):
     assert body["display_name"] == "Felix User"
 
 
+def test_voice_options_returns_configured_catalog(client: TestClient):
+    """Voice dropdown options come from the backend-approved catalog."""
+    catalog = '[{"id":"voice-rachel","label":"Rachel"},{"id":"voice-adam","label":"Adam"}]'
+    with (
+        patch("app.api.settings.settings.FELIX_VOICE_CATALOG", catalog),
+        patch("app.db.query_one", new_callable=AsyncMock, return_value={"felix_voice_id": None}),
+    ):
+        resp = client.get("/settings/voices")
+
+    assert resp.status_code == 200
+    assert resp.json()["voices"] == [
+        {"id": "", "label": "System default"},
+        {"id": "voice-rachel", "label": "Rachel"},
+        {"id": "voice-adam", "label": "Adam"},
+    ]
+
+
+def test_voice_options_preserves_unknown_saved_voice(client: TestClient):
+    """Legacy saved voice IDs remain visible even after catalog changes."""
+    with (
+        patch("app.api.settings.settings.FELIX_VOICE_CATALOG", "[]"),
+        patch("app.db.query_one", new_callable=AsyncMock, return_value={"felix_voice_id": "legacy-id"}),
+    ):
+        resp = client.get("/settings/voices")
+
+    assert resp.status_code == 200
+    assert resp.json()["voices"] == [
+        {"id": "", "label": "System default"},
+        {"id": "legacy-id", "label": "Current (legacy-id)"},
+    ]
+
+
+def test_configured_voice_id_update_succeeds(client: TestClient):
+    """Users can save a voice ID only when it appears in the approved catalog."""
+    catalog = '[{"id":"voice-rachel","label":"Rachel"}]'
+    updated_row = {
+        "user_id": "user-test-001",
+        "felix_voice_id": "voice-rachel",
+        "updated_at": "2024-01-01T00:00:00+00:00",
+    }
+    with (
+        patch("app.api.settings.settings.FELIX_VOICE_CATALOG", catalog),
+        patch("app.db.query_one", new_callable=AsyncMock, return_value={"felix_voice_id": None}),
+        patch("app.db.upsert", new_callable=AsyncMock, return_value=updated_row),
+    ):
+        resp = client.patch("/settings", json={"felix_voice_id": "voice-rachel"})
+
+    assert resp.status_code == 200
+    assert resp.json()["felix_voice_id"] == "voice-rachel"
+
+
+def test_unknown_new_voice_id_returns_422(client: TestClient):
+    """Arbitrary ElevenLabs voice IDs cannot be saved unless approved."""
+    with (
+        patch("app.api.settings.settings.FELIX_VOICE_CATALOG", "[]"),
+        patch("app.db.query_one", new_callable=AsyncMock, return_value={"felix_voice_id": None}),
+        patch("app.db.upsert", new_callable=AsyncMock) as mock_upsert,
+    ):
+        resp = client.patch("/settings", json={"felix_voice_id": "unapproved-id"})
+
+    assert resp.status_code == 422
+    mock_upsert.assert_not_called()
+
+
+def test_null_voice_id_clears_override(client: TestClient):
+    """Explicit null clears the saved voice override."""
+    updated_row = {
+        "user_id": "user-test-001",
+        "felix_voice_id": None,
+        "updated_at": "2024-01-01T00:00:00+00:00",
+    }
+    with patch("app.db.upsert", new_callable=AsyncMock, return_value=updated_row):
+        resp = client.patch("/settings", json={"felix_voice_id": None})
+
+    assert resp.status_code == 200
+    assert resp.json()["felix_voice_id"] is None
+
+
 def test_settings_scoped_to_current_user():
     """Each user receives only their own settings row — user_id is never leaked."""
     row_a = {"user_id": "user-A", "timezone": "Europe/London",       "display_name": "Alice"}
