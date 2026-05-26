@@ -15,6 +15,7 @@ import {
   LogOut,
   Unlink,
   Link2,
+  ChevronDown,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
@@ -194,6 +195,85 @@ function TimezoneSelect({
               {tz}
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VoiceSelect({
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  options: VoiceOption[];
+  disabled?: boolean;
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const selected = options.find((option) => option.id === value) ?? options[0];
+
+  useEffect(() => {
+    function onOutsideClick(e: MouseEvent) {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onOutsideClick);
+    return () => document.removeEventListener("mousedown", onOutsideClick);
+  }, []);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-left text-sm text-slate-200 transition-colors hover:border-slate-500 hover:bg-slate-800 focus:border-indigo-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        <span className="truncate">
+          {disabled ? "Loading voices..." : selected?.label ?? "System default"}
+        </span>
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+
+      {open && !disabled && (
+        <div
+          role="listbox"
+          className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-slate-600 bg-slate-800 py-1 shadow-xl"
+        >
+          {options.map((option) => {
+            const active = option.id === value;
+            return (
+              <button
+                key={option.id || "default"}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => {
+                  onChange(option.id);
+                  setOpen(false);
+                }}
+                className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-slate-700 ${
+                  active ? "bg-indigo-600/15 text-indigo-300" : "text-slate-200"
+                }`}
+              >
+                {option.label}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
@@ -1094,18 +1174,12 @@ export default function SettingsPage() {
             label="Felix voice"
             hint="Pick a voice or fall back to the system default."
           >
-            <select
+            <VoiceSelect
               value={felixVoiceId}
-              onChange={(e) => setFelixVoiceId(e.target.value)}
+              options={displayedVoiceOptions}
               disabled={loadingVoices}
-              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus:border-indigo-500 focus:outline-none"
-            >
-              {displayedVoiceOptions.map((v) => (
-                <option key={v.id || "default"} value={v.id}>
-                  {v.label}
-                </option>
-              ))}
-            </select>
+              onChange={setFelixVoiceId}
+            />
           </Field>
           <div className="flex justify-end">
             <button

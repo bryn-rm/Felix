@@ -275,6 +275,10 @@ If you don't have an ElevenLabs account, the voice briefing audio generation wil
 ### Add voices to the Settings dropdown
 Add approved ElevenLabs voices to `FELIX_VOICE_CATALOG` as JSON, then restart/redeploy the backend. For local development this lives in `backend/.env`; for production set the same variable in Railway. Each entry needs an ElevenLabs voice `id` and a user-facing `label`.
 
+  Format:
+  FELIX_VOICE_CATALOG='[{"id":"21m00Tcm4TlvDq8ikWAM","label":"Rachel"},
+  {"id":"VOICE_ID","label":"Voice name"}]'
+
 ---
 
 ## Quick reference
