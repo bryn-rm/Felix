@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import ServiceWorkerRegistrar from "@/components/ServiceWorkerRegistrar";
 import "./globals.css";
+import { Analytics } from "@vercel/analytics/react";
 
 export const metadata: Metadata = {
   title: "Felix",
@@ -24,6 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <ServiceWorkerRegistrar />
         {children}
+        <Analytics />
       </body>
     </html>
   );
