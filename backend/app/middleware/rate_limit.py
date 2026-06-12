@@ -57,9 +57,27 @@ def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
     )
 
 
-async def check_monthly_ai_budget(user_id: str) -> None:
-    """Raise 429 if the user has exceeded their monthly AI call cap."""
-    cap = settings.MONTHLY_AI_CALL_LIMIT
+def _is_admin_email(email: str | None) -> bool:
+    if not email:
+        return False
+    raw = settings.ADMIN_EMAILS or ""
+    admins = {e.strip().lower() for e in raw.split(",") if e.strip()}
+    legacy = (settings.ADMIN_EMAIL or "").strip().lower()
+    if legacy:
+        admins.add(legacy)
+    return email.lower() in admins
+
+
+async def check_monthly_ai_budget(user_id: str, email: str | None = None) -> None:
+    """Raise 429 if the user has exceeded their monthly AI call cap.
+
+    Admins (email in ADMIN_EMAILS) get the higher ADMIN_MONTHLY_AI_CALL_LIMIT cap.
+    """
+    cap = (
+        settings.ADMIN_MONTHLY_AI_CALL_LIMIT
+        if _is_admin_email(email)
+        else settings.MONTHLY_AI_CALL_LIMIT
+    )
     if cap <= 0:
         return
 

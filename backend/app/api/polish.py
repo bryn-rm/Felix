@@ -29,7 +29,7 @@ async def polish_draft(
     Polish draft email text — fix tone, grammar and clarity without changing
     the underlying meaning. Used by the inline DraftPanel "Polish" button.
     """
-    await check_monthly_ai_budget(current_user["id"])
+    await check_monthly_ai_budget(current_user["id"], current_user.get("email"))
 
     polished = await polish_service.polish_draft_text(
         current_user["id"], body.text
@@ -58,7 +58,7 @@ async def get_weekly_review(
     Returns the same payload the Sunday job sends: subject, full HTML body,
     plaintext alternative, and the supplementary stats.
     """
-    await check_monthly_ai_budget(current_user["id"])
+    await check_monthly_ai_budget(current_user["id"], current_user.get("email"))
     return await polish_service.generate_weekly_review_email(current_user["id"])
 
 

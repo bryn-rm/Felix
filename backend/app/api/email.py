@@ -361,7 +361,7 @@ async def generate_draft(
     The client should accumulate chunk values and display live. On "done",
     the draft has been saved to the DB and the draft_id is returned.
     """
-    await check_monthly_ai_budget(current_user["id"])
+    await check_monthly_ai_budget(current_user["id"], current_user.get("email"))
 
     email = await db.query_one(
         "SELECT * FROM emails WHERE id = $1 AND user_id = $2",

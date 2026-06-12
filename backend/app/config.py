@@ -49,6 +49,8 @@ class Settings(BaseSettings):
 
     # Rate limiting — monthly AI call cap per user (0 = unlimited)
     MONTHLY_AI_CALL_LIMIT: int = 5000
+    # Higher cap applied when the caller's email matches ADMIN_EMAILS (0 = unlimited)
+    ADMIN_MONTHLY_AI_CALL_LIMIT: int = 25000
 
     class Config:
         env_file = ".env"

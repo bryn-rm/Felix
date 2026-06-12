@@ -145,7 +145,7 @@ async def voice_chat(
     routes through voice_router. No STT, no TTS — pure text in / text out.
     """
     user_id: str = current_user["id"]
-    await check_monthly_ai_budget(user_id)
+    await check_monthly_ai_budget(user_id, current_user.get("email"))
     message = body.message.strip()
 
     user_settings = await db.query_one(
@@ -237,7 +237,7 @@ async def voice_stream(websocket: WebSocket) -> None:
 
     # Budget gate — reject before starting the expensive STT/TTS pipeline
     try:
-        await check_monthly_ai_budget(user_id)
+        await check_monthly_ai_budget(user_id, user.get("email"))
     except HTTPException as exc:
         await websocket.send_json({"type": "error", "message": exc.detail})
         await websocket.close(code=4029)

@@ -62,7 +62,7 @@ async def regenerate_meeting_prep(
     Useful when the underlying email context has changed materially after
     the initial card was generated. Costs one Sonnet call.
     """
-    await check_monthly_ai_budget(current_user["id"])
+    await check_monthly_ai_budget(current_user["id"], current_user.get("email"))
 
     # We need the event dict to regenerate; pull it from the cached row's
     # snapshot if we have it, or synthesise a minimal one. This avoids
