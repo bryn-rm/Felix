@@ -124,6 +124,42 @@ class GmailService:
             raise
         return self._parse_message(full)
 
+    async def search_messages(self, query: str, max_results: int = 5) -> list[dict]:
+        """Run a live Gmail search and return parsed messages.
+
+        This is intentionally separate from the background sync path: chat can
+        fall back to Gmail when Felix's local cache is incomplete or stale.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        request = self.service.users().messages().list(
+            userId="me",
+            maxResults=max(1, min(int(max_results or 5), 10)),
+            q=q,
+        )
+        try:
+            results = await _execute_with_backoff(request, context="search Gmail messages")
+        except HttpError as e:
+            _handle_http_error(e, context="search Gmail messages")
+            return []
+
+        messages = []
+        for msg in results.get("messages", []):
+            try:
+                # Metadata format: headers + snippet + labelIds, no body. Enough
+                # to rank and display a search result; the full body is fetched
+                # on demand by get_message() when the agent opens a specific email.
+                meta = await self._fetch_full_message(
+                    msg["id"],
+                    fmt="metadata",
+                    metadata_headers=["From", "To", "Cc", "Subject", "Date"],
+                )
+                messages.append(self._parse_message(meta))
+            except HttpError as e:
+                logger.warning("Could not fetch Gmail search result %s: %s", msg["id"], e)
+        return messages
+
     async def get_thread(self, thread_id: str) -> list[dict]:
         """
         Return all messages in a thread, oldest first.
@@ -282,10 +318,19 @@ class GmailService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _fetch_full_message(self, message_id: str) -> dict:
-        request = self.service.users().messages().get(
-            userId="me", id=message_id, format="full"
-        )
+    async def _fetch_full_message(
+        self,
+        message_id: str,
+        fmt: str = "full",
+        metadata_headers: list[str] | None = None,
+    ) -> dict:
+        """Fetch a message. `fmt="metadata"` returns headers + snippet + labelIds
+        without the body — cheaper for search ranking. Pass `metadata_headers`
+        to limit which headers are returned in that mode."""
+        kwargs: dict = {"userId": "me", "id": message_id, "format": fmt}
+        if fmt == "metadata" and metadata_headers:
+            kwargs["metadataHeaders"] = metadata_headers
+        request = self.service.users().messages().get(**kwargs)
         try:
             return await asyncio.to_thread(request.execute)
         except HttpError as e:

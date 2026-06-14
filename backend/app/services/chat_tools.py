@@ -3,12 +3,12 @@ Tool definitions for the chat agent loop in _general_question.
 
 Three tools, all scoped to a single user_id via the dispatcher closure:
 
-  - search_emails(query, limit)        : ILIKE search across the local emails table
-  - get_email(email_id)                : full row including body
+  - search_emails(query, limit)        : ranked local search + live Gmail fallback
+  - get_email(email_id)                : full row/body from local cache or Gmail
   - create_calendar_event(...)         : insert event into the user's primary calendar
 
-The local emails table is the right source for search — it's already populated by
-the sync job, has body up to 50k, and is indexed on (user_id, received_at DESC).
+The local email tables are the fast path. Gmail live search is the fallback when
+the cache is incomplete, stale, or does not contain archived/older messages.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable
 from app import db
 from app.middleware.auth import get_google_credentials
 from app.services.calendar_service import CalendarService
+from app.services.gmail_service import GmailService
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,36 @@ _NEGATION_PATTERNS = re.compile(
 # Pending proposals expire after this so a stale row from yesterday can't be
 # accidentally booked.
 _PROPOSAL_TTL_SECONDS = 60 * 60  # 1 hour
+_SEARCH_TERM_RE = re.compile(r"[a-z0-9@._+-]{2,}", re.IGNORECASE)
+
+# Per-table free-text "haystacks". These MUST stay byte-for-byte identical to the
+# expressions indexed in infra/migrations/014_email_search_indexes.sql — the GIN
+# pg_trgm index is only used when the query's `LIKE` operand matches the indexed
+# expression exactly. Searching with positive `haystack LIKE $pat` predicates (one
+# per term, AND-ed) is what lets the planner pick a bitmap index scan.
+#
+# Built from IMMUTABLE pieces (COALESCE/|| for scalars, the felix_array_text
+# wrapper for text[] recipients) because index expressions must be IMMUTABLE and
+# CONCAT_WS / ARRAY_TO_STRING are only STABLE.
+_INBOUND_HAYSTACK = (
+    "LOWER(COALESCE(from_name, '') || ' ' || COALESCE(from_email, '') || ' ' || "
+    "COALESCE(to_email, '') || ' ' || COALESCE(subject, '') || ' ' || "
+    "COALESCE(snippet, '') || ' ' || COALESCE(body, ''))"
+)
+_SENT_HAYSTACK = (
+    "LOWER(COALESCE(from_email, '') || ' ' || felix_array_text(to_emails) || ' ' || "
+    "felix_array_text(to_names) || ' ' || COALESCE(subject, '') || ' ' || "
+    "COALESCE(snippet, '') || ' ' || COALESCE(body, ''))"
+)
+
+
+def _like_escape(term: str) -> str:
+    """Escape LIKE metacharacters so a search term matches literally.
+
+    Postgres' default LIKE escape character is backslash, so escaped patterns
+    work without an explicit ESCAPE clause.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 # Anthropic tool schemas — exposed to the model.
@@ -58,10 +89,11 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_emails",
         "description": (
-            "Search the user's emails by free-text query. Matches against sender name, "
-            "sender address, subject, snippet, and body (case-insensitive substring). "
-            "Use this whenever the user asks about a specific email, sender, or topic. "
-            "Returns up to `limit` results ordered by most recent first."
+            "Search the user's emails by free-text query. Searches Felix's local inbound "
+            "and sent-mail cache using tokenized matching, then falls back to live Gmail "
+            "search when local results are weak or empty. Use this whenever the user asks "
+            "about a specific email, sender, or topic. Results include source and mailbox; "
+            "pass the returned id to get_email for full text."
         ),
         "input_schema": {
             "type": "object",
@@ -169,45 +201,240 @@ TOOLS: list[dict[str, Any]] = [
 
 async def _search_emails(user_id: str, query: str, limit: int = 5) -> dict:
     limit = max(1, min(int(limit or 5), 10))
-    pattern = f"%{(query or '').strip().lower()}%"
-    if pattern == "%%":
+    raw_query = (query or "").strip()
+    terms = _search_terms(raw_query)
+    if not terms:
         return {"results": [], "note": "Empty query."}
 
-    rows = await db.query(
-        """
-        SELECT id, from_name, from_email, subject, snippet, received_at, category
-        FROM emails
-        WHERE user_id = $1
-          AND (
-                LOWER(from_name)   LIKE $2
-             OR LOWER(from_email)  LIKE $2
-             OR LOWER(subject)     LIKE $2
-             OR LOWER(snippet)     LIKE $2
-             OR LOWER(body)        LIKE $2
-          )
-        ORDER BY received_at DESC
-        LIMIT $3
-        """,
-        user_id, pattern, limit,
+    local_rows = await _search_local_email_cache(user_id, raw_query, terms, limit)
+    live_results: list[dict] = []
+    live_note: str | None = None
+
+    # Only reach for live Gmail when the local cache turns up nothing. That
+    # covers older/archived messages and rows missed by failed background sync,
+    # without spending a Gmail round-trip (plus per-hit fetches) on every search
+    # that already found matches locally.
+    do_live = len(local_rows) == 0
+    if do_live:
+        try:
+            live_results = await _search_gmail_live(
+                user_id,
+                raw_query=raw_query,
+                terms=terms,
+                limit=limit,
+            )
+        except Exception:
+            logger.exception("Live Gmail search failed for user %s", user_id)
+            live_note = "Live Gmail search failed; results only include Felix's local cache."
+
+    results = _dedupe_search_results([*_format_local_results(local_rows), *live_results])[:limit]
+    notes = []
+    if live_note:
+        notes.append(live_note)
+    elif live_results:
+        notes.append("Included live Gmail results because Felix's local cache had no matches.")
+    elif len(results) == 0:
+        notes.append("No matches found in Felix's local cache or live Gmail search.")
+    return {
+        "results": results,
+        "count": len(results),
+        "searched": {
+            "local_inbound": True,
+            "local_sent": True,
+            "gmail_live": do_live,
+        },
+        "note": " ".join(notes) if notes else None,
+    }
+
+
+def _search_terms(query: str) -> list[str]:
+    # Keep sender-ish tokens intact, drop tiny filler words, cap for query cost.
+    stop = {
+        "a", "an", "are", "about", "and", "any", "did", "do", "does", "email",
+        "emails", "find", "for", "from", "get", "got", "have", "in", "is",
+        "me", "message", "messages", "my", "of", "on", "show", "that", "the",
+        "there", "to", "was", "were", "with",
+    }
+    seen: set[str] = set()
+    terms: list[str] = []
+    for match in _SEARCH_TERM_RE.finditer(query.lower()):
+        term = match.group(0).strip("._+-")
+        if len(term) < 2 or term in stop or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+        if len(terms) >= 8:
+            break
+    return terms
+
+
+async def _search_local_email_cache(
+    user_id: str,
+    raw_query: str,
+    terms: list[str],
+    limit: int,
+) -> list[dict]:
+    """Rank-search the inbound + sent caches with one positive LIKE per term.
+
+    The query is assembled in Python so each term contributes its own
+    `haystack LIKE $pat` predicate (AND-ed). Positive LIKE against the exact
+    indexed expression is what lets Postgres pick the pg_trgm GIN bitmap index;
+    the previous `NOT EXISTS … NOT LIKE` anti-join could not use the index and
+    forced a per-user sequential scan.
+
+    Only the *structure* (column expressions and `$n` placeholders derived from
+    integer ranges) is interpolated — every search term flows through a bound
+    parameter, so there is no SQL-injection surface.
+    """
+    if not terms:
+        return []
+
+    patterns = ["%" + _like_escape(t) + "%" for t in terms]
+    # $1 = user_id; $2..$(n+1) = LIKE patterns; $(n+2) = limit.
+    term_params = [f"${i}" for i in range(2, 2 + len(patterns))]
+    limit_param = f"${2 + len(patterns)}"
+
+    def _rank_expr(subject_l: str, sender_l: str, body_l: str) -> str:
+        parts: list[str] = []
+        for p in term_params:
+            parts.append(f"(CASE WHEN {sender_l} LIKE {p} THEN 20 ELSE 0 END)")
+            parts.append(f"(CASE WHEN {subject_l} LIKE {p} THEN 16 ELSE 0 END)")
+            parts.append(f"(CASE WHEN {body_l} LIKE {p} THEN 4 ELSE 0 END)")
+        parts.append("(CASE WHEN sort_at > NOW() - INTERVAL '30 days' THEN 5 ELSE 0 END)")
+        # Bonus when every term lands in the subject or sender — rewards a
+        # focused sender/subject hit over scattered body mentions.
+        all_focus = " AND ".join(
+            f"({subject_l} LIKE {p} OR {sender_l} LIKE {p})" for p in term_params
+        )
+        parts.append(f"(CASE WHEN {all_focus} THEN 25 ELSE 0 END)")
+        return " + ".join(parts)
+
+    where_inbound = " AND ".join(f"{_INBOUND_HAYSTACK} LIKE {p}" for p in term_params)
+    where_sent = " AND ".join(f"{_SENT_HAYSTACK} LIKE {p}" for p in term_params)
+
+    inbound_subject_l = "LOWER(COALESCE(subject, ''))"
+    inbound_sender_l = "LOWER(CONCAT_WS(' ', from_name, from_email))"
+    inbound_body_l = "LOWER(COALESCE(body, ''))"
+    sent_subject_l = "LOWER(COALESCE(subject, ''))"
+    sent_sender_l = (
+        "LOWER(CONCAT_WS(' ', from_email, ARRAY_TO_STRING(to_emails, ' '), "
+        "ARRAY_TO_STRING(to_names, ' ')))"
     )
-    results = [
+    sent_body_l = "LOWER(COALESCE(body, ''))"
+
+    sql = f"""
+        SELECT mailbox, id, from_name, from_email, to_email, to_emails,
+               subject, snippet, sort_at, category, thread_id, rank
+        FROM (
+            SELECT
+                'inbound'::text AS mailbox,
+                id, from_name, from_email, to_email,
+                NULL::text[] AS to_emails,
+                subject, snippet,
+                received_at AS sort_at,
+                category, thread_id,
+                ({_rank_expr(inbound_subject_l, inbound_sender_l, inbound_body_l)}) AS rank
+            FROM emails
+            WHERE user_id = $1 AND {where_inbound}
+
+            UNION ALL
+
+            SELECT
+                'sent'::text AS mailbox,
+                id,
+                NULL::text AS from_name,
+                from_email,
+                NULL::text AS to_email,
+                to_emails,
+                subject, snippet,
+                sent_at AS sort_at,
+                NULL::text AS category, thread_id,
+                ({_rank_expr(sent_subject_l, sent_sender_l, sent_body_l)}) AS rank
+            FROM sent_emails
+            WHERE user_id = $1 AND {where_sent}
+        ) combined
+        ORDER BY rank DESC, sort_at DESC NULLS LAST
+        LIMIT {limit_param}
+    """
+    rows = await db.query(sql, user_id, *patterns, limit)
+    return rows
+
+
+def _format_local_results(rows: list[dict]) -> list[dict]:
+    return [
         {
-            "id": r.get("id"),
+            "id": f"sent:{r.get('id')}" if r.get("mailbox") == "sent" else r.get("id"),
+            "source": "local_cache",
+            "mailbox": r.get("mailbox"),
             "from_name": r.get("from_name"),
             "from_email": r.get("from_email"),
+            "to_email": r.get("to_email"),
+            "to_emails": r.get("to_emails"),
             "subject": r.get("subject"),
             "snippet": r.get("snippet"),
-            "received_at": r.get("received_at").isoformat() if r.get("received_at") else None,
+            "received_at": r.get("sort_at").isoformat() if r.get("sort_at") else None,
             "category": r.get("category"),
+            "thread_id": r.get("thread_id"),
+            "rank": r.get("rank"),
         }
         for r in rows
     ]
-    return {"results": results, "count": len(results)}
+
+
+async def _search_gmail_live(
+    user_id: str,
+    *,
+    raw_query: str,
+    terms: list[str],
+    limit: int,
+) -> list[dict]:
+    if limit <= 0:
+        return []
+    creds = await get_google_credentials(user_id)
+    gmail = GmailService(creds)
+    gmail_query = " ".join(terms) or raw_query
+    messages = await gmail.search_messages(gmail_query, max_results=limit)
+    results = []
+    for msg in messages:
+        labels = set(msg.get("labels") or [])
+        mailbox = "sent" if "SENT" in labels else "inbound"
+        results.append({
+            "id": f"gmail:{msg.get('id')}",
+            "source": "gmail_live",
+            "mailbox": mailbox,
+            "from_name": msg.get("from_name"),
+            "from_email": msg.get("from_email"),
+            "to_email": msg.get("to"),
+            "subject": msg.get("subject"),
+            "snippet": msg.get("snippet"),
+            "received_at": msg.get("received_at").isoformat() if msg.get("received_at") else None,
+            "category": None,
+            "thread_id": msg.get("thread_id"),
+        })
+    return results
+
+
+def _dedupe_search_results(results: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for result in results:
+        raw_id = str(result.get("id") or "")
+        key = raw_id.split(":", 1)[-1]
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(result)
+    return deduped
 
 
 async def _get_email(user_id: str, email_id: str) -> dict:
     if not email_id:
         return {"error": "Missing email_id."}
+    if email_id.startswith("gmail:"):
+        return await _get_gmail_email(user_id, email_id.removeprefix("gmail:"))
+    if email_id.startswith("sent:"):
+        return await _get_sent_email(user_id, email_id.removeprefix("sent:"))
+
     row = await db.query_one(
         """
         SELECT id, from_name, from_email, to_email, subject, body, snippet,
@@ -236,6 +463,64 @@ async def _get_email(user_id: str, email_id: str) -> dict:
         "category": row.get("category"),
         "topic": row.get("topic"),
         "thread_id": row.get("thread_id"),
+    }
+
+
+async def _get_sent_email(user_id: str, email_id: str) -> dict:
+    row = await db.query_one(
+        """
+        SELECT id, from_email, to_emails, to_names, subject, body, snippet,
+               sent_at, thread_id
+        FROM sent_emails
+        WHERE user_id = $1 AND id = $2
+        """,
+        user_id, email_id,
+    )
+    if not row:
+        return {"error": f"No sent email found with id {email_id}."}
+
+    body = (row.get("body") or "").strip()
+    if len(body) > 8000:
+        body = body[:8000] + "\n…[truncated]"
+
+    return {
+        "id": f"sent:{row.get('id')}",
+        "source": "local_cache",
+        "mailbox": "sent",
+        "from_email": row.get("from_email"),
+        "to_emails": row.get("to_emails"),
+        "to_names": row.get("to_names"),
+        "subject": row.get("subject"),
+        "body": body,
+        "sent_at": row.get("sent_at").isoformat() if row.get("sent_at") else None,
+        "thread_id": row.get("thread_id"),
+    }
+
+
+async def _get_gmail_email(user_id: str, email_id: str) -> dict:
+    try:
+        creds = await get_google_credentials(user_id)
+        gmail = GmailService(creds)
+        msg = await gmail.get_message(email_id)
+    except Exception:
+        logger.exception("Live Gmail get failed for user %s message %s", user_id, email_id)
+        return {"error": "Could not fetch that message from Gmail."}
+
+    body = (msg.get("body") or "").strip()
+    if len(body) > 8000:
+        body = body[:8000] + "\n…[truncated]"
+    labels = set(msg.get("labels") or [])
+    return {
+        "id": f"gmail:{msg.get('id')}",
+        "source": "gmail_live",
+        "mailbox": "sent" if "SENT" in labels else "inbound",
+        "from_name": msg.get("from_name"),
+        "from_email": msg.get("from_email"),
+        "to_email": msg.get("to"),
+        "subject": msg.get("subject"),
+        "body": body,
+        "received_at": msg.get("received_at").isoformat() if msg.get("received_at") else None,
+        "thread_id": msg.get("thread_id"),
     }
 
 
