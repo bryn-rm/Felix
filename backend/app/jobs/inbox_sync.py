@@ -52,6 +52,34 @@ PROCESSED_LABEL = "felix-processed"  # flat label used as the sync sentinel
 
 
 # ---------------------------------------------------------------------------
+# Provider quota circuit breaker
+#
+# Per-email failures are normally swallowed so one malformed email can't stop
+# the whole batch. But an Anthropic credit/quota/rate-limit error affects EVERY
+# remaining email — retrying each one just floods ai_calls (and the user's
+# quota) with calls that are guaranteed to fail. When we detect one, we raise
+# ProviderQuotaError to abort this user's batch immediately and let the next
+# scheduled sync try again once the provider recovers.
+# ---------------------------------------------------------------------------
+
+
+class ProviderQuotaError(Exception):
+    """Signals an exhausted-credit / quota / hard-rate-limit error from the AI
+    provider that should stop the current user's sync batch."""
+
+
+def _is_provider_quota_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return (
+        "your credit" in text
+        or "credit balance" in text
+        or "quota" in text
+        or "rate limit" in text
+        or "rate_limit" in text
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -105,15 +133,25 @@ async def sync_user_inbox(user_id: str) -> None:
         label_cache: dict[str, str] = {}
 
         for email in new_emails:
-            await _process_email(
-                email=email,
-                user_id=user_id,
-                gmail=gmail,
-                vip_list=vip_list,
-                user_name=user_name,
-                style_profile=style_profile,
-                label_cache=label_cache,
-            )
+            try:
+                await _process_email(
+                    email=email,
+                    user_id=user_id,
+                    gmail=gmail,
+                    vip_list=vip_list,
+                    user_name=user_name,
+                    style_profile=style_profile,
+                    label_cache=label_cache,
+                )
+            except ProviderQuotaError as exc:
+                # Provider is out of credit / rate-limited — every remaining
+                # email would fail the same way. Stop the batch; the next
+                # scheduled sync retries once the provider recovers.
+                logger.error(
+                    "Aborting inbox sync batch for user %s — AI provider quota error: %s",
+                    user_id, exc,
+                )
+                break
 
     # The mirror and catch-up sweeps must run regardless of inbound traffic:
     # a quiet day with only outbound mail still needs sent_emails populated,
@@ -242,15 +280,22 @@ async def _process_email(
                     "WHERE id = $1 AND user_id = $2",
                     email_id, user_id,
                 )
-            except Exception:
+            except Exception as exc:
+                if _is_provider_quota_error(exc):
+                    raise ProviderQuotaError(str(exc)) from exc
                 logger.warning(
                     "commitment scan failed for email %s; will retry on next sync",
                     email_id, exc_info=True,
                 )
 
-    except Exception:
+    except ProviderQuotaError:
+        # Propagate so the batch loop in sync_user_inbox can abort this user.
+        raise
+    except Exception as exc:
+        if _is_provider_quota_error(exc):
+            raise ProviderQuotaError(str(exc)) from exc
         logger.exception("Failed to process email %s for user %s", email_id, user_id)
-        # Don't re-raise — we still want to continue with other emails
+        # Don't re-raise ordinary per-email failures — continue with other emails
 
 
 async def _apply_gmail_labels(
@@ -363,6 +408,7 @@ async def _generate_and_store_draft(
             user_id=user_id,
             metadata=draft_metadata,
             memory_context=draft_memory,
+            quota_scope="background",
         ):
             draft_text += chunk
     except Exception:

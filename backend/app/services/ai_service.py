@@ -122,6 +122,22 @@ async def _auto_memory(
         return None
 
 
+def _estimate_billable_units(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Cost-weighted quota units for a call (not exact dollars).
+
+    Output is weighted far higher than input because it dominates real cost and
+    Sonnet output is the most expensive thing a user can trigger. These weights
+    only need to be internally consistent — they set the relative price of each
+    surface against MONTHLY_AI_UNIT_LIMIT, not an actual billing figure.
+    """
+    name = (model or "").lower()
+    if "sonnet" in name:
+        return input_tokens * 3 + output_tokens * 15
+    if "haiku" in name:
+        return input_tokens * 1 + output_tokens * 5
+    return input_tokens + output_tokens * 4
+
+
 async def log_ai_call(
     *,
     feature: str,
@@ -132,9 +148,14 @@ async def log_ai_call(
     success: bool = True,
     parse_error: bool = False,
     error_message: str | None = None,
+    quota_scope: str = "interactive",
 ) -> str | None:
     """
     Best-effort insert into ai_calls. Returns the row id or None.
+
+    billable_tokens/billable_units are only populated when the provider returned
+    a usage block. Failed calls (e.g. an Anthropic "credit balance" error) carry
+    no usage, so billable_units stays NULL and the call never consumes quota.
 
     Imported lazily to avoid a circular import (db -> config -> ... -> services).
     """
@@ -146,19 +167,30 @@ async def log_ai_call(
         output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
         latency_ms = int((time.monotonic() - started_at) * 1000)
 
+        billable_tokens: int | None = None
+        billable_units: float | None = None
+        if input_tokens is not None or output_tokens is not None:
+            in_tokens = int(input_tokens or 0)
+            out_tokens = int(output_tokens or 0)
+            billable_tokens = in_tokens + out_tokens
+            billable_units = _estimate_billable_units(model, in_tokens, out_tokens)
+
         row = await _db.insert(
             "ai_calls",
             {
-                "user_id":        user_id,
-                "feature":        feature,
-                "prompt_version": PROMPT_VERSIONS.get(feature, "v1"),
-                "model":          model,
-                "input_tokens":   input_tokens,
-                "output_tokens":  output_tokens,
-                "latency_ms":     latency_ms,
-                "success":        success,
-                "parse_error":    parse_error,
-                "error_message":  (error_message or "")[:1000] or None,
+                "user_id":         user_id,
+                "feature":         feature,
+                "prompt_version":  PROMPT_VERSIONS.get(feature, "v1"),
+                "model":           model,
+                "input_tokens":    input_tokens,
+                "output_tokens":   output_tokens,
+                "latency_ms":      latency_ms,
+                "success":         success,
+                "parse_error":     parse_error,
+                "error_message":   (error_message or "")[:1000] or None,
+                "quota_scope":     quota_scope,
+                "billable_tokens": billable_tokens,
+                "billable_units":  billable_units,
             },
         )
         return str(row["id"]) if row and row.get("id") else None
@@ -236,6 +268,7 @@ class AIService:
                 success=success,
                 parse_error=parse_error,
                 error_message=error_message,
+                quota_scope="background",
             )
 
     # ------------------------------------------------------------------
@@ -254,6 +287,7 @@ class AIService:
         user_id: str | None = None,
         metadata: dict | None = None,
         memory_context: str | None = None,
+        quota_scope: str = "interactive",
     ) -> AsyncGenerator[str, None]:
         """
         Stream a draft reply token by token.
@@ -315,6 +349,7 @@ class AIService:
                 user_id=user_id,
                 success=success,
                 error_message=error_message,
+                quota_scope=quota_scope,
             )
             if metadata is not None:
                 metadata["ai_call_id"] = ai_call_id
@@ -379,6 +414,7 @@ class AIService:
                 success=success,
                 parse_error=parse_error,
                 error_message=error_message,
+                quota_scope="background",
             )
 
     # ------------------------------------------------------------------
@@ -477,6 +513,7 @@ class AIService:
                 user_id=user_id,
                 success=success,
                 error_message=error_message,
+                quota_scope="system",
             )
 
     # ------------------------------------------------------------------
@@ -794,6 +831,7 @@ class AIService:
                 success=success,
                 parse_error=parse_error,
                 error_message=error_message,
+                quota_scope="background",
             )
 
     # ------------------------------------------------------------------
@@ -896,6 +934,7 @@ class AIService:
                 success=success,
                 parse_error=parse_error,
                 error_message=error_message,
+                quota_scope="background",
             )
 
     # ------------------------------------------------------------------
@@ -949,6 +988,7 @@ class AIService:
                 success=success,
                 parse_error=parse_error,
                 error_message=error_message,
+                quota_scope="background",
             )
 
 

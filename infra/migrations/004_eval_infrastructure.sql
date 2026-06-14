@@ -10,14 +10,30 @@ CREATE TABLE ai_calls (
     success BOOLEAN NOT NULL DEFAULT true,
     parse_error BOOLEAN NOT NULL DEFAULT false,
     error_message TEXT,
+    -- Quota accounting. ai_calls stays the observability log, but user limits
+    -- are metered on cost-weighted units rather than raw row count so that
+    -- background retries (triage/commitment) can't starve a user's interactive
+    -- budget. quota_scope partitions the spend; billable_units is NULL when the
+    -- provider returned no usage (e.g. a failed "credit balance" call), so
+    -- failed calls never consume quota.
+    quota_scope TEXT NOT NULL DEFAULT 'interactive'
+        CHECK (quota_scope IN ('interactive', 'background', 'system')),
+    billable_tokens INT,
+    billable_units NUMERIC,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX idx_ai_calls_feature_created 
+CREATE INDEX idx_ai_calls_feature_created
     ON ai_calls(feature, created_at DESC);
-CREATE INDEX idx_ai_calls_user_created 
+CREATE INDEX idx_ai_calls_user_created
     ON ai_calls(user_id, created_at DESC);
-CREATE INDEX idx_ai_calls_success 
+CREATE INDEX idx_ai_calls_success
     ON ai_calls(success, feature);
+-- Supports the monthly per-user interactive quota SUM(billable_units) query.
+CREATE INDEX idx_ai_calls_user_quota_month
+    ON ai_calls(user_id, created_at DESC, quota_scope);
+CREATE INDEX idx_ai_calls_user_billable_month
+    ON ai_calls(user_id, created_at DESC)
+    WHERE billable_units IS NOT NULL;
 ALTER TABLE ai_calls ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "service role only on ai_calls"
     ON ai_calls FOR ALL

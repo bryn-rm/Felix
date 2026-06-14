@@ -307,4 +307,5 @@ async def _summarise_conversation(user_id: str, conversation: str) -> dict:
             success=success,
             parse_error=parse_error,
             error_message=error_message,
+            quota_scope="background",
         )

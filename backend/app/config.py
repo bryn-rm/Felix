@@ -47,10 +47,20 @@ class Settings(BaseSettings):
     ADMIN_EMAILS: str = ""
     ADMIN_EMAIL: str = ""  # Deprecated — use ADMIN_EMAILS; kept for backward compat
 
-    # Rate limiting — monthly AI call cap per user (0 = unlimited)
+    # Rate limiting — monthly AI call cap per user (0 = unlimited).
+    # DEPRECATED: superseded by the unit-based caps below. Kept temporarily for
+    # backward compatibility; no longer consulted by check_monthly_ai_budget.
     MONTHLY_AI_CALL_LIMIT: int = 5000
     # Higher cap applied when the caller's email matches ADMIN_EMAILS (0 = unlimited)
     ADMIN_MONTHLY_AI_CALL_LIMIT: int = 25000
+
+    # AI quota — monthly billable-unit cap per user (0 = unlimited). Units are
+    # cost-weighted (see _estimate_billable_units), not raw tokens or dollars.
+    # Only interactive-scope calls are metered, so background triage/commitment
+    # retries can't lock a user out of manual drafting/polishing.
+    MONTHLY_AI_UNIT_LIMIT: float = 5_000_000
+    # Higher cap applied when the caller's email matches ADMIN_EMAILS (0 = unlimited)
+    ADMIN_MONTHLY_AI_UNIT_LIMIT: float = 0
 
     class Config:
         env_file = ".env"

@@ -895,8 +895,20 @@ async def prune_low_value_episodes() -> int:
 # loop: extract → merge → store, retrieve → format → inject.
 # ---------------------------------------------------------------------------
 
-async def _claude_json(*, feature: str, prompt: str, user_id: str | None, max_tokens: int = 600) -> dict | None:
-    """Call Haiku, parse JSON, log the call. Returns parsed dict or None."""
+async def _claude_json(
+    *,
+    feature: str,
+    prompt: str,
+    user_id: str | None,
+    max_tokens: int = 600,
+    quota_scope: str = "background",
+) -> dict | None:
+    """Call Haiku, parse JSON, log the call. Returns parsed dict or None.
+
+    Defaults to ``quota_scope="background"`` — episode distillation and profile
+    extraction are always triggered by sync, never by a user action, so they
+    must not consume interactive quota.
+    """
     from anthropic import AsyncAnthropic
 
     from app.services.ai_service import log_ai_call
@@ -936,6 +948,7 @@ async def _claude_json(*, feature: str, prompt: str, user_id: str | None, max_to
             success=success,
             parse_error=parse_error,
             error_message=error_message,
+            quota_scope=quota_scope,
         )
 
 

@@ -69,28 +69,37 @@ def _is_admin_email(email: str | None) -> bool:
 
 
 async def check_monthly_ai_budget(user_id: str, email: str | None = None) -> None:
-    """Raise 429 if the user has exceeded their monthly AI call cap.
+    """Raise 429 if the user has exceeded their monthly AI usage cap.
 
-    Admins (email in ADMIN_EMAILS) get the higher ADMIN_MONTHLY_AI_CALL_LIMIT cap.
+    Quota is metered on cost-weighted billable_units, not raw row count, and only
+    interactive-scope calls count. Background work (triage, commitment scans,
+    auto-drafts) and their retries never consume this budget, so a storm of
+    background retries can no longer lock a user out of manual drafting/polishing.
+    Failed calls carry no usage (billable_units IS NULL) and are also excluded.
+
+    Admins (email in ADMIN_EMAILS) get the higher ADMIN_MONTHLY_AI_UNIT_LIMIT cap.
     """
     cap = (
-        settings.ADMIN_MONTHLY_AI_CALL_LIMIT
+        settings.ADMIN_MONTHLY_AI_UNIT_LIMIT
         if _is_admin_email(email)
-        else settings.MONTHLY_AI_CALL_LIMIT
+        else settings.MONTHLY_AI_UNIT_LIMIT
     )
     if cap <= 0:
         return
 
     row = await db.query_one(
         """
-        SELECT COUNT(*) AS cnt
+        SELECT COALESCE(SUM(billable_units), 0) AS used
         FROM ai_calls
         WHERE user_id = $1
           AND created_at >= date_trunc('month', NOW())
+          AND quota_scope = 'interactive'
+          AND success = true
+          AND billable_units IS NOT NULL
         """,
         user_id,
     )
-    if row and row["cnt"] >= cap:
+    if row and float(row["used"] or 0) >= cap:
         raise HTTPException(
             status_code=429,
             detail="Monthly AI usage limit reached. Contact support to increase your quota.",

@@ -388,6 +388,7 @@ class PolishService:
                 user_id=user_id,
                 success=success,
                 error_message=error_message,
+                quota_scope="system",
             )
 
         full_html = _wrap_html_shell(body_html, _settings.FRONTEND_URL)

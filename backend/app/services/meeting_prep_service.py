@@ -231,6 +231,7 @@ class MeetingPrepService:
                 user_id=user_id,
                 success=success,
                 error_message=error_message,
+                quota_scope="system",
             )
 
         # Store body-only HTML. The email shell is applied at send time in
