@@ -14,11 +14,13 @@ interface EmailsPage {
 
 interface UseEmailsOptions {
   category?: string;
+  search?: string;
   limit?: number;
 }
 
-export function useEmails({ category, limit = 20 }: UseEmailsOptions = {}) {
+export function useEmails({ category, search = "", limit = 20 }: UseEmailsOptions = {}) {
   const ready = useSessionReady();
+  const trimmedSearch = search.trim();
 
   const getKey = (pageIndex: number, prev: EmailsPage | null) => {
     if (!ready) return null;
@@ -26,6 +28,7 @@ export function useEmails({ category, limit = 20 }: UseEmailsOptions = {}) {
     if (prev && prev.emails.length < limit) return null;
     const params = new URLSearchParams();
     if (category) params.set("category", category);
+    if (trimmedSearch) params.set("search", trimmedSearch);
     params.set("limit", String(limit));
     params.set("offset", String(pageIndex * limit));
     return `/emails/?${params.toString()}`;

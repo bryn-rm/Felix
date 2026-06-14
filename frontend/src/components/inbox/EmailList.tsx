@@ -29,8 +29,10 @@ function SkeletonCard() {
 export function EmailList({ category, search = "" }: EmailListProps) {
   const { emails, isLoading, error, hasMore, loadMore } = useEmails({
     category,
+    search,
     limit: 25,
   });
+  const needle = search.trim();
 
   if (isLoading) {
     return (
@@ -56,18 +58,7 @@ export function EmailList({ category, search = "" }: EmailListProps) {
     );
   }
 
-  // Client-side search filter
-  const needle = search.trim().toLowerCase();
-  const filtered = needle
-    ? emails.filter(
-        (e) =>
-          e.subject?.toLowerCase().includes(needle) ||
-          e.from_name?.toLowerCase().includes(needle) ||
-          e.from_email.toLowerCase().includes(needle),
-      )
-    : emails;
-
-  if (filtered.length === 0) {
+  if (emails.length === 0) {
     return (
       <div className="flex flex-col items-center gap-3 py-16 text-center">
         <Inbox className="h-10 w-10 text-slate-600" />
@@ -82,11 +73,11 @@ export function EmailList({ category, search = "" }: EmailListProps) {
 
   return (
     <div className="space-y-2">
-      {filtered.map((email) => (
+      {emails.map((email) => (
         <EmailCard key={email.id} email={email} />
       ))}
 
-      {hasMore && !needle && (
+      {hasMore && (
         <div className="pt-3 text-center">
           <button
             onClick={loadMore}

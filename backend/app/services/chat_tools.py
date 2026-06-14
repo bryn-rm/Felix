@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
@@ -200,12 +201,25 @@ TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 async def _search_emails(user_id: str, query: str, limit: int = 5) -> dict:
+    started = time.perf_counter()
     limit = max(1, min(int(limit or 5), 10))
     raw_query = (query or "").strip()
     terms = _search_terms(raw_query)
     if not terms:
+        logger.info(
+            "chat_email_search user_id=%s query_empty=true limit=%d elapsed_ms=%d",
+            user_id,
+            limit,
+            int((time.perf_counter() - started) * 1000),
+        )
         return {"results": [], "note": "Empty query."}
 
+    logger.info(
+        "chat_email_search_start user_id=%s terms=%s limit=%d",
+        user_id,
+        terms,
+        limit,
+    )
     local_rows = await _search_local_email_cache(user_id, raw_query, terms, limit)
     live_results: list[dict] = []
     live_note: str | None = None
@@ -228,6 +242,16 @@ async def _search_emails(user_id: str, query: str, limit: int = 5) -> dict:
             live_note = "Live Gmail search failed; results only include Felix's local cache."
 
     results = _dedupe_search_results([*_format_local_results(local_rows), *live_results])[:limit]
+    logger.info(
+        "chat_email_search_done user_id=%s terms=%s local_count=%d gmail_attempted=%s gmail_count=%d result_count=%d elapsed_ms=%d",
+        user_id,
+        terms,
+        len(local_rows),
+        do_live,
+        len(live_results),
+        len(results),
+        int((time.perf_counter() - started) * 1000),
+    )
     notes = []
     if live_note:
         notes.append(live_note)

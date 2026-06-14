@@ -19,6 +19,7 @@ Endpoints:
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -36,6 +37,31 @@ from app.utils.background import spawn
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+_LIKE_ESCAPE = "^"
+
+
+def _escape_like(term: str) -> str:
+    return (
+        term.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
+
+
+def _search_terms(query: str) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for raw in query.lower().split():
+        term = raw.strip(".,;:!?()[]{}\"'")
+        if len(term) < 2 or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+        if len(terms) >= 8:
+            break
+    return terms
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +94,7 @@ class EmailPatch(BaseModel):
 async def list_emails(
     category: str | None = Query(None, description="Filter by triage category"),
     urgency: str | None = Query(None),
+    search: str | None = Query(None, description="Search subject, sender, snippet, and topic"),
     draft_pending: bool | None = Query(None, description="Only emails with a pending draft"),
     include_archived: bool = Query(False, description="Include archived emails in the result"),
     limit: int = Query(50, le=200),
@@ -80,6 +107,7 @@ async def list_emails(
     Archived emails are excluded by default — pass include_archived=true to see them.
     """
     await _ensure_google_connected(current_user["id"])
+    started = time.perf_counter()
 
     conditions = ["e.user_id = $1"]
     args: list = [current_user["id"]]
@@ -97,6 +125,18 @@ async def list_emails(
         conditions.append(f"e.urgency = ${idx}")
         args.append(urgency)
         idx += 1
+
+    terms = _search_terms(search or "")
+    if terms:
+        haystack = (
+            "LOWER(COALESCE(e.from_name, '') || ' ' || COALESCE(e.from_email, '') || ' ' || "
+            "COALESCE(e.subject, '') || ' ' || COALESCE(e.snippet, '') || ' ' || "
+            "COALESCE(e.topic, ''))"
+        )
+        for term in terms:
+            conditions.append(f"{haystack} LIKE ${idx} ESCAPE '{_LIKE_ESCAPE}'")
+            args.append(f"%{_escape_like(term)}%")
+            idx += 1
 
     if draft_pending is True:
         conditions.append("d.status = 'pending'")
@@ -132,6 +172,18 @@ async def list_emails(
     args.extend([limit, offset])
 
     rows = await db.query(sql, *args)
+    if search:
+        logger.info(
+            "email_list_search user_id=%s category=%s terms=%s returned=%d total=%d limit=%d offset=%d elapsed_ms=%d",
+            current_user["id"],
+            category,
+            terms,
+            len(rows),
+            total_count,
+            limit,
+            offset,
+            int((time.perf_counter() - started) * 1000),
+        )
     return {"emails": rows, "total": total_count, "limit": limit, "offset": offset}
 
 
@@ -139,6 +191,7 @@ async def list_emails(
 async def list_emails_trailing_slash(
     category: str | None = Query(None, description="Filter by triage category"),
     urgency: str | None = Query(None),
+    search: str | None = Query(None, description="Search subject, sender, snippet, and topic"),
     draft_pending: bool | None = Query(None, description="Only emails with a pending draft"),
     include_archived: bool = Query(False, description="Include archived emails in the result"),
     limit: int = Query(50, le=200),
@@ -146,7 +199,16 @@ async def list_emails_trailing_slash(
     current_user: dict = Depends(get_current_user),
 ):
     """Alias for clients requesting /emails/ with a trailing slash."""
-    return await list_emails(category, urgency, draft_pending, include_archived, limit, offset, current_user)
+    return await list_emails(
+        category=category,
+        urgency=urgency,
+        search=search,
+        draft_pending=draft_pending,
+        include_archived=include_archived,
+        limit=limit,
+        offset=offset,
+        current_user=current_user,
+    )
 
 
 # ---------------------------------------------------------------------------
