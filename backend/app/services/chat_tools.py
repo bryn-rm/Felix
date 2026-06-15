@@ -318,17 +318,24 @@ async def _search_local_email_cache(
     term_params = [f"${i}" for i in range(2, 2 + len(patterns))]
     limit_param = f"${2 + len(patterns)}"
 
-    def _rank_expr(subject_l: str, sender_l: str, body_l: str) -> str:
+    # The rank is computed in the OUTER query, against columns that physically
+    # exist in the `combined` subquery (subj_l / sender_l / body_l / sort_at).
+    # It must not be computed inside the UNION branches: there `sort_at` is only
+    # a same-level SELECT alias (`received_at AS sort_at`), which Postgres cannot
+    # resolve in a sibling expression — that raised UndefinedColumnError. Each
+    # branch instead materialises its own lowercased haystacks as real columns
+    # so the single outer rank expression works uniformly across both sources.
+    def _rank_expr() -> str:
         parts: list[str] = []
         for p in term_params:
-            parts.append(f"(CASE WHEN {sender_l} LIKE {p} THEN 20 ELSE 0 END)")
-            parts.append(f"(CASE WHEN {subject_l} LIKE {p} THEN 16 ELSE 0 END)")
-            parts.append(f"(CASE WHEN {body_l} LIKE {p} THEN 4 ELSE 0 END)")
+            parts.append(f"(CASE WHEN sender_l LIKE {p} THEN 20 ELSE 0 END)")
+            parts.append(f"(CASE WHEN subj_l LIKE {p} THEN 16 ELSE 0 END)")
+            parts.append(f"(CASE WHEN body_l LIKE {p} THEN 4 ELSE 0 END)")
         parts.append("(CASE WHEN sort_at > NOW() - INTERVAL '30 days' THEN 5 ELSE 0 END)")
         # Bonus when every term lands in the subject or sender — rewards a
         # focused sender/subject hit over scattered body mentions.
         all_focus = " AND ".join(
-            f"({subject_l} LIKE {p} OR {sender_l} LIKE {p})" for p in term_params
+            f"(subj_l LIKE {p} OR sender_l LIKE {p})" for p in term_params
         )
         parts.append(f"(CASE WHEN {all_focus} THEN 25 ELSE 0 END)")
         return " + ".join(parts)
@@ -348,7 +355,8 @@ async def _search_local_email_cache(
 
     sql = f"""
         SELECT mailbox, id, from_name, from_email, to_email, to_emails,
-               subject, snippet, sort_at, category, thread_id, rank
+               subject, snippet, sort_at, category, thread_id,
+               ({_rank_expr()}) AS rank
         FROM (
             SELECT
                 'inbound'::text AS mailbox,
@@ -357,7 +365,9 @@ async def _search_local_email_cache(
                 subject, snippet,
                 received_at AS sort_at,
                 category, thread_id,
-                ({_rank_expr(inbound_subject_l, inbound_sender_l, inbound_body_l)}) AS rank
+                {inbound_subject_l} AS subj_l,
+                {inbound_sender_l} AS sender_l,
+                {inbound_body_l} AS body_l
             FROM emails
             WHERE user_id = $1 AND {where_inbound}
 
@@ -373,15 +383,26 @@ async def _search_local_email_cache(
                 subject, snippet,
                 sent_at AS sort_at,
                 NULL::text AS category, thread_id,
-                ({_rank_expr(sent_subject_l, sent_sender_l, sent_body_l)}) AS rank
+                {sent_subject_l} AS subj_l,
+                {sent_sender_l} AS sender_l,
+                {sent_body_l} AS body_l
             FROM sent_emails
             WHERE user_id = $1 AND {where_sent}
         ) combined
         ORDER BY rank DESC, sort_at DESC NULLS LAST
         LIMIT {limit_param}
     """
-    rows = await db.query(sql, user_id, *patterns, limit)
-    return rows
+    try:
+        return await db.query(sql, user_id, *patterns, limit)
+    except Exception:
+        # Fail soft: a DB outage or schema drift must not crash the chat tool
+        # path. Log and return nothing so the caller falls back to live Gmail.
+        logger.warning(
+            "Local email cache search failed for user %s; returning no local results",
+            user_id,
+            exc_info=True,
+        )
+        return []
 
 
 def _format_local_results(rows: list[dict]) -> list[dict]:

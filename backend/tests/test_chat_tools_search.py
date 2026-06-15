@@ -2,8 +2,14 @@
 
 Covers tokenization, cross-source dedup, result formatting, the index-friendly
 local query shape, the get_email prefix dispatch, and the Gmail live fallback
-trigger. All DB / Gmail access is mocked — no network or database calls.
+trigger. Most DB / Gmail access is mocked — no network or database calls.
+
+The exception is ``test_local_cache_query_executes_against_postgres``, which
+runs the real local-cache SQL against a live Postgres (when ``TEST_DATABASE_URL``
+is set) so that a SQL semantic error — like the ``sort_at`` alias-resolution bug
+the all-mocked tests could not see — fails the suite instead of crashing chat.
 """
+import os
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -163,6 +169,131 @@ async def test_local_cache_empty_terms_short_circuits():
     with patch.object(chat_tools.db, "query", new=query):
         assert await _search_local_email_cache("u1", "", [], 5) == []
     query.assert_not_called()
+
+
+async def test_local_cache_fails_soft_on_db_error():
+    """A DB / schema error must log and yield no rows, never raise into chat."""
+    boom = AsyncMock(side_effect=RuntimeError("column \"sort_at\" does not exist"))
+    with patch.object(chat_tools.db, "query", new=boom):
+        out = await _search_local_email_cache("u1", "acme", ["acme"], 5)
+    assert out == []
+    boom.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# _search_local_email_cache — the SQL actually prepares + executes on Postgres
+#
+# The mocked tests above capture the SQL string but never let Postgres parse it,
+# so they cannot catch a query that is syntactically fine yet semantically
+# invalid (e.g. referencing the `sort_at` SELECT-list alias from inside a UNION
+# branch where it cannot be resolved). This test runs the real query against a
+# live Postgres so that class of bug fails the suite. Skipped when no test DB is
+# configured, so CI without Postgres still passes.
+# ---------------------------------------------------------------------------
+
+# Minimal schema mirroring the columns the local-cache query touches, plus the
+# IMMUTABLE felix_array_text wrapper the sent-mail haystack/index depend on
+# (see infra/migrations/014_email_search_indexes.sql).
+_PG_SCHEMA = """
+    CREATE OR REPLACE FUNCTION felix_array_text(text[])
+        RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE
+        AS $$ SELECT COALESCE(array_to_string($1, ' '), '') $$;
+
+    CREATE TEMP TABLE emails (
+        id          text PRIMARY KEY,
+        user_id     text NOT NULL,
+        from_name   text,
+        from_email  text,
+        to_email    text,
+        subject     text,
+        snippet     text,
+        body        text,
+        received_at timestamptz,
+        category    text,
+        thread_id   text
+    );
+
+    CREATE TEMP TABLE sent_emails (
+        id         text PRIMARY KEY,
+        user_id    text NOT NULL,
+        from_email text,
+        to_emails  text[],
+        to_names   text[],
+        subject    text,
+        snippet    text,
+        body       text,
+        sent_at    timestamptz,
+        thread_id  text
+    );
+"""
+
+
+@pytest.fixture
+async def pg_conn():
+    """A connection to a live test Postgres with the minimal email schema.
+
+    Uses TEST_DATABASE_URL (e.g. a throwaway Docker postgres). Temp tables and
+    the function live only for the connection's lifetime, so nothing persists.
+    """
+    dsn = os.getenv("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("TEST_DATABASE_URL not set; skipping live-Postgres SQL test")
+    import asyncpg
+
+    try:
+        conn = await asyncpg.connect(dsn)
+    except (OSError, asyncpg.PostgresError) as exc:  # pragma: no cover - env dependent
+        pytest.skip(f"could not reach TEST_DATABASE_URL: {exc}")
+    try:
+        await conn.execute(_PG_SCHEMA)
+        yield conn
+    finally:
+        await conn.close()
+
+
+async def test_local_cache_query_executes_against_postgres(pg_conn):
+    now = datetime.now(timezone.utc)
+    await pg_conn.execute(
+        "INSERT INTO emails (id, user_id, from_name, from_email, to_email, "
+        "subject, snippet, body, received_at, category, thread_id) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        "i1", "u1", "Acme Sales", "sales@acme.com", "me@x.com",
+        "Acme invoice March", "Your acme invoice", "Full acme invoice body",
+        now, "fyi", "t1",
+    )
+    await pg_conn.execute(
+        "INSERT INTO sent_emails (id, user_id, from_email, to_emails, to_names, "
+        "subject, snippet, body, sent_at, thread_id) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        "s1", "u1", "me@x.com", ["sales@acme.com"], ["Acme Sales"],
+        "Re: Acme invoice", "thanks", "thanks for the acme invoice",
+        now, "t1",
+    )
+
+    prepared: dict = {}
+
+    async def real_query(sql, *args):
+        # prepare() makes Postgres parse + plan the statement: an unresolved
+        # column (the old sort_at-in-UNION bug) raises UndefinedColumnError here.
+        stmt = await pg_conn.prepare(sql)
+        prepared["sql"] = sql
+        rows = await stmt.fetch(*args)
+        return [dict(r) for r in rows]
+
+    with patch.object(chat_tools.db, "query", new=AsyncMock(side_effect=real_query)):
+        rows = await _search_local_email_cache("u1", "acme invoice", ["acme", "invoice"], 5)
+
+    assert prepared.get("sql"), "query should have been prepared/executed"
+    # Both the inbound and the sent match come back, with a real numeric rank
+    # and a real sort_at timestamp resolved from the outer query.
+    ids = {r["id"] for r in rows}
+    assert ids == {"i1", "s1"}
+    for r in rows:
+        assert isinstance(r["rank"], int)
+        assert r["sort_at"] is not None
+    # Rank ordering holds (DESC) — the focused sender+subject hits score highest.
+    ranks = [r["rank"] for r in rows]
+    assert ranks == sorted(ranks, reverse=True)
 
 
 # ---------------------------------------------------------------------------
