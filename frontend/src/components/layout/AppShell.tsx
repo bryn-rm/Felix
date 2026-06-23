@@ -11,9 +11,13 @@ import {
   Target,
   Users,
   FileText,
+  Briefcase,
   Settings,
   Bell,
 } from "lucide-react";
+import useSWR from "swr";
+import { api } from "@/lib/api";
+import type { Settings as UserSettings } from "@/lib/types";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { GoogleDisconnectedBanner } from "@/components/layout/GoogleDisconnectedBanner";
 import { VoiceProvider, useVoiceContext } from "@/components/felix/VoiceContext";
@@ -33,6 +37,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/calendar": "Calendar",
   "/follow-ups": "Follow-ups",
   "/commitments": "Commitments",
+  "/jobs": "Jobs",
   "/contacts": "Contacts",
   "/templates": "Templates",
   "/settings": "Settings",
@@ -77,6 +82,17 @@ function initials(displayName: string | null, email: string): string {
 function ShellInner({ userEmail, displayName, children }: AppShellProps) {
   const pathname = usePathname();
   const { modalOpen } = useVoiceContext();
+  // Fail closed: Jobs appears in the mobile nav only when explicitly enabled.
+  const { data: settings } = useSWR<UserSettings>("/settings", (url: string) =>
+    api.get<UserSettings>(url),
+  );
+  const mobileNav = settings?.job_search_mode
+    ? [
+        ...MOBILE_NAV.slice(0, 6),
+        { href: "/jobs", icon: Briefcase, label: "Jobs" },
+        ...MOBILE_NAV.slice(6),
+      ]
+    : MOBILE_NAV;
 
   const title = getPageTitle(pathname);
   const avatarText = initials(displayName, userEmail);
@@ -121,7 +137,7 @@ function ShellInner({ userEmail, displayName, children }: AppShellProps) {
         className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around overflow-x-auto border-t border-white/[0.04] bg-[#0d1526] py-2 md:hidden"
         aria-label="Mobile navigation"
       >
-        {MOBILE_NAV.map(({ href, icon: Icon, label }) => {
+        {mobileNav.map(({ href, icon: Icon, label }) => {
           const active = pathname === href || pathname.startsWith(href + "/");
           return (
             <Link

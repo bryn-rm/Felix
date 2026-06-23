@@ -94,6 +94,34 @@ async def _check_user_follow_ups(user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Job follow-up checker — every hour (Job Search Mode; per-user gated)
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("interval", hours=1, id="check_all_job_followups")
+async def check_all_job_followups() -> None:
+    """Flag due job-board actions for users with Job Search Mode on."""
+    try:
+        users = await get_active_users()
+        if not users:
+            return
+        results = await asyncio.gather(
+            *[_check_user_job_followups(u["user_id"]) for u in users],
+            return_exceptions=True,
+        )
+        for user, result in zip(users, results):
+            if isinstance(result, Exception):
+                logger.error("Job follow-up check failed for user %s: %s",
+                             user["user_id"], result)
+    except Exception:
+        logger.exception("check_all_job_followups outer error")
+
+
+async def _check_user_job_followups(user_id: str) -> None:
+    from app.jobs.job_followup_checker import check_user_job_followups
+    await check_user_job_followups(user_id)
+
+
+# ---------------------------------------------------------------------------
 # Morning briefing — check every 5 minutes, fire at each user's configured time
 # ---------------------------------------------------------------------------
 

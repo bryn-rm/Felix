@@ -627,6 +627,27 @@ async def send_email(
         name="followup_detection_sent",
     )
 
+    # Job Search Mode — log an outbound event on a tracked job (and clear a due
+    # follow-up badge when this send satisfies it). Self-gates on the flag and
+    # no-ops when the thread/recipient maps to no tracked job. Non-blocking.
+    from app.services.job_tracker_service import job_tracker_service
+    spawn(
+        job_tracker_service.log_outbound_event(
+            current_user["id"],
+            {
+                # Fall back to the replied-to email id so source_id is never
+                # NULL: _add_event only de-dupes when source_id is truthy, so a
+                # missing Gmail id would let a retried send double-log the event.
+                "id":        result.get("id") or email_id,
+                "thread_id": email.get("thread_id") or "",
+                "to_email":  email.get("from_email") or "",
+                "subject":   email.get("subject") or "",
+                "body":      send_text,
+            },
+        ),
+        name="job_outbound_event",
+    )
+
     return {"sent": True, "gmail_message_id": result.get("id")}
 
 

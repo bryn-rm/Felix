@@ -79,6 +79,15 @@ def _is_provider_quota_error(exc: BaseException) -> bool:
     )
 
 
+# Categories whose mail is never about a specific application, so the job scan
+# skips them. ATS confirmations ("we received your application") are sent by
+# no-reply senders and get triaged 'automated', so 'automated' must NOT be
+# excluded here — that's the single cleanest 'applied' signal and the
+# deterministic gate in job_tracker_service already bounds the model cost. Only
+# 'newsletter' (job-board digests / marketing) is dropped.
+_JOB_SCAN_SKIP_CATEGORIES = {"newsletter"}
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -96,7 +105,8 @@ async def sync_user_inbox(user_id: str) -> None:
         return
 
     user_settings = await db.query_one(
-        "SELECT display_name, vip_contacts, style_profile FROM settings WHERE user_id = $1",
+        "SELECT display_name, vip_contacts, style_profile, job_search_mode "
+        "FROM settings WHERE user_id = $1",
         user_id,
     )
     if not user_settings:
@@ -107,6 +117,8 @@ async def sync_user_inbox(user_id: str) -> None:
     user_name: str = user_settings.get("display_name") or "User"
     vip_list: list[str] = user_settings.get("vip_contacts") or []
     style_profile: dict = user_settings.get("style_profile") or {}
+    # Fails closed: when the flag is off/unset no job detection runs.
+    job_search_mode: bool = bool(user_settings.get("job_search_mode"))
 
     # Snapshot last_sync up front so the sent-mail mirror's "after:" floor
     # can't be poisoned by _touch_last_sync running before the background
@@ -142,6 +154,7 @@ async def sync_user_inbox(user_id: str) -> None:
                     user_name=user_name,
                     style_profile=style_profile,
                     label_cache=label_cache,
+                    job_search_mode=job_search_mode,
                 )
             except ProviderQuotaError as exc:
                 # Provider is out of credit / rate-limited — every remaining
@@ -161,13 +174,21 @@ async def sync_user_inbox(user_id: str) -> None:
     # Mirror Gmail "in:sent" so commitment detection + weekly stats see the
     # full picture, not just Felix-assisted drafts. Idempotent — dedupes on
     # (id, user_id) PK in sent_emails.
-    spawn(_mirror_recent_sent(user_id, gmail, last_sync_at), name="inbox_sent_mirror")
+    spawn(
+        _mirror_recent_sent(user_id, gmail, last_sync_at, job_search_mode=job_search_mode),
+        name="inbox_sent_mirror",
+    )
 
     # Catch-up sweep: any rows whose commitment scan failed previously will
     # have commitment_scanned_at IS NULL. Retry up to 20 of each per run; the
     # 7-day window stops permanently-bad rows from being retried forever.
     spawn(_catch_up_inbound_commitment_scans(user_id), name="commitment_catchup_inbound")
     spawn(_catch_up_sent_commitment_scans(user_id), name="commitment_catchup_sent")
+
+    # Job-scan retries — only when Job Search Mode is on (fail-closed).
+    if job_search_mode:
+        spawn(_catch_up_inbound_job_scans(user_id), name="job_catchup_inbound")
+        spawn(_catch_up_sent_job_scans(user_id), name="job_catchup_sent")
 
     await _touch_last_sync(user_id)
 
@@ -185,6 +206,7 @@ async def _process_email(
     user_name: str,
     style_profile: dict,
     label_cache: dict[str, str],
+    job_search_mode: bool = False,
 ) -> None:
     """Triage, persist, label, and optionally draft a single email."""
     email_id: str = email["id"]
@@ -285,6 +307,34 @@ async def _process_email(
                     raise ProviderQuotaError(str(exc)) from exc
                 logger.warning(
                     "commitment scan failed for email %s; will retry on next sync",
+                    email_id, exc_info=True,
+                )
+
+        # 9. Job Search Mode — detect application activity. Gated + fail-closed:
+        #    skipped entirely unless the user enabled the flag. The service runs
+        #    a deterministic pre-filter before any model call (cost control).
+        if job_search_mode and category not in _JOB_SCAN_SKIP_CATEGORIES:
+            try:
+                from app.services.job_tracker_service import job_tracker_service
+                await job_tracker_service.scan_email(user_id, {
+                    **email,
+                    "from_email": email.get("from_email", ""),
+                    "from_name":  email.get("from_name", ""),
+                })
+                # Stamp on success so the catch-up sweep can skip it. A failure
+                # leaves job_scanned_at NULL and _catch_up_inbound_job_scans
+                # retries — the felix-processed label otherwise excludes this
+                # email from the next sync entirely.
+                await db.execute(
+                    "UPDATE emails SET job_scanned_at = NOW() "
+                    "WHERE id = $1 AND user_id = $2",
+                    email_id, user_id,
+                )
+            except Exception as exc:
+                if _is_provider_quota_error(exc):
+                    raise ProviderQuotaError(str(exc)) from exc
+                logger.warning(
+                    "job scan failed for email %s; will retry on next sync",
                     email_id, exc_info=True,
                 )
 
@@ -473,6 +523,8 @@ async def _mirror_recent_sent(
     user_id: str,
     gmail: GmailService,
     last_sync_at: datetime | None,
+    *,
+    job_search_mode: bool = False,
 ) -> None:
     """Mirror Gmail "in:sent" messages into `sent_emails`.
 
@@ -579,6 +631,53 @@ async def _mirror_recent_sent(
                 msg_id, exc_info=True,
             )
 
+        # Job Search Mode — the user's own outbound application is often the
+        # cleanest "applied" signal. Gated + fail-closed; best-effort. Abort the
+        # whole mirror on a provider-quota error instead of burning a failed
+        # Sonnet call per remaining message (mirrors the inbound batch's abort).
+        if job_search_mode:
+            if not await _job_scan_one_sent(user_id, msg_id, msg, to_emails, to_names):
+                return
+
+
+async def _job_scan_one_sent(
+    user_id: str,
+    msg_id: str,
+    msg: dict,
+    to_emails: list[str],
+    to_names: list[str],
+) -> bool:
+    """Job-scan one mirrored sent message. Returns True to keep mirroring, False
+    to abort the mirror loop (provider quota exhausted — every remaining message
+    would burn the same failed Sonnet call). Stamps job_scanned_at on success;
+    leaves it NULL on a non-quota failure so _catch_up_sent_job_scans retries.
+    """
+    from app.services.job_tracker_service import job_tracker_service
+    try:
+        await job_tracker_service.scan_sent(user_id, {
+            **msg,
+            "to_emails": to_emails,
+            "to_names":  to_names,
+        })
+        await db.execute(
+            "UPDATE sent_emails SET job_scanned_at = NOW() "
+            "WHERE id = $1 AND user_id = $2",
+            msg_id, user_id,
+        )
+        return True
+    except Exception as exc:
+        if _is_provider_quota_error(exc):
+            logger.error(
+                "Aborting sent-mirror job scans for user %s — AI provider quota error: %s",
+                user_id, exc,
+            )
+            return False
+        logger.warning(
+            "job scan failed for sent message %s; will retry on next sync",
+            msg_id, exc_info=True,
+        )
+        return True
+
 
 # ---------------------------------------------------------------------------
 # Commitment scan catch-up sweeps
@@ -589,6 +688,13 @@ async def _mirror_recent_sent(
 
 _CATCH_UP_BATCH = 20
 _CATCH_UP_LOOKBACK_DAYS = 7
+
+# Job-scan sweeps drain a larger batch than the commitment sweeps: a provider
+# outage can strand a whole sync's worth of job-relevant mail, and a backlog
+# bigger than the batch that's drained newest-first would let the oldest rows
+# age past the lookback window and be lost forever. The sweeps below order
+# oldest-first for the same reason.
+_JOB_CATCH_UP_BATCH = 50
 
 
 async def _catch_up_inbound_commitment_scans(user_id: str) -> None:
@@ -653,6 +759,77 @@ async def _catch_up_sent_commitment_scans(user_id: str) -> None:
                 )
     except Exception:
         logger.exception("sent commitment catch-up sweep crashed for user %s", user_id)
+
+
+# ---------------------------------------------------------------------------
+# Job-scan catch-up sweeps (Job Search Mode)
+# Same bounded-retry shape as the commitment sweeps, keyed on job_scanned_at.
+# Only spawned when job_search_mode is on (see sync_user_inbox).
+# ---------------------------------------------------------------------------
+
+
+async def _catch_up_inbound_job_scans(user_id: str) -> None:
+    try:
+        from app.services.job_tracker_service import job_tracker_service
+        rows = await db.query(
+            f"""
+            SELECT id, thread_id, from_email, from_name, subject, body,
+                   received_at, category
+            FROM emails
+            WHERE user_id = $1
+              AND job_scanned_at IS NULL
+              AND received_at > NOW() - INTERVAL '{_CATCH_UP_LOOKBACK_DAYS} days'
+              AND COALESCE(category, '') <> 'newsletter'
+            ORDER BY received_at ASC
+            LIMIT {_JOB_CATCH_UP_BATCH}
+            """,
+            user_id,
+        )
+        for row in rows:
+            try:
+                await job_tracker_service.scan_email(user_id, dict(row))
+                await db.execute(
+                    "UPDATE emails SET job_scanned_at = NOW() "
+                    "WHERE id = $1 AND user_id = $2",
+                    row["id"], user_id,
+                )
+            except Exception:
+                logger.debug(
+                    "catch-up inbound job scan still failing for %s", row["id"], exc_info=True,
+                )
+    except Exception:
+        logger.exception("inbound job catch-up sweep crashed for user %s", user_id)
+
+
+async def _catch_up_sent_job_scans(user_id: str) -> None:
+    try:
+        from app.services.job_tracker_service import job_tracker_service
+        rows = await db.query(
+            f"""
+            SELECT id, thread_id, from_email, to_emails, to_names, subject, body, sent_at
+            FROM sent_emails
+            WHERE user_id = $1
+              AND job_scanned_at IS NULL
+              AND sent_at > NOW() - INTERVAL '{_CATCH_UP_LOOKBACK_DAYS} days'
+            ORDER BY sent_at ASC
+            LIMIT {_JOB_CATCH_UP_BATCH}
+            """,
+            user_id,
+        )
+        for row in rows:
+            try:
+                await job_tracker_service.scan_sent(user_id, dict(row))
+                await db.execute(
+                    "UPDATE sent_emails SET job_scanned_at = NOW() "
+                    "WHERE id = $1 AND user_id = $2",
+                    row["id"], user_id,
+                )
+            except Exception:
+                logger.debug(
+                    "catch-up sent job scan still failing for %s", row["id"], exc_info=True,
+                )
+    except Exception:
+        logger.exception("sent job catch-up sweep crashed for user %s", user_id)
 
 
 # ---------------------------------------------------------------------------

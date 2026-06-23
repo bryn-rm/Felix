@@ -447,6 +447,7 @@ export default function SettingsPage() {
 
   const [meetingPrepMode, setMeetingPrepMode] =
     useState<MeetingPrepMode>("in_app_only");
+  const [jobSearchMode, setJobSearchMode] = useState(false);
 
   const [deepWorkInput, setDeepWorkInput] = useState("");
   const [meetingsInput, setMeetingsInput] = useState("");
@@ -475,6 +476,7 @@ export default function SettingsPage() {
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [savingVip, setSavingVip] = useState(false);
   const [savingMeetingPrep, setSavingMeetingPrep] = useState(false);
+  const [savingJobSearch, setSavingJobSearch] = useState(false);
   const [savingEnergy, setSavingEnergy] = useState(false);
   const [savingVoice, setSavingVoice] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -490,6 +492,7 @@ export default function SettingsPage() {
       setDigestTimes(settings.digest_times);
       setVipContacts(settings.vip_contacts);
       setMeetingPrepMode(settings.meeting_prep_mode ?? "in_app_only");
+      setJobSearchMode(settings.job_search_mode ?? false);
       setDeepWorkInput(windowsToString(settings.energy_profile?.deep_work));
       setMeetingsInput(windowsToString(settings.energy_profile?.meetings));
       setFelixVoiceId(settings.felix_voice_id ?? "");
@@ -558,6 +561,11 @@ export default function SettingsPage() {
   function saveMeetingPrepMode(mode: MeetingPrepMode) {
     setMeetingPrepMode(mode);
     patchSettings({ meeting_prep_mode: mode }, setSavingMeetingPrep);
+  }
+
+  function saveJobSearchMode(enabled: boolean) {
+    setJobSearchMode(enabled);
+    patchSettings({ job_search_mode: enabled }, setSavingJobSearch);
   }
 
   function saveEnergyProfile() {
@@ -858,6 +866,35 @@ export default function SettingsPage() {
                 </button>
               );
             })}
+          </div>
+        </Section>
+
+        <Divider />
+
+        {/* ================================================================
+            Job Search Mode
+        ================================================================ */}
+        <Section title="Job Search Mode">
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-xs text-slate-500">
+              Track job applications on a board, auto-populated from your inbox.
+              Adds a Jobs page; off by default.
+            </p>
+            <button
+              role="switch"
+              aria-checked={jobSearchMode}
+              disabled={savingJobSearch}
+              onClick={() => saveJobSearchMode(!jobSearchMode)}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                jobSearchMode ? "bg-indigo-600" : "bg-slate-600"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  jobSearchMode ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
           </div>
         </Section>
 

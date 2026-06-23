@@ -105,6 +105,7 @@ export interface Settings {
   vip_contacts: string[];
   style_profile: StyleProfile | null;
   meeting_prep_mode: MeetingPrepMode;
+  job_search_mode: boolean;
   energy_profile: EnergyProfile | null;
   felix_voice_id: string | null;
 }
@@ -141,6 +142,98 @@ export interface Commitment {
   status: "open" | "done" | "dropped" | "rescued";
   created_at: string;
   resolved_at: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Job Search Mode
+// ---------------------------------------------------------------------------
+
+export type JobStatus =
+  | "saved"
+  | "applied"
+  | "phone_screen"
+  | "interview"
+  | "offer"
+  | "rejected"
+  | "accepted"
+  | "withdrawn";
+
+export interface JobApplication {
+  id: string;
+  thread_id: string | null;
+  company: string;
+  role_title: string;
+  location: string | null;
+  job_url: string | null;
+  status: JobStatus;
+  source: "manual" | "email" | "calendar";
+  contact_name: string | null;
+  contact_email: string | null;
+  compensation: string | null;
+  notes: string | null;
+  applied_at: string | null;
+  last_activity_at: string | null;
+  next_action: string | null;
+  next_action_at: string | null;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+  /** Computed server-side: next_action_at is in the past. */
+  is_due?: boolean;
+}
+
+export type JobEventType =
+  | "applied"
+  | "email_in"
+  | "email_out"
+  | "interview_scheduled"
+  | "status_change"
+  | "note"
+  | "follow_up_sent";
+
+export interface JobEvent {
+  id: string;
+  job_id: string;
+  event_type: JobEventType;
+  title: string | null;
+  detail: string | null;
+  source_kind: "email" | "calendar" | "manual" | null;
+  source_id: string | null;
+  occurred_at: string;
+  created_at: string;
+}
+
+export interface JobSuggestion {
+  id: string;
+  source_kind: "email" | "calendar" | null;
+  source_id: string | null;
+  thread_id: string | null;
+  company: string | null;
+  role_title: string | null;
+  contact_name: string | null;
+  contact_email: string | null;
+  proposed_status: JobStatus | null;
+  proposed_job_id: string | null;
+  summary: string | null;
+  confidence: number | null;
+  status: "pending" | "accepted" | "dismissed" | "auto_dismissed";
+  resolved_at: string | null;
+  created_at: string;
+}
+
+/** Active board columns are the positive ladder; terminal statuses collapse into "closed". */
+export type JobBoardColumnKey =
+  | "saved"
+  | "applied"
+  | "phone_screen"
+  | "interview"
+  | "offer"
+  | "closed";
+
+export interface JobBoard {
+  columns: Record<JobBoardColumnKey, JobApplication[]>;
+  counts: Record<string, number>;
+  total: number;
 }
 
 export interface MeetingPrep {

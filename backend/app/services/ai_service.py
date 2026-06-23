@@ -24,6 +24,7 @@ from app.prompts.briefing import BRIEFING_PROMPT
 from app.prompts.commitment_detection import COMMITMENT_DETECTION_PROMPT
 from app.prompts.draft import DRAFT_PROMPT
 from app.prompts.follow_up_detection import FOLLOW_UP_DETECTION_PROMPT
+from app.prompts.job_detection import JOB_DETECTION_PROMPT
 from app.prompts.meeting_notes import MEETING_NOTES_PROMPT
 from app.prompts.sentiment import SENTIMENT_PROMPT
 from app.prompts.style_analysis import STYLE_ANALYSIS_PROMPT
@@ -61,6 +62,7 @@ PROMPT_VERSIONS: dict[str, str] = {
     "weekly_review":      "v1",
     "meeting_prep":       "v1",
     "commitment_detect":  "v1",
+    "job_detect":         "v1",
 }
 
 
@@ -931,6 +933,104 @@ class AIService:
             await log_ai_call(
                 feature="commitment_detect",
                 model=settings.ANTHROPIC_MODEL_FAST,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+                quota_scope="background",
+            )
+
+    # ------------------------------------------------------------------
+    # Job-search detection — Sonnet
+    #
+    # Sonnet (not Haiku): stage misclassification (phone_screen vs interview
+    # vs offer) directly corrupts the Kanban board and Haiku is shaky on it.
+    # Only called on emails that already cleared the deterministic gate in
+    # job_tracker_service, so the cost is bounded.
+    # ------------------------------------------------------------------
+
+    async def detect_job_activity(
+        self,
+        email: dict,
+        *,
+        user_id: str | None = None,
+    ) -> dict:
+        """Extract job-application fields from one pre-filtered email.
+
+        Returns ``{is_job_related, company, role_title, stage, contact_name,
+        contact_email, confidence, summary}``.
+
+        Raises on a malformed-JSON / schema parse failure (mirroring
+        ``detect_commitments``) so the inbox-sync caller leaves job_scanned_at
+        NULL and the catch-up sweep retries — returning a falsy result here
+        would be indistinguishable from a valid "not job related" answer and
+        would get the email stamped as scanned, dropping it permanently.
+        """
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
+        try:
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=400,
+                **_system_kwarg(None),
+                messages=[{
+                    "role": "user",
+                    "content": JOB_DETECTION_PROMPT.format(
+                        from_email=email.get("from_email") or email.get("from") or "",
+                        to_email=email.get("to_email") or email.get("to") or "",
+                        subject=email.get("subject") or "",
+                        sent_at=str(email.get("sent_at") or email.get("received_at") or ""),
+                        body=(email.get("body") or "")[:4000],
+                    ),
+                }],
+            )
+            try:
+                payload = json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                # Re-raise so the caller leaves job_scanned_at NULL and the
+                # catch-up sweep retries (a transient parse failure on a
+                # job-related email must not be silently dropped).
+                parse_error = True
+                success = False
+                error_message = f"JSONDecodeError: {e}"
+                logger.warning("job detection response was not valid JSON: %s",
+                               response.content[0].text)
+                raise
+            if not isinstance(payload, dict):
+                parse_error = True
+                success = False
+                error_message = f"expected object, got {type(payload).__name__}"
+                raise ValueError(error_message)
+
+            stage = payload.get("stage")
+            valid_stages = {
+                "saved", "applied", "phone_screen", "interview",
+                "offer", "rejected", "accepted", "withdrawn",
+            }
+            return {
+                "is_job_related": bool(payload.get("is_job_related")),
+                "company":        (payload.get("company") or "").strip() or None,
+                "role_title":     (payload.get("role_title") or "").strip() or None,
+                "stage":          stage if stage in valid_stages else None,
+                "contact_name":   (payload.get("contact_name") or "").strip() or None,
+                "contact_email":  (payload.get("contact_email") or "").strip().lower() or None,
+                "confidence":     _coerce_float(payload.get("confidence"), 0.5),
+                "summary":        (payload.get("summary") or "").strip() or None,
+            }
+        except Exception as e:
+            success = False
+            if not error_message:
+                error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="job_detect",
+                model=settings.ANTHROPIC_MODEL_SMART,
                 response=response,
                 started_at=started,
                 user_id=user_id,

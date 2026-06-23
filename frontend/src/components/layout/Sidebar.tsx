@@ -22,6 +22,7 @@ import {
   Calendar,
   Clock,
   Target,
+  Briefcase,
   Users,
   FileText,
   Settings,
@@ -29,10 +30,12 @@ import {
   ChevronsLeft,
   ChevronsRight,
 } from "lucide-react";
-import { useSWRConfig } from "swr";
+import useSWR, { useSWRConfig } from "swr";
 import { supabase } from "@/lib/supabase";
+import { api } from "@/lib/api";
 import { clearAllSWR } from "@/components/auth/AuthSync";
 import { useUnreadCounts } from "@/hooks/useUnreadCounts";
+import type { Settings as UserSettings } from "@/lib/types";
 
 interface NavItem {
   href: string;
@@ -64,6 +67,11 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
   const router = useRouter();
   const { actionRequired, overdueFollowups } = useUnreadCounts();
   const { mutate } = useSWRConfig();
+  // Fail closed: the Jobs item only appears when job_search_mode is explicitly on.
+  const { data: settings } = useSWR<UserSettings>("/settings", (url: string) =>
+    api.get<UserSettings>(url),
+  );
+  const jobSearchEnabled = settings?.job_search_mode === true;
 
   const [pinned, setPinned] = useState(false);
   const [hoverExpanded, setHoverExpanded] = useState(false);
@@ -110,6 +118,9 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
       badge: overdueFollowups > 0 ? overdueFollowups : undefined,
     },
     { href: "/commitments", label: "Commitments", icon: Target },
+    ...(jobSearchEnabled
+      ? [{ href: "/jobs", label: "Jobs", icon: Briefcase } as NavItem]
+      : []),
     { href: "/contacts", label: "Contacts", icon: Users },
     { href: "/templates", label: "Templates", icon: FileText },
     { href: "/settings", label: "Settings", icon: Settings },
