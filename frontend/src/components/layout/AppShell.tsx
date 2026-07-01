@@ -12,6 +12,7 @@ import {
   Users,
   FileText,
   Briefcase,
+  Radio,
   Settings,
   Bell,
 } from "lucide-react";
@@ -38,6 +39,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/follow-ups": "Follow-ups",
   "/commitments": "Commitments",
   "/jobs": "Jobs",
+  "/meetings": "Meetings",
   "/contacts": "Contacts",
   "/templates": "Templates",
   "/settings": "Settings",
@@ -82,17 +84,21 @@ function initials(displayName: string | null, email: string): string {
 function ShellInner({ userEmail, displayName, children }: AppShellProps) {
   const pathname = usePathname();
   const { modalOpen } = useVoiceContext();
-  // Fail closed: Jobs appears in the mobile nav only when explicitly enabled.
+  // Fail closed: Jobs / Meetings appear in the mobile nav only when their
+  // per-user mode is explicitly enabled. Both slot in after Commitments.
   const { data: settings } = useSWR<UserSettings>("/settings", (url: string) =>
     api.get<UserSettings>(url),
   );
-  const mobileNav = settings?.job_search_mode
-    ? [
-        ...MOBILE_NAV.slice(0, 6),
-        { href: "/jobs", icon: Briefcase, label: "Jobs" },
-        ...MOBILE_NAV.slice(6),
-      ]
-    : MOBILE_NAV;
+  const mobileNav = [
+    ...MOBILE_NAV.slice(0, 6),
+    ...(settings?.job_search_mode
+      ? [{ href: "/jobs", icon: Briefcase, label: "Jobs" }]
+      : []),
+    ...(settings?.meeting_capture_mode
+      ? [{ href: "/meetings", icon: Radio, label: "Meetings" }]
+      : []),
+    ...MOBILE_NAV.slice(6),
+  ];
 
   const title = getPageTitle(pathname);
   const avatarText = initials(displayName, userEmail);

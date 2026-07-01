@@ -26,6 +26,7 @@ from app.prompts.draft import DRAFT_PROMPT
 from app.prompts.follow_up_detection import FOLLOW_UP_DETECTION_PROMPT
 from app.prompts.job_detection import JOB_DETECTION_PROMPT
 from app.prompts.meeting_notes import MEETING_NOTES_PROMPT
+from app.prompts.meeting_summary import MEETING_SUMMARY_PROMPT, guidance_for
 from app.prompts.sentiment import SENTIMENT_PROMPT
 from app.prompts.style_analysis import STYLE_ANALYSIS_PROMPT
 from app.prompts.triage import TRIAGE_PROMPT
@@ -50,6 +51,7 @@ PROMPT_VERSIONS: dict[str, str] = {
     "draft":              "v1",
     "style_analysis":     "v1",
     "meeting_notes":      "v1",
+    "meeting_summary":    "v1",
     "briefing":           "v1",
     "voice_intent":       "v1",
     "voice_general":      "v1",
@@ -473,6 +475,87 @@ class AIService:
                 success=success,
                 parse_error=parse_error,
                 error_message=error_message,
+            )
+
+    # ------------------------------------------------------------------
+    # Meeting capture summary — Sonnet
+    #
+    # Distinct from generate_meeting_notes (voice path, left untouched). Produces
+    # the capture output schema consumed by meeting_service.summarize_meeting.
+    # ------------------------------------------------------------------
+
+    async def summarize_meeting(
+        self,
+        transcript: str,
+        user_notes: str,
+        template: str = "general",
+        *,
+        meeting_date: str | None = None,
+        user_id: str | None = None,
+        memory_context: str | None = None,
+    ) -> dict:
+        """
+        Summarise a captured meeting into the capture schema:
+            {tldr, decisions:[{text}],
+             action_items:[{text, owner, due_hint, due_iso}],
+             enhanced_notes:[{origin, text}], confidence}
+
+        `transcript` is the speaker-tagged, time-ordered transcript ("me"/"them");
+        `user_notes` is the user's verbatim live notes (may be empty). `meeting_date`
+        (ISO) anchors relative deadlines so `due_iso` resolves to a real date.
+        """
+        started = time.monotonic()
+        response = None
+        success = True
+        parse_error = False
+        error_message: str | None = None
+        try:
+            memory_context = await _auto_memory(memory_context, user_id, feature="meeting_summary")
+            response = await client.messages.create(
+                model=settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=4000,
+                **_system_kwarg(memory_context),
+                messages=[{
+                    "role": "user",
+                    "content": MEETING_SUMMARY_PROMPT.format(
+                        template_guidance=guidance_for(template),
+                        meeting_date=meeting_date or "(unknown)",
+                        transcript=transcript,
+                        user_notes=user_notes or "(none)",
+                    ),
+                }],
+            )
+            try:
+                return json.loads(_strip_markdown_fences(response.content[0].text))
+            except json.JSONDecodeError as e:
+                parse_error = True
+                error_message = f"JSONDecodeError: {e}"
+                logger.warning("Meeting summary response was not valid JSON")
+                return {
+                    "tldr": response.content[0].text,
+                    "decisions": [],
+                    "action_items": [],
+                    "enhanced_notes": [],
+                    "confidence": 0.0,
+                    # Signals an unusable summary so the caller leaves the meeting
+                    # in 'error' (recoverable via /summarize) rather than 'done'.
+                    "parse_error": True,
+                }
+        except Exception as e:
+            success = False
+            error_message = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            await log_ai_call(
+                feature="meeting_summary",
+                model=settings.ANTHROPIC_MODEL_SMART,
+                response=response,
+                started_at=started,
+                user_id=user_id,
+                success=success,
+                parse_error=parse_error,
+                error_message=error_message,
+                quota_scope="background",
             )
 
     # ------------------------------------------------------------------

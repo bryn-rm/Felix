@@ -100,6 +100,7 @@ class SettingsUpdate(BaseModel):
     felix_voice_id: str | None = None
     meeting_prep_mode: str | None = None  # off | email_only | in_app_only | both
     job_search_mode: bool | None = None   # gate for Job Search Mode (fails closed)
+    meeting_capture_mode: bool | None = None  # gate for Meeting Capture (fails closed)
 
     @field_validator("timezone")
     @classmethod

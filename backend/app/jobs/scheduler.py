@@ -473,6 +473,24 @@ async def _send_meeting_prep_email(user_id: str, prep: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Meeting capture — auto-end stale recordings every 5 minutes
+# Finalizes meetings the client never stopped (tab closed / crash / forgot).
+# The checker queries status='recording' DIRECTLY (NOT get_active_users, which
+# skips non-Google users); see meeting_autoend_checker for the trigger logic.
+# ---------------------------------------------------------------------------
+
+@scheduler.scheduled_job("interval", minutes=5, id="check_stale_meetings")
+async def check_stale_meetings() -> None:
+    try:
+        from app.jobs.meeting_autoend_checker import check_stale_meetings as _sweep
+        n = await _sweep()
+        if n:
+            logger.info("Auto-ended %d stale meeting(s)", n)
+    except Exception:
+        logger.exception("check_stale_meetings failed")
+
+
+# ---------------------------------------------------------------------------
 # Expired OAuth nonce sweep — hourly
 # Nonces are keyed per-attempt so abandoned ones accumulate unless swept.
 # ---------------------------------------------------------------------------

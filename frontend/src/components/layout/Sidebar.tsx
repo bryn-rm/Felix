@@ -23,6 +23,7 @@ import {
   Clock,
   Target,
   Briefcase,
+  Radio,
   Users,
   FileText,
   Settings,
@@ -72,6 +73,8 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
     api.get<UserSettings>(url),
   );
   const jobSearchEnabled = settings?.job_search_mode === true;
+  // Fail closed: the Meetings item only appears when meeting_capture_mode is on.
+  const meetingCaptureEnabled = settings?.meeting_capture_mode === true;
 
   const [pinned, setPinned] = useState(false);
   const [hoverExpanded, setHoverExpanded] = useState(false);
@@ -120,6 +123,9 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
     { href: "/commitments", label: "Commitments", icon: Target },
     ...(jobSearchEnabled
       ? [{ href: "/jobs", label: "Jobs", icon: Briefcase } as NavItem]
+      : []),
+    ...(meetingCaptureEnabled
+      ? [{ href: "/meetings", label: "Meetings", icon: Radio } as NavItem]
       : []),
     { href: "/contacts", label: "Contacts", icon: Users },
     { href: "/templates", label: "Templates", icon: FileText },

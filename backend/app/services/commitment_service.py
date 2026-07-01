@@ -289,6 +289,84 @@ class CommitmentService:
             ), name="commitment_denormalise_remove")
         return row
 
+    # ------------------------------------------------------------------
+    # Meeting-sourced commitments
+    # ------------------------------------------------------------------
+
+    async def create_from_meeting(
+        self,
+        user_id: str,
+        *,
+        text: str,
+        deadline: datetime | None = None,
+        meeting_id: str,
+        counterparty_email: str | None = None,
+        counterparty_name: str | None = None,
+    ) -> dict | None:
+        """Create a commitment from a meeting action item the user owns.
+
+        Direction is always `owed_by_user` (the user committed in the meeting).
+        Reuses the same dedupe + contact/memory fan-out as email-sourced
+        commitments so the follow-up engine surfaces it with no extra logic.
+        Idempotent per (meeting, text) so an error-recovery re-run of
+        `summarize_meeting` doesn't duplicate rows.
+        """
+        text = (text or "").strip()
+        if not text:
+            return None
+        cp_email = (counterparty_email or "").strip().lower() or None
+        direction = "owed_by_user"
+
+        existing = await db.query_one(
+            """
+            SELECT id FROM commitments
+            WHERE user_id = $1
+              AND source_meeting_id = $2
+              AND LOWER(text) = LOWER($3)
+            """,
+            user_id, meeting_id, text,
+        )
+        if existing:
+            return None
+
+        row = await db.insert(
+            "commitments",
+            {
+                "user_id":            user_id,
+                "source_kind":        "meeting",
+                "source_meeting_id":  meeting_id,
+                "direction":          direction,
+                "counterparty_email": cp_email,
+                "counterparty_name":  counterparty_name,
+                "text":               text,
+                "deadline":           deadline,
+                "confidence":         0.9,
+                "status":             "open",
+            },
+        )
+        if not row:
+            return None
+
+        # Fan-out (best-effort) — only meaningful when we know the counterparty.
+        if cp_email:
+            spawn(_denormalise_to_contact(
+                user_id=user_id,
+                counterparty_email=cp_email,
+                direction=direction,
+                text=text,
+            ), name="commitment_denormalise")
+            spawn(_write_commitment_episode(
+                user_id=user_id,
+                counterparty_email=cp_email,
+                counterparty_name=counterparty_name,
+                direction=direction,
+                text=text,
+                deadline=deadline,
+                source_email_id=None,
+            ), name="commitment_episode")
+
+        return row
+
 
 commitment_service = CommitmentService()
 

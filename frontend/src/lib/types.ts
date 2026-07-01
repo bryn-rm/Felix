@@ -106,6 +106,7 @@ export interface Settings {
   style_profile: StyleProfile | null;
   meeting_prep_mode: MeetingPrepMode;
   job_search_mode: boolean;
+  meeting_capture_mode: boolean;
   energy_profile: EnergyProfile | null;
   felix_voice_id: string | null;
 }
@@ -234,6 +235,91 @@ export interface JobBoard {
   columns: Record<JobBoardColumnKey, JobApplication[]>;
   counts: Record<string, number>;
   total: number;
+}
+
+// ---------------------------------------------------------------------------
+// Meeting Capture (Granola-style browser capture)
+// ---------------------------------------------------------------------------
+
+export type MeetingTemplate =
+  | "general"
+  | "one_on_one"
+  | "interview"
+  | "sales"
+  | "standup"
+  | "user_research";
+
+export type MeetingStatus =
+  | "idle"
+  | "recording"
+  | "processing"
+  | "done"
+  | "error";
+
+export type TranscriptSpeaker = "me" | "them";
+
+export interface Meeting {
+  id: string;
+  calendar_event_id: string | null;
+  title: string | null;
+  attendees: string[];
+  date: string | null;
+  template: MeetingTemplate | string | null;
+  status: MeetingStatus;
+  source: string;
+  user_notes: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface TranscriptSegment {
+  id: string;
+  meeting_id: string;
+  speaker: TranscriptSpeaker;
+  text: string;
+  ts_start: number;
+  ts_end: number | null;
+  created_at: string;
+}
+
+export interface Decision {
+  text: string;
+}
+
+export interface ActionItem {
+  text: string;
+  /** "me" = the user (mic channel), "them", or a named attendee. */
+  owner: string;
+  due_hint: string | null;
+  /** due_hint resolved to an absolute ISO date by the summarizer, or null. */
+  due_iso?: string | null;
+}
+
+export interface EnhancedNote {
+  /** "user" blocks are the user's notes verbatim; "ai" blocks are added context. */
+  origin: "user" | "ai";
+  text: string;
+}
+
+export interface MeetingSummary {
+  id: string;
+  meeting_id: string;
+  tldr: string | null;
+  decisions: Decision[];
+  action_items: ActionItem[];
+  enhanced_notes: EnhancedNote[];
+  model: string | null;
+  confidence: number | null;
+  created_at: string;
+}
+
+/** GET /meetings/{id} — meeting + segments + latest summary. */
+export interface MeetingDetail {
+  meeting: Meeting;
+  segments: TranscriptSegment[];
+  summary: MeetingSummary | null;
 }
 
 export interface MeetingPrep {

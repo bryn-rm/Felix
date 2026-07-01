@@ -448,6 +448,7 @@ export default function SettingsPage() {
   const [meetingPrepMode, setMeetingPrepMode] =
     useState<MeetingPrepMode>("in_app_only");
   const [jobSearchMode, setJobSearchMode] = useState(false);
+  const [meetingCaptureMode, setMeetingCaptureMode] = useState(false);
 
   const [deepWorkInput, setDeepWorkInput] = useState("");
   const [meetingsInput, setMeetingsInput] = useState("");
@@ -477,6 +478,7 @@ export default function SettingsPage() {
   const [savingVip, setSavingVip] = useState(false);
   const [savingMeetingPrep, setSavingMeetingPrep] = useState(false);
   const [savingJobSearch, setSavingJobSearch] = useState(false);
+  const [savingMeetingCapture, setSavingMeetingCapture] = useState(false);
   const [savingEnergy, setSavingEnergy] = useState(false);
   const [savingVoice, setSavingVoice] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -493,6 +495,7 @@ export default function SettingsPage() {
       setVipContacts(settings.vip_contacts);
       setMeetingPrepMode(settings.meeting_prep_mode ?? "in_app_only");
       setJobSearchMode(settings.job_search_mode ?? false);
+      setMeetingCaptureMode(settings.meeting_capture_mode ?? false);
       setDeepWorkInput(windowsToString(settings.energy_profile?.deep_work));
       setMeetingsInput(windowsToString(settings.energy_profile?.meetings));
       setFelixVoiceId(settings.felix_voice_id ?? "");
@@ -566,6 +569,11 @@ export default function SettingsPage() {
   function saveJobSearchMode(enabled: boolean) {
     setJobSearchMode(enabled);
     patchSettings({ job_search_mode: enabled }, setSavingJobSearch);
+  }
+
+  function saveMeetingCaptureMode(enabled: boolean) {
+    setMeetingCaptureMode(enabled);
+    patchSettings({ meeting_capture_mode: enabled }, setSavingMeetingCapture);
   }
 
   function saveEnergyProfile() {
@@ -892,6 +900,39 @@ export default function SettingsPage() {
               <span
                 className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                   jobSearchMode ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
+        </Section>
+
+        <Divider />
+
+        {/* ================================================================
+            Meeting Capture
+        ================================================================ */}
+        <Section title="Meeting Capture">
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-xs text-slate-500">
+              Transcribe in-browser meetings (Chrome only) and get an enhanced
+              summary with decisions and action items. Adds a Meetings page; off
+              by default. Audio is transcribed live and{" "}
+              <strong className="text-slate-400">never stored</strong> — only the
+              transcript text is kept. Always let participants know they’re being
+              recorded.
+            </p>
+            <button
+              role="switch"
+              aria-checked={meetingCaptureMode}
+              disabled={savingMeetingCapture}
+              onClick={() => saveMeetingCaptureMode(!meetingCaptureMode)}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                meetingCaptureMode ? "bg-indigo-600" : "bg-slate-600"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  meetingCaptureMode ? "translate-x-6" : "translate-x-1"
                 }`}
               />
             </button>

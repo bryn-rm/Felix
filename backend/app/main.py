@@ -19,7 +19,7 @@ from slowapi.errors import RateLimitExceeded
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import db
-from app.api import auth, briefing, calendar, commitments, contacts, email, follow_ups, jobs, meetings, memory, polish, settings, templates, voice
+from app.api import auth, briefing, calendar, commitments, contacts, email, follow_ups, jobs, meetings, meetings_ws, memory, polish, settings, templates, voice
 from app.api.eval import router as eval_router, admin_router
 from app.config import settings as app_settings
 from app.errors import error_envelope
@@ -159,6 +159,7 @@ app.include_router(settings.router,    prefix="/settings",    tags=["settings"])
 app.include_router(templates.router,   prefix="/templates",   tags=["templates"])
 app.include_router(memory.router,      prefix="/memory",      tags=["memory"])
 app.include_router(meetings.router,    prefix="/meetings",    tags=["meetings"])
+app.include_router(meetings_ws.router,                         tags=["meetings"])  # /ws/meetings/{id} — no REST prefix
 app.include_router(commitments.router, prefix="/commitments", tags=["commitments"])
 app.include_router(jobs.router,        prefix="/jobs",        tags=["jobs"])
 app.include_router(eval_router,        prefix="/eval",         tags=["eval"])

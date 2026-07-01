@@ -399,8 +399,10 @@ class JobTrackerService:
     async def add_event(
         self, user_id: str, job_id: str, event_type: str, *,
         title: str | None = None, detail: str | None = None,
+        source_kind: str = "manual", source_id: str | None = None,
     ) -> dict | None:
-        """Manual note/event from the UI."""
+        """Manual note/event from the UI, or a sourced event when ``source_id`` is
+        given (deduped per (job, source_kind, source_id) by ``_add_event``)."""
         job = await db.query_one(
             "SELECT id FROM job_applications WHERE id = $1 AND user_id = $2",
             job_id, user_id,
@@ -410,7 +412,7 @@ class JobTrackerService:
         now = datetime.now(timezone.utc)
         row = await self._add_event(
             user_id, job_id, event_type, title=title, detail=detail,
-            source_kind="manual", occurred_at=now,
+            source_kind=source_kind, source_id=source_id, occurred_at=now,
         )
         await db.execute(
             "UPDATE job_applications SET last_activity_at = $3, updated_at = NOW() "
