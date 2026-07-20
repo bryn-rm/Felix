@@ -22,10 +22,10 @@ _EXEMPT_TABLES = {"eval_runs", "admin_audit"}
 # Specific SQL fragments that are known-safe without user_id scoping.
 # Each entry is a substring that must appear in the SQL for the exemption to apply.
 _EXEMPT_SQL_FRAGMENTS = {
-    "select id from ai_calls where id =",       # PK existence check (eval.py)
     "select count(*) as cnt",                    # aggregate budget check (rate_limit.py)
     "where  parse_error = true",                 # admin-only: parse errors (eval.py, gated by _require_admin)
     "coalesce(prompt_version",                   # admin-only: prompt version stats (eval.py, gated by _require_admin)
+    "from ai_calls ac",                          # admin-only: intentionally cross-user 7-day feature summary (eval.py, gated by _require_admin)
 }
 
 # db functions that take a table + dict (user_id is in the dict, not the SQL string)

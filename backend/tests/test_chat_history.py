@@ -44,7 +44,11 @@ async def test_answer_with_tools_sends_recent_conversation_history_to_claude():
     assert messages[0] == {"role": "assistant", "content": "assistant turn 3"}
     assert messages[-2] == {"role": "assistant", "content": "assistant turn 17"}
     assert messages[-1]["role"] == "user"
-    assert "User said: Add both to my calendar" in messages[-1]["content"]
+    # The transcript is wrapped in untrusted-data delimiters, so assert the
+    # framing and the content separately rather than the old inline format.
+    assert "User said:" in messages[-1]["content"]
+    assert "Add both to my calendar" in messages[-1]["content"]
+    assert "<untrusted_user_speech>" in messages[-1]["content"]
     assert len(messages) == 16  # last 15 prior turns + current turn
 
 

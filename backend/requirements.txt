@@ -1,44 +1,92 @@
-# Web framework
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-python-multipart>=0.0.9
+# Pinned production dependencies — this is what Railway installs.
+#
+# Railway rebuilds from scratch on every deploy, so unpinned (>=) specs meant
+# any upstream release could break production without a code change. This file
+# is a full freeze (direct + transitive) resolved on Python 3.12, matching the
+# python312 Nixpacks setup in railway.toml.
+#
+# Direct dependencies live in requirements.in. To upgrade:
+#   python -m venv /tmp/pinvenv && /tmp/pinvenv/bin/pip install -r requirements.in
+#   /tmp/pinvenv/bin/pip freeze > requirements.txt   (re-add this header)
+# then run the test suite before deploying.
+#
+# Last regenerated: 2026-07-09 (all 196 backend tests pass on this set).
 
-# Config
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-python-dotenv>=1.0.0
-
-# Database
-asyncpg>=0.29.0
-supabase>=2.4.0
-
-# Google APIs
-google-auth>=2.29.0
-google-auth-oauthlib>=1.2.0
-google-auth-httplib2>=0.2.0
-google-api-python-client>=2.125.0
-google-cloud-speech>=2.26.0
-
-# AI
-anthropic>=0.25.0
-
-# Voice — ElevenLabs
-elevenlabs>=1.0.0
-
-# Encryption
-cryptography>=42.0.0
-
-# Scheduler
-apscheduler>=3.10.4
-
-# Timezone
-pytz>=2024.1
-
-# Rate limiting
-slowapi>=0.1.9
-
-# JWT local verification
-PyJWT>=2.8.0
-
-# HTTP client (for Google token exchange)
-httpx>=0.27.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.116.0
+anyio==4.14.1
+APScheduler==3.11.3
+asyncpg==0.31.0
+certifi==2026.6.17
+cffi==2.1.0
+charset-normalizer==3.4.9
+click==8.4.2
+cryptography==49.0.0
+Deprecated==1.3.1
+deprecation==2.1.0
+distro==1.9.0
+docstring_parser==0.18.0
+elevenlabs==2.57.0
+fastapi==0.139.0
+google-api-core==2.31.0
+google-api-python-client==2.198.0
+google-auth==2.55.2
+google-auth-httplib2==0.4.0
+google-auth-oauthlib==1.4.0
+google-cloud-speech==2.40.0
+googleapis-common-protos==1.75.0
+grpcio==1.82.1
+grpcio-status==1.82.1
+h11==0.16.0
+h2==4.3.0
+hpack==4.2.0
+httpcore==1.0.9
+httplib2==0.32.0
+httptools==0.8.0
+httpx==0.28.1
+hyperframe==6.1.0
+idna==3.18
+jiter==0.16.0
+limits==5.8.0
+multidict==6.7.1
+oauthlib==3.3.1
+packaging==26.2
+postgrest==2.31.0
+propcache==0.5.2
+proto-plus==1.28.1
+protobuf==7.35.1
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pycparser==3.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+pydantic_core==2.46.4
+PyJWT==2.13.0
+pyparsing==3.3.2
+python-dotenv==1.2.2
+python-multipart==0.0.32
+pytz==2026.2
+PyYAML==6.0.3
+realtime==2.31.0
+requests==2.34.2
+requests-oauthlib==2.0.0
+slowapi==0.1.10
+sniffio==1.3.1
+starlette==1.3.1
+storage3==2.31.0
+StrEnum==0.4.15
+supabase==2.31.0
+supabase-auth==2.31.0
+supabase-functions==2.31.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+tzlocal==5.4.4
+uritemplate==4.2.0
+urllib3==2.7.0
+uvicorn==0.51.0
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==15.0.1
+wrapt==2.2.2
+yarl==1.24.2

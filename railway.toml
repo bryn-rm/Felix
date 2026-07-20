@@ -8,4 +8,8 @@ nixPkgs = ["python312", "python312Packages.pip"]
 cmds = ["cd backend && pip install -r requirements.txt"]
 
 [deploy]
-startCommand = "sh -c 'uvicorn app.main:app --host 0.0.0.0 --port $PORT'"
+# --proxy-headers/--forwarded-allow-ips: Railway's ingress proxy is the only
+# path to the container, so trust X-Forwarded-For. Without it request.client
+# is the proxy hop and the rate limiter's IP fallback collapses every
+# unauthenticated caller into one shared bucket (mutual DoS on the 429 limit).
+startCommand = "sh -c 'uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"*\"'"

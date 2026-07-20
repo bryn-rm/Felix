@@ -7,6 +7,7 @@ one user is caught and logged, never allowed to cancel the run for others.
 """
 
 import asyncio
+import functools
 import logging
 from datetime import datetime, time as dt_time
 
@@ -21,6 +22,42 @@ from app.utils.background import spawn
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
+
+
+def locked_job(fn):
+    """Serialize a job across processes with a Postgres advisory lock.
+
+    APScheduler runs in-process: a second Railway replica (or an overlapping
+    old/new instance during a deploy) would otherwise double-run every job —
+    including ones with user-visible external effects (digest emails, weekly
+    reviews, meeting-prep emails, Gmail labeling). The lock is keyed on the
+    job's function name; a concurrent holder makes this run a no-op.
+
+    Apply BELOW @scheduler.scheduled_job so the scheduler registers the
+    locked wrapper. Locks are taken on db's dedicated lock connection, never
+    the pool: interval jobs share one process-start anchor, so ~10 fire
+    together at the hourly tick — holding a pooled connection per lock for
+    each job's duration would exhaust max_size=10 and deadlock every job
+    body waiting for a second connection.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        key = f"felix_job:{fn.__name__}"
+        if not await db.try_advisory_lock(key):
+            logger.info(
+                "Job %s skipped — another instance holds the lock", fn.__name__
+            )
+            return
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            try:
+                await db.advisory_unlock(key)
+            except Exception:
+                # Don't mask the job's own outcome; a dropped lock session
+                # released server-side anyway.
+                logger.exception("advisory unlock failed for %s", fn.__name__)
+    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +81,7 @@ async def get_active_users() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", minutes=2, id="sync_all_inboxes")
+@locked_job
 async def sync_all_inboxes() -> None:
     """Poll Gmail for new emails for every connected user in parallel."""
     try:
@@ -71,6 +109,7 @@ async def _sync_user_inbox(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", hours=1, id="check_all_follow_ups")
+@locked_job
 async def check_all_follow_ups() -> None:
     """Alert users about overdue follow-ups."""
     try:
@@ -98,6 +137,7 @@ async def _check_user_follow_ups(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", hours=1, id="check_all_job_followups")
+@locked_job
 async def check_all_job_followups() -> None:
     """Flag due job-board actions for users with Job Search Mode on."""
     try:
@@ -126,6 +166,7 @@ async def _check_user_job_followups(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", minutes=5, id="check_morning_briefings")
+@locked_job
 async def check_morning_briefings() -> None:
     """Trigger morning briefing generation when a user's configured time arrives."""
     try:
@@ -163,7 +204,15 @@ async def _maybe_generate_briefing(user: dict) -> None:
     else:
         target = "07:30"
 
-    if user_now.strftime("%H:%M") == target:
+    # Interval jobs fire at process_start + n×5min, so the minute they land on
+    # is arbitrary — an exact HH:MM equality would only ever match by luck.
+    # Instead treat the briefing as due when the target time fell within the
+    # last 5 minutes (the job interval). Modulo a day so a target just before
+    # midnight still matches a run just after. The briefings (user_id, date)
+    # dedup below prevents double-fires within the window.
+    target_minutes = int(target[:2]) * 60 + int(target[3:5])
+    now_minutes = user_now.hour * 60 + user_now.minute
+    if (now_minutes - target_minutes) % 1440 < 5:
         local_today = local_date_for_user(tz_name)
         already_done = await db.query_one(
             "SELECT id FROM briefings WHERE user_id = $1 AND date = $2",
@@ -184,6 +233,7 @@ async def _generate_briefing_for_user(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("cron", hour=23, minute=0, id="refresh_all_relationships")
+@locked_job
 async def refresh_all_relationships() -> None:
     try:
         users = await get_active_users()
@@ -208,6 +258,7 @@ async def _refresh_user_relationships(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("cron", day_of_week="sun", hour=22, id="refresh_all_style_profiles")
+@locked_job
 async def refresh_all_style_profiles() -> None:
     try:
         users = await get_active_users()
@@ -234,6 +285,7 @@ async def _refresh_user_style(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", minutes=30, id="check_digest_mode")
+@locked_job
 async def check_digest_mode() -> None:
     """
     Send an email digest to users who have digest_mode enabled when their
@@ -283,6 +335,20 @@ async def _maybe_send_digest(user: dict) -> None:
     if not should_send:
         return
 
+    # Claim the (user, date, slot) marker before sending. Interval spacing alone
+    # is not idempotent: a redeploy mid-slot resets the interval anchor, so the
+    # new process can land in the same 30-min slot and send a second digest.
+    # ON CONFLICT DO NOTHING returns no row when another run already claimed it.
+    claimed = await db.query_one(
+        "INSERT INTO digest_sends (user_id, slot_date, slot_time) "
+        "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING user_id",
+        user["user_id"],
+        local_date_for_user(tz_name),
+        rounded_hhmm,
+    )
+    if not claimed:
+        return
+
     logger.info(
         "Digest time reached for user %s at %s (local: %s)",
         user["user_id"], rounded_hhmm, current_hhmm,
@@ -306,6 +372,7 @@ async def _send_digest_for_user(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("cron", day_of_week="sun", hour=18, minute=0, id="send_weekly_reviews")
+@locked_job
 async def send_weekly_reviews() -> None:
     """Send weekly review emails to all active users."""
     try:
@@ -340,6 +407,7 @@ async def _send_weekly_review_for_user(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", minutes=5, id="generate_meeting_preps")
+@locked_job
 async def generate_meeting_preps() -> None:
     try:
         users = await get_active_users()
@@ -480,6 +548,7 @@ async def _send_meeting_prep_email(user_id: str, prep: dict) -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", minutes=5, id="check_stale_meetings")
+@locked_job
 async def check_stale_meetings() -> None:
     try:
         from app.jobs.meeting_autoend_checker import check_stale_meetings as _sweep
@@ -496,9 +565,15 @@ async def check_stale_meetings() -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", hours=1, id="sweep_expired_oauth_nonces")
+@locked_job
 async def sweep_expired_oauth_nonces() -> None:
     try:
         await db.execute("DELETE FROM oauth_nonces WHERE expires_at < NOW()")
+        # Digest dedup markers only matter within their 30-min slot; keep a
+        # couple of weeks for debugging, then drop so the table stays tiny.
+        await db.execute(
+            "DELETE FROM digest_sends WHERE slot_date < CURRENT_DATE - INTERVAL '14 days'"
+        )
     except Exception:
         logger.exception("sweep_expired_oauth_nonces failed")
 
@@ -509,6 +584,7 @@ async def sweep_expired_oauth_nonces() -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", minutes=5, id="sweep_stale_sessions")
+@locked_job
 async def sweep_stale_sessions_job() -> None:
     try:
         from app.services.session_manager import sweep_stale_sessions
@@ -526,6 +602,7 @@ async def sweep_stale_sessions_job() -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("interval", hours=1, id="backfill_episode_embeddings")
+@locked_job
 async def backfill_episode_embeddings() -> None:
     try:
         from app.services.memory_service import backfill_missing_embeddings
@@ -542,6 +619,7 @@ async def backfill_episode_embeddings() -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("cron", hour=3, minute=15, id="prune_memory_episodes")
+@locked_job
 async def prune_memory_episodes_job() -> None:
     try:
         from app.services.memory_service import prune_low_value_episodes
@@ -559,6 +637,7 @@ async def prune_memory_episodes_job() -> None:
 # ---------------------------------------------------------------------------
 
 @scheduler.scheduled_job("cron", hour=2, minute=30, id="extract_user_profiles")
+@locked_job
 async def extract_user_profiles_job() -> None:
     try:
         users = await get_active_users()

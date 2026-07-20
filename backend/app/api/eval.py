@@ -121,8 +121,11 @@ async def submit_feedback(
     """
     valid_ai_call_id: str | None = None
     if body.ai_call_id and _UUID_RE.match(body.ai_call_id):
+        # Scope to the caller: without it a user could attach ratings to
+        # another user's ai_calls rows and skew the admin summary.
         exists = await db.query_one(
-            "SELECT id FROM ai_calls WHERE id = $1", body.ai_call_id
+            "SELECT id FROM ai_calls WHERE id = $1 AND user_id = $2",
+            body.ai_call_id, current_user["id"],
         )
         if exists:
             valid_ai_call_id = body.ai_call_id

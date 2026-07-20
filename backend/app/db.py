@@ -7,13 +7,17 @@ clause — RLS is a safety net for the frontend anon-key path, not a substitute
 for correct backend scoping.
 """
 
+import asyncio
 import json as _json
+import logging
 import re
 from datetime import date, datetime, time
 from functools import partial
 
 import asyncpg
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _json_default(obj):
@@ -66,10 +70,80 @@ async def get_pool() -> asyncpg.Pool:
 
 
 async def close_pool() -> None:
-    global _pool
+    global _pool, _lock_conn
     if _pool:
         await _pool.close()
         _pool = None
+    if _lock_conn and not _lock_conn.is_closed():
+        await _lock_conn.close()
+    _lock_conn = None
+
+
+# ---------------------------------------------------------------------------
+# Advisory locks — dedicated connection, NOT the pool.
+#
+# Session-scoped advisory locks live on the connection that took them, so a
+# holder must keep its connection for the lock's lifetime. Taking them from
+# the pool deadlocks the scheduler: interval jobs share one process-start
+# anchor, so at the hourly tick ~10 jobs fire together — exactly max_size=10
+# — each holding a pooled connection for its whole run while the job body
+# waits forever for a second one. One dedicated connection per process holds
+# every lock instead; keys differ per job, and pool.acquire() is never
+# involved.
+#
+# Requires a session-mode connection (direct or Supabase pooler port 5432,
+# per LAUNCH.md). A transaction-mode pooler (port 6543) would route each
+# statement to a different server session and silently break the locks.
+# ---------------------------------------------------------------------------
+
+_lock_conn: asyncpg.Connection | None = None
+# asyncpg connections don't allow concurrent queries; serialize the brief
+# lock/unlock statements (never held during job bodies).
+_lock_conn_mutex = asyncio.Lock()
+
+
+async def _get_lock_conn() -> asyncpg.Connection:
+    global _lock_conn
+    if _lock_conn is None or _lock_conn.is_closed():
+        # Port 6543 is Supabase's transaction-mode pooler: statements hop
+        # between server sessions, so session advisory locks would appear to
+        # succeed while guarding nothing. Point the lock connection at the
+        # session pooler (port 5432) or a direct connection instead.
+        if ":6543" in settings.DATABASE_URL:
+            logger.critical(
+                "DATABASE_URL uses the transaction-mode pooler (port 6543) — "
+                "advisory job locks will NOT provide cross-process exclusion. "
+                "Use the session pooler (port 5432) for the lock connection."
+            )
+        _lock_conn = await asyncpg.connect(
+            settings.DATABASE_URL, statement_cache_size=0
+        )
+    return _lock_conn
+
+
+async def try_advisory_lock(key: str) -> bool:
+    """Try to take a session advisory lock; False if another holder has it.
+
+    Locks taken by this process share one session, so this does NOT guard
+    against overlap within the process (same-session re-acquire succeeds) —
+    APScheduler's max_instances=1 already covers that. It guards against
+    other processes: a second replica or an overlapping deploy.
+    """
+    async with _lock_conn_mutex:
+        conn = await _get_lock_conn()
+        return await conn.fetchval(
+            "SELECT pg_try_advisory_lock(hashtext($1)::bigint)", key
+        )
+
+
+async def advisory_unlock(key: str) -> None:
+    async with _lock_conn_mutex:
+        if _lock_conn is None or _lock_conn.is_closed():
+            # The lock session died; the server already released its locks.
+            return
+        await _lock_conn.fetchval(
+            "SELECT pg_advisory_unlock(hashtext($1)::bigint)", key
+        )
 
 
 async def query(sql: str, *args) -> list[dict]:

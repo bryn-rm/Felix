@@ -223,15 +223,16 @@ async def email_stats(
     """
     Return email counts per category. Used by the dashboard widgets.
     """
-    conditions = ["user_id = $1"]
-    if not include_archived:
-        conditions.append("archived = FALSE")
+    # user_id = $1 lives in the literal SQL (not a spliced condition list) so
+    # the AST guard in test_user_id_discipline can see it in the f-string's
+    # constant parts.
+    archived_filter = "" if include_archived else "AND archived = FALSE"
 
     rows = await db.query(
         f"""
         SELECT category, COUNT(*) AS count
         FROM emails
-        WHERE {" AND ".join(conditions)}
+        WHERE user_id = $1 {archived_filter}
         GROUP BY category
         """,
         current_user["id"],
@@ -565,15 +566,31 @@ async def send_email(
     if not email:
         raise HTTPException(status_code=404, detail="Email not found")
 
+    # Claim the draft atomically BEFORE talking to Gmail. A read-then-send
+    # sequence lets a double-click or client retry interleave two requests
+    # that both see status='pending' and both send — the recipient gets the
+    # reply twice. Only one request can win this UPDATE; the loser 409s.
     draft = await db.query_one(
-        "SELECT * FROM drafts WHERE email_id = $1 AND user_id = $2",
+        "UPDATE drafts SET status = 'sending' "
+        "WHERE email_id = $1 AND user_id = $2 AND status NOT IN ('sent', 'sending') "
+        "RETURNING *",
         email_id, current_user["id"],
     )
     if not draft:
-        raise HTTPException(status_code=404, detail="No draft to send for this email")
-
-    if draft["status"] == "sent":
+        exists = await db.query_one(
+            "SELECT id FROM drafts WHERE email_id = $1 AND user_id = $2",
+            email_id, current_user["id"],
+        )
+        if not exists:
+            raise HTTPException(status_code=404, detail="No draft to send for this email")
         raise HTTPException(status_code=409, detail="This draft has already been sent")
+
+    async def _release_claim() -> None:
+        """Put the draft back to 'pending' so the user can retry the send."""
+        await db.execute(
+            "UPDATE drafts SET status = 'pending' WHERE id = $1 AND user_id = $2",
+            draft["id"], current_user["id"],
+        )
 
     # Resolve final send text
     send_text: str = (
@@ -583,13 +600,13 @@ async def send_email(
         or ""
     )
     if not send_text.strip():
+        await _release_claim()
         raise HTTPException(status_code=422, detail="Draft text is empty")
 
     # Send via Gmail API
-    creds = await get_google_credentials(current_user["id"])
-    gmail = GmailService(creds)
-
     try:
+        creds = await get_google_credentials(current_user["id"])
+        gmail = GmailService(creds)
         result = await gmail.send_reply(
             to=email["from_email"],
             subject=email["subject"] or "",
@@ -597,8 +614,13 @@ async def send_email(
             thread_id=email["thread_id"] or "",
             original_message_id=email.get("message_id_header") or "",
         )
+    except HTTPException:
+        # e.g. 403 from get_google_credentials — pass through unchanged
+        await _release_claim()
+        raise
     except Exception as exc:
         logger.exception("Gmail send failed for email %s", email_id)
+        await _release_claim()
         raise HTTPException(status_code=502, detail=f"Gmail send failed: {exc}")
 
     # Mark draft as sent
