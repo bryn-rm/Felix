@@ -22,6 +22,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getFreshAccessToken } from "@/lib/auth-session";
+import type { AssistItem } from "@/lib/types";
 
 export type CaptureStatus =
   | "idle"
@@ -44,6 +45,16 @@ interface UseMeetingCaptureReturn {
   error: string | null;
   liveTranscript: LiveLine[];
   interim: { me: string; them: string };
+  /** Live-assist cards pushed over this socket (server also persists them). */
+  assistItems: AssistItem[];
+  /**
+   * Send a typed mid-meeting question over the socket. Returns false (with
+   * askError set when relevant) if it couldn't be sent — e.g. mid-reconnect —
+   * so the caller can keep the typed question instead of discarding it.
+   */
+  sendAsk: (question: string) => boolean;
+  askPending: boolean;
+  askError: string | null;
   begin: () => Promise<void>;
   /** Resolves once the server has flushed + persisted the final STT segments. */
   stop: () => Promise<void>;
@@ -72,6 +83,9 @@ const PING_INTERVAL_MS = 20_000;
 // segments (it closes the socket when done) before forcing the close so the UI
 // can't hang on a stuck connection.
 const STOP_DRAIN_TIMEOUT_MS = 6_000;
+// Client-side cap on how long an ask can stay pending before we surface an
+// error (the server may be over budget, or the answer got lost in a reconnect).
+const ASK_TIMEOUT_MS = 20_000;
 const WORKLET_URL = "/meeting-capture-worklet.js";
 
 // ---------------------------------------------------------------------------
@@ -113,6 +127,14 @@ export function useMeetingCapture(
     me: "",
     them: "",
   });
+  const [assistItems, setAssistItems] = useState<AssistItem[]>([]);
+  const [askPending, setAskPending] = useState(false);
+  const [askError, setAskError] = useState<string | null>(null);
+  const askTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // request_id of the ask currently awaiting an answer. Responses are settled
+  // ONLY when their request_id matches — a late answer to a timed-out ask must
+  // not clear a newer ask's pending state.
+  const activeAskRef = useRef<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -317,6 +339,46 @@ export function useMeetingCapture(
         case "pong":
           break;
 
+        case "assist": {
+          const item = (msg as { item?: AssistItem }).item;
+          if (!item?.id) break;
+          setAssistItems((prev) =>
+            prev.some((existing) => existing.id === item.id)
+              ? prev
+              : [...prev, item],
+          );
+          // Settle pending state only for the answer we're actually waiting on.
+          if (
+            item.source === "ask" &&
+            item.request_id != null &&
+            item.request_id === activeAskRef.current
+          ) {
+            activeAskRef.current = null;
+            if (askTimerRef.current) clearTimeout(askTimerRef.current);
+            askTimerRef.current = null;
+            setAskPending(false);
+            setAskError(null);
+          }
+          break;
+        }
+
+        case "assist_error": {
+          const requestId =
+            (msg as { request_id?: string | null }).request_id ?? null;
+          if (requestId != null && requestId === activeAskRef.current) {
+            activeAskRef.current = null;
+            if (askTimerRef.current) clearTimeout(askTimerRef.current);
+            askTimerRef.current = null;
+            setAskPending(false);
+            setAskError(msg.message ?? "Live assist is unavailable right now.");
+          } else if (activeAskRef.current === null) {
+            // General assist errors (e.g. budget exhausted — request_id null)
+            // are informational; they must never cancel an unrelated ask.
+            setAskError(msg.message ?? "Live assist is unavailable right now.");
+          }
+          break;
+        }
+
         case "error":
           failCapture(msg.message ?? "Capture error.");
           break;
@@ -418,6 +480,9 @@ export function useMeetingCapture(
     setError(null);
     setLiveTranscript([]);
     setInterim({ me: "", them: "" });
+    setAssistItems([]);
+    setAskPending(false);
+    setAskError(null);
     intentionalCloseRef.current = false;
     reconnectCountRef.current = 0;
     setStatus("requesting");
@@ -501,6 +566,39 @@ export function useMeetingCapture(
     }
     connect();
   }, [meetingId, status, wireChannel, teardownMedia, connect]);
+
+  // -------------------------------------------------------------------------
+  // Ask box — one in-flight question over the live socket
+  // -------------------------------------------------------------------------
+  const sendAsk = useCallback((question: string): boolean => {
+    const trimmed = question.trim();
+    if (!trimmed) return false;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // Mid-reconnect (or stopped): report it instead of silently dropping the
+      // question — the caller keeps the typed text for a retry.
+      setAskError("Still reconnecting — try again in a moment.");
+      return false;
+    }
+    const requestId =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `ask-${Date.now()}`;
+    activeAskRef.current = requestId;
+    setAskPending(true);
+    setAskError(null);
+    ws.send(
+      JSON.stringify({ type: "ask", question: trimmed, request_id: requestId }),
+    );
+    if (askTimerRef.current) clearTimeout(askTimerRef.current);
+    askTimerRef.current = setTimeout(() => {
+      askTimerRef.current = null;
+      activeAskRef.current = null;
+      setAskPending(false);
+      setAskError("No answer arrived — try asking again.");
+    }, ASK_TIMEOUT_MS);
+    return true;
+  }, []);
 
   // -------------------------------------------------------------------------
   // stop() — user-initiated teardown. Does NOT call REST /end; the page owns
@@ -587,9 +685,22 @@ export function useMeetingCapture(
     return () => {
       mountedRef.current = false;
       intentionalCloseRef.current = true;
+      if (askTimerRef.current) clearTimeout(askTimerRef.current);
       teardownAll();
     };
   }, [teardownAll]);
 
-  return { status, error, liveTranscript, interim, begin, stop, failCapture };
+  return {
+    status,
+    error,
+    liveTranscript,
+    interim,
+    assistItems,
+    sendAsk,
+    askPending,
+    askError,
+    begin,
+    stop,
+    failCapture,
+  };
 }

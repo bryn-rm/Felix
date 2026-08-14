@@ -3,14 +3,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Loader2, Radio, Square } from "lucide-react";
+import useSWR from "swr";
+import { ArrowLeft, Loader2, Radio, Sparkles, Square } from "lucide-react";
 
-import { ApiError } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import type { Settings as UserSettings } from "@/lib/types";
+import { useAssistItems } from "@/hooks/useAssistItems";
 import {
   isMeetingCaptureSupported,
   useMeetingCapture,
 } from "@/hooks/useMeetingCapture";
 import { useMeeting, useMeetings } from "@/hooks/useMeetings";
+import { AssistSidebar } from "@/components/meetings/AssistSidebar";
 import { LiveTranscript } from "@/components/meetings/LiveTranscript";
 import {
   NotesEditor,
@@ -34,8 +38,35 @@ export default function LiveMeetingPage({ params }: PageProps) {
   const notesEditorRef = useRef<NotesEditorHandle | null>(null);
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
 
-  const { status, error, liveTranscript, interim, begin, stop, failCapture } =
-    useMeetingCapture(id, { onShareEnded: () => finalizeRef.current() });
+  const {
+    status,
+    error,
+    liveTranscript,
+    interim,
+    assistItems,
+    sendAsk,
+    askPending,
+    askError,
+    begin,
+    stop,
+    failCapture,
+  } = useMeetingCapture(id, { onShareEnded: () => finalizeRef.current() });
+
+  // Live assist — fails closed: without the flag the sidebar (and its fetch)
+  // never exists. Collapsed by default; the badge counts unseen cards.
+  const { data: settings } = useSWR<UserSettings>("/settings", (url: string) =>
+    api.get<UserSettings>(url),
+  );
+  const assistEnabled = settings?.live_assist_mode === true;
+  const [assistOpen, setAssistOpen] = useState(false);
+  const [assistSeen, setAssistSeen] = useState(0);
+  const { items: cards, dismiss } = useAssistItems(id, assistItems, {
+    enabled: assistEnabled,
+  });
+  useEffect(() => {
+    if (assistOpen) setAssistSeen(cards.length);
+  }, [assistOpen, cards.length]);
+  const unseenCards = assistOpen ? 0 : Math.max(0, cards.length - assistSeen);
 
   const finalize = useCallback(async () => {
     if (finalizingRef.current) return;
@@ -105,13 +136,35 @@ export default function LiveMeetingPage({ params }: PageProps) {
         </div>
 
         {recording && (
-          <button
-            onClick={finalize}
-            className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500"
-          >
-            <Square className="h-4 w-4" />
-            Stop &amp; summarize
-          </button>
+          <div className="flex items-center gap-2">
+            {assistEnabled && (
+              <button
+                onClick={() => setAssistOpen((open) => !open)}
+                aria-label="Toggle live assist"
+                aria-pressed={assistOpen}
+                className={`relative flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                  assistOpen
+                    ? "border-indigo-500 bg-indigo-600/20 text-indigo-200"
+                    : "border-slate-700 text-slate-300 hover:border-slate-500"
+                }`}
+              >
+                <Sparkles className="h-4 w-4" />
+                Assist
+                {unseenCards > 0 && (
+                  <span className="ml-0.5 rounded-full bg-indigo-600 px-1.5 text-[10px] font-semibold text-white">
+                    {unseenCards}
+                  </span>
+                )}
+              </button>
+            )}
+            <button
+              onClick={finalize}
+              className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500"
+            >
+              <Square className="h-4 w-4" />
+              Stop &amp; summarize
+            </button>
+          </div>
         )}
       </div>
 
@@ -157,8 +210,15 @@ export default function LiveMeetingPage({ params }: PageProps) {
           )}
         </div>
       ) : (
-        /* Live: transcript + notes side by side */
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-2">
+        /* Live: transcript + notes side by side, with the assist panel as a
+           third column on lg (overlay drawer below lg) when opened. */
+        <div
+          className={`grid min-h-0 flex-1 grid-cols-1 gap-4 ${
+            assistOpen && assistEnabled
+              ? "lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_20rem]"
+              : "lg:grid-cols-2"
+          }`}
+        >
           <div className="flex min-h-0 flex-col rounded-lg border border-slate-700/50 bg-slate-800/20 p-3">
             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
               Live transcript
@@ -176,6 +236,32 @@ export default function LiveMeetingPage({ params }: PageProps) {
               onSave={saveNotes}
             />
           </div>
+          {assistOpen && assistEnabled && (
+            <>
+              {/* Desktop: third grid column */}
+              <div className="hidden min-h-0 lg:block">
+                <AssistSidebar
+                  items={cards}
+                  onDismiss={dismiss}
+                  onAsk={sendAsk}
+                  askPending={askPending}
+                  askError={askError}
+                  onClose={() => setAssistOpen(false)}
+                />
+              </div>
+              {/* Below lg: right-side overlay drawer */}
+              <div className="fixed inset-y-0 right-0 z-50 w-80 max-w-full p-3 lg:hidden">
+                <AssistSidebar
+                  items={cards}
+                  onDismiss={dismiss}
+                  onAsk={sendAsk}
+                  askPending={askPending}
+                  askError={askError}
+                  onClose={() => setAssistOpen(false)}
+                />
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

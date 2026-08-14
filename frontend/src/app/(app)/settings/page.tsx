@@ -449,6 +449,7 @@ export default function SettingsPage() {
     useState<MeetingPrepMode>("in_app_only");
   const [jobSearchMode, setJobSearchMode] = useState(false);
   const [meetingCaptureMode, setMeetingCaptureMode] = useState(false);
+  const [liveAssistMode, setLiveAssistMode] = useState(false);
 
   const [deepWorkInput, setDeepWorkInput] = useState("");
   const [meetingsInput, setMeetingsInput] = useState("");
@@ -479,6 +480,7 @@ export default function SettingsPage() {
   const [savingMeetingPrep, setSavingMeetingPrep] = useState(false);
   const [savingJobSearch, setSavingJobSearch] = useState(false);
   const [savingMeetingCapture, setSavingMeetingCapture] = useState(false);
+  const [savingLiveAssist, setSavingLiveAssist] = useState(false);
   const [savingEnergy, setSavingEnergy] = useState(false);
   const [savingVoice, setSavingVoice] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -496,6 +498,7 @@ export default function SettingsPage() {
       setMeetingPrepMode(settings.meeting_prep_mode ?? "in_app_only");
       setJobSearchMode(settings.job_search_mode ?? false);
       setMeetingCaptureMode(settings.meeting_capture_mode ?? false);
+      setLiveAssistMode(settings.live_assist_mode ?? false);
       setDeepWorkInput(windowsToString(settings.energy_profile?.deep_work));
       setMeetingsInput(windowsToString(settings.energy_profile?.meetings));
       setFelixVoiceId(settings.felix_voice_id ?? "");
@@ -574,6 +577,11 @@ export default function SettingsPage() {
   function saveMeetingCaptureMode(enabled: boolean) {
     setMeetingCaptureMode(enabled);
     patchSettings({ meeting_capture_mode: enabled }, setSavingMeetingCapture);
+  }
+
+  function saveLiveAssistMode(enabled: boolean) {
+    setLiveAssistMode(enabled);
+    patchSettings({ live_assist_mode: enabled }, setSavingLiveAssist);
   }
 
   function saveEnergyProfile() {
@@ -933,6 +941,40 @@ export default function SettingsPage() {
               <span
                 className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                   meetingCaptureMode ? "translate-x-6" : "translate-x-1"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="mt-4 flex items-start justify-between gap-4 border-t border-white/[0.04] pt-4">
+            <p className="text-xs text-slate-500">
+              <span className="font-medium text-slate-400">Live assist</span> —
+              during a captured meeting, Felix quietly surfaces relevant context
+              (people, commitments, facts) in a sidebar and answers quick
+              questions. Uses your AI allowance while a meeting is live; off by
+              default.
+              {!meetingCaptureMode && (
+                <span className="block text-slate-600">
+                  Requires Meeting Capture to be on.
+                </span>
+              )}
+            </p>
+            <button
+              role="switch"
+              aria-checked={liveAssistMode}
+              disabled={savingLiveAssist || !meetingCaptureMode}
+              onClick={() => saveLiveAssistMode(!liveAssistMode)}
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                liveAssistMode && meetingCaptureMode
+                  ? "bg-indigo-600"
+                  : "bg-slate-600"
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  liveAssistMode && meetingCaptureMode
+                    ? "translate-x-6"
+                    : "translate-x-1"
                 }`}
               />
             </button>

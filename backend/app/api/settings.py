@@ -101,6 +101,7 @@ class SettingsUpdate(BaseModel):
     meeting_prep_mode: str | None = None  # off | email_only | in_app_only | both
     job_search_mode: bool | None = None   # gate for Job Search Mode (fails closed)
     meeting_capture_mode: bool | None = None  # gate for Meeting Capture (fails closed)
+    live_assist_mode: bool | None = None  # gate for Live Assist; effective only with capture on (fails closed)
 
     @field_validator("timezone")
     @classmethod

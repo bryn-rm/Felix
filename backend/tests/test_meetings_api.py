@@ -174,6 +174,71 @@ def test_list_and_get_delegate(client, monkeypatch):
     assert client.get("/meetings/m-1").json()["meeting"]["id"] == "m-1"
 
 
+# ---------------------------------------------------------------------------
+# Live assist REST reads (fail closed on the assist double-gate)
+# ---------------------------------------------------------------------------
+
+def test_assist_routes_404_when_assist_disabled(client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    # Capture may be on — the assist routes gate on the stricter flag pair.
+    monkeypatch.setattr(meetings_api, "_capture_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=False))
+
+    assert client.get("/meetings/m-1/assist").status_code == 404
+    assert client.post("/meetings/m-1/assist/i-1/dismiss").status_code == 404
+
+
+def test_assist_list_returns_wire_items(client, monkeypatch):
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    row = {
+        "id": "i-1", "kind": "fact", "source": "proactive", "question": None,
+        "title": "Renewal is Friday", "body": "Agreed by email last week.",
+        "transcript_ts": 12.5, "dismissed": False,
+        "usefulness_score": 0.9, "trigger_type": "question",
+        "prompt_version": "v1", "request_id": None, "metadata": {},
+        "model": "haiku", "created_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+    }
+    monkeypatch.setattr(meetings_api.db, "query", AsyncMock(return_value=[row]))
+
+    resp = client.get("/meetings/m-1/assist")
+
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert items[0]["id"] == "i-1"
+    assert items[0]["kind"] == "fact"
+    # Internal eval fields stay server-side — the wire item is display-only.
+    assert "usefulness_score" not in items[0]
+    assert "trigger_type" not in items[0]
+
+
+def test_assist_dismiss_scopes_to_owner(client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    update = AsyncMock(return_value={"id": "i-1"})
+    monkeypatch.setattr(meetings_api.db, "query_one", update)
+
+    resp = client.post("/meetings/m-1/assist/i-1/dismiss")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"dismissed": True}
+    # id + meeting_id + user_id all in the WHERE — ownership enforced in SQL.
+    assert update.await_args.args[1:] == ("i-1", "m-1", "user-cap-1")
+
+    update.return_value = None
+    assert client.post("/meetings/m-1/assist/i-2/dismiss").status_code == 404
+
+
 # ===========================================================================
 # WebSocket
 # ===========================================================================

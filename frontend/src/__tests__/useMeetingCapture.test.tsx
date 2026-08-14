@@ -267,3 +267,161 @@ describe("useMeetingCapture send buffer (finding #4)", () => {
     expect(ws.binarySends).toHaveLength(500 + 10);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Live assist protocol — assist / assist_error messages + sendAsk
+// ---------------------------------------------------------------------------
+
+describe("useMeetingCapture live assist protocol", () => {
+  const card = (
+    id: string,
+    source: "proactive" | "ask" = "proactive",
+    requestId: string | null = null,
+  ) => ({
+    id,
+    kind: "fact",
+    source,
+    question: null,
+    title: `Card ${id}`,
+    body: "body",
+    transcript_ts: 1,
+    dismissed: false,
+    request_id: requestId,
+    created_at: "2026-08-10T10:00:00Z",
+  });
+
+  /** The request_id of the last ask frame this socket shipped. */
+  function lastAskId(ws: FakeWebSocket): string {
+    const frames = ws.sent
+      .filter((d): d is string => typeof d === "string")
+      .map((d) => JSON.parse(d))
+      .filter((m) => m.type === "ask");
+    return frames[frames.length - 1].request_id;
+  }
+
+  it("appends pushed assist items and dedupes by id", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+
+    act(() => ws._message({ type: "assist", item: card("i-1") }));
+    act(() => ws._message({ type: "assist", item: card("i-2") }));
+    act(() => ws._message({ type: "assist", item: card("i-1") })); // replay
+
+    expect(result.current.assistItems.map((i) => i.id)).toEqual(["i-1", "i-2"]);
+  });
+
+  it("sendAsk ships an ask frame, tracks pending, and settles on the answer", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+
+    act(() => result.current.sendAsk("Who is Sarah?"));
+
+    const askFrame = ws.sent
+      .filter((d): d is string => typeof d === "string")
+      .map((d) => JSON.parse(d))
+      .find((m) => m.type === "ask");
+    expect(askFrame).toMatchObject({ type: "ask", question: "Who is Sarah?" });
+    expect(askFrame.request_id).toBeTruthy();
+    expect(result.current.askPending).toBe(true);
+
+    act(() =>
+      ws._message({
+        type: "assist",
+        item: card("i-9", "ask", askFrame.request_id),
+      }),
+    );
+    expect(result.current.askPending).toBe(false);
+    expect(result.current.askError).toBeNull();
+  });
+
+  it("a late answer to a timed-out ask does not settle a newer ask", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+
+    act(() => result.current.sendAsk("first question?"));
+    const firstId = lastAskId(ws);
+    act(() => {
+      jest.advanceTimersByTime(20_000); // first ask times out
+    });
+    act(() => result.current.sendAsk("second question?"));
+    expect(result.current.askPending).toBe(true);
+
+    // The first ask's answer finally arrives — it must not clear the second.
+    act(() => ws._message({ type: "assist", item: card("i-1", "ask", firstId) }));
+    expect(result.current.askPending).toBe(true);
+
+    act(() =>
+      ws._message({ type: "assist", item: card("i-2", "ask", lastAskId(ws)) }),
+    );
+    expect(result.current.askPending).toBe(false);
+  });
+
+  it("a general assist_error (null request_id) never cancels a pending ask", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+
+    act(() => result.current.sendAsk("still working?"));
+    act(() =>
+      ws._message({
+        type: "assist_error",
+        request_id: null,
+        message: "budget exhausted",
+      }),
+    );
+
+    expect(result.current.askPending).toBe(true); // ask still in flight
+  });
+
+  it("sendAsk fails without dropping state when the socket is not open", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+    act(() => ws._serverClose()); // reconnecting — socket gone
+
+    let ok = true;
+    act(() => {
+      ok = result.current.sendAsk("lost question?");
+    });
+
+    expect(ok).toBe(false);
+    expect(result.current.askPending).toBe(false);
+    expect(result.current.askError).toMatch(/reconnecting/i);
+  });
+
+  it("assist_error clears pending and surfaces the message", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+
+    act(() => result.current.sendAsk("over budget?"));
+    act(() =>
+      ws._message({
+        type: "assist_error",
+        request_id: lastAskId(ws),
+        message: "over budget",
+      }),
+    );
+
+    expect(result.current.askPending).toBe(false);
+    expect(result.current.askError).toBe("over budget");
+  });
+
+  it("a lost answer times out into an error instead of a stuck spinner", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    await startRecording(result);
+
+    act(() => result.current.sendAsk("anyone there?"));
+    expect(result.current.askPending).toBe(true);
+
+    act(() => {
+      jest.advanceTimersByTime(20_000);
+    });
+    expect(result.current.askPending).toBe(false);
+    expect(result.current.askError).toMatch(/try asking again/i);
+  });
+});

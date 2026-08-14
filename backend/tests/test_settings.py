@@ -151,6 +151,21 @@ def test_null_voice_id_clears_override(client: TestClient):
     assert resp.json()["felix_voice_id"] is None
 
 
+def test_live_assist_mode_round_trips(client: TestClient):
+    """The live_assist_mode flag is accepted by PATCH and echoed back."""
+    updated_row = {
+        "user_id": "user-test-001",
+        "live_assist_mode": True,
+        "updated_at": "2024-01-01T00:00:00+00:00",
+    }
+    with patch("app.db.upsert", new_callable=AsyncMock, return_value=updated_row) as mock_upsert:
+        resp = client.patch("/settings", json={"live_assist_mode": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["live_assist_mode"] is True
+    assert mock_upsert.call_args.args[1]["live_assist_mode"] is True
+
+
 def test_settings_scoped_to_current_user():
     """Each user receives only their own settings row — user_id is never leaked."""
     row_a = {"user_id": "user-A", "timezone": "Europe/London",       "display_name": "Alice"}

@@ -65,6 +65,8 @@ PROMPT_VERSIONS: dict[str, str] = {
     "meeting_prep":       "v1",
     "commitment_detect":  "v1",
     "job_detect":         "v1",
+    "live_assist_watch":  "v1",
+    "live_assist_ask":    "v1",
 }
 
 

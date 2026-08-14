@@ -40,7 +40,7 @@ from app import db
 from app.api.voice import _authenticate_ws
 from app.config import settings
 from app.middleware.rate_limit import check_monthly_ai_budget
-from app.services import meeting_stt_service
+from app.services import live_assist_service, meeting_stt_service
 from app.services.meeting_service import _capture_enabled
 
 logger = logging.getLogger(__name__)
@@ -181,10 +181,16 @@ async def meeting_capture_stream(websocket: WebSocket, meeting_id: str) -> None:
     # before any concurrent producer exists (the STT tasks + writer are started
     # inside _run_capture), so they can't race and go direct to the socket.
     await websocket.send_json({"type": "status", "status": "ready"})
-    await _run_capture(websocket, user_id, meeting_id)
+    await _run_capture(websocket, user_id, meeting_id, user_email=user.get("email"))
 
 
-async def _run_capture(websocket: WebSocket, user_id: str, meeting_id: str) -> None:
+async def _run_capture(
+    websocket: WebSocket,
+    user_id: str,
+    meeting_id: str,
+    *,
+    user_email: str | None = None,
+) -> None:
     """Drive the two-channel STT session from the live socket until stop/disconnect."""
 
     # Once the STT tasks are running, this socket has concurrent producers, so
@@ -193,7 +199,35 @@ async def _run_capture(websocket: WebSocket, user_id: str, meeting_id: str) -> N
     writer = _SocketWriter(websocket)
     writer.start()
 
+    # Live assist (fails closed — None when the flag is off). The watcher only
+    # ever receives writer.send, preserving the single-writer invariant, and a
+    # new connection takes over any previous watcher for this meeting.
+    # Best-effort: assist is an overlay on capture — a failure loading its
+    # context/state must never abort the recording itself.
+    assist = None
+    try:
+        assist = await live_assist_service.maybe_start_watcher(
+            user_id, meeting_id, writer.send, user_email=user_email,
+        )
+    except Exception:
+        logger.warning(
+            "live assist failed to start; capture continues without it (meeting=%s)",
+            meeting_id, exc_info=True,
+        )
+
     async def send_json(payload: dict) -> None:
+        # Tap finalized transcript segments for the assist watcher — a sync
+        # enqueue, so the STT path never waits on the assist pipeline.
+        if (
+            assist is not None
+            and payload.get("type") == "transcript"
+            and payload.get("is_final")
+        ):
+            assist.on_final(
+                payload.get("speaker", ""),
+                payload.get("text", ""),
+                payload.get("ts_start", 0.0),
+            )
         await writer.send(payload)
 
     # Seed the meeting clock from segments already persisted so a reconnect
@@ -236,6 +270,20 @@ async def _run_capture(websocket: WebSocket, user_id: str, meeting_id: str) -> N
                 break  # client signalled end-of-audio; REST /end finalizes
             if ctype == "ping":
                 await send_json({"type": "pong"})
+            elif ctype == "ask":
+                if assist is not None:
+                    # Sync enqueue; the watcher answers (or errors) on its own
+                    # task and pushes back through the writer.
+                    assist.submit_ask(
+                        str(ctrl.get("question") or ""),
+                        str(ctrl.get("request_id") or "") or None,
+                    )
+                else:
+                    await send_json({
+                        "type": "assist_error",
+                        "request_id": str(ctrl.get("request_id") or "") or None,
+                        "message": "Live assist is not enabled.",
+                    })
             # "start" is an ack — the session is already running.
     except WebSocketDisconnect:
         pass
@@ -243,9 +291,12 @@ async def _run_capture(websocket: WebSocket, user_id: str, meeting_id: str) -> N
         logger.exception("meeting capture WS error (meeting=%s)", meeting_id)
     finally:
         # Tear down STT FIRST so its final flush enqueues onto the writer, THEN
-        # drain + stop the writer so that tail actually reaches the socket before
-        # this handler returns (which closes it). A WS drop must NOT end the
-        # meeting — REST /end or the Phase 7 auto-end sweep does that, so a
-        # reconnect can resume.
+        # the assist watcher (cancelled, not drained — a long AI call must not
+        # hold the close), THEN drain + stop the writer so that tail actually
+        # reaches the socket before this handler returns (which closes it). A WS
+        # drop must NOT end the meeting — REST /end or the Phase 7 auto-end
+        # sweep does that, so a reconnect can resume.
         await stt.stop()
+        if assist is not None:
+            await assist.aclose()
         await writer.aclose()

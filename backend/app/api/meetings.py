@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from app import db
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import check_monthly_ai_budget, limiter
+from app.services.live_assist_service import _assist_enabled, item_to_wire
 from app.services.meeting_prep_service import meeting_prep_service
 from app.services.meeting_service import _capture_enabled, meeting_service
 from app.utils.background import spawn
@@ -227,6 +228,47 @@ async def get_capture_meeting(
     if not detail:
         raise HTTPException(status_code=404, detail="meeting not found")
     return detail
+
+
+@router.get("/{meeting_id}/assist")
+async def list_assist_items(
+    meeting_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """List this meeting's live-assist cards (undismissed and dismissed alike;
+    the client filters). Reconnect/refresh replay source. Fails closed 404 when
+    live assist is off."""
+    user_id = current_user["id"]
+    if not await _assist_enabled(user_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    rows = await db.query(
+        "SELECT * FROM meeting_assist_items "
+        "WHERE user_id = $1 AND meeting_id = $2 ORDER BY created_at",
+        user_id, meeting_id,
+    )
+    return {"items": [item_to_wire(r) for r in rows]}
+
+
+@router.post("/{meeting_id}/assist/{item_id}/dismiss")
+@limiter.limit("60/minute")
+async def dismiss_assist_item(
+    meeting_id: str,
+    item_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Mark an assist card dismissed (also the first engagement signal we log)."""
+    user_id = current_user["id"]
+    if not await _assist_enabled(user_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    row = await db.query_one(
+        "UPDATE meeting_assist_items SET dismissed = TRUE "
+        "WHERE id = $1 AND meeting_id = $2 AND user_id = $3 RETURNING id",
+        item_id, meeting_id, user_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="assist item not found")
+    return {"dismissed": True}
 
 
 @router.post("/{meeting_id}/summarize")

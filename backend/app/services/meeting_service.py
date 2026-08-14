@@ -79,7 +79,15 @@ class MeetingService:
                 "updated_at":        now,
             },
         )
-        return {"meeting_id": str(row["id"])}
+        meeting_id = str(row["id"])
+
+        # Live-assist context prefetch — best-effort, off the request path.
+        # prefetch_context checks the live_assist_mode gate itself and no-ops
+        # when the feature is off, so start never pays for it.
+        from app.services.live_assist_service import prefetch_context
+        spawn(prefetch_context(user_id, meeting_id), name="live_assist_prefetch")
+
+        return {"meeting_id": meeting_id}
 
     async def save_user_notes(self, user_id: str, meeting_id: str, content: str) -> None:
         """Persist the user's live notes (debounced upsert from the frontend)."""

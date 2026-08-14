@@ -107,8 +107,34 @@ export interface Settings {
   meeting_prep_mode: MeetingPrepMode;
   job_search_mode: boolean;
   meeting_capture_mode: boolean;
+  live_assist_mode: boolean;
   energy_profile: EnergyProfile | null;
   felix_voice_id: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Live In-Meeting Assistant
+// ---------------------------------------------------------------------------
+
+export type AssistKind =
+  | "context"
+  | "answer"
+  | "fact"
+  | "contradiction"
+  | "follow_up";
+
+export interface AssistItem {
+  id: string;
+  kind: AssistKind;
+  source: "proactive" | "ask";
+  question: string | null;
+  title: string;
+  body: string;
+  transcript_ts: number | null;
+  dismissed: boolean;
+  /** Client-supplied correlation id for ask answers (null for proactive). */
+  request_id: string | null;
+  created_at: string;
 }
 
 export type TemplateCategory = "reply" | "outreach" | "follow_up" | "other";
