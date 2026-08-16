@@ -22,7 +22,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getFreshAccessToken } from "@/lib/auth-session";
-import type { AssistItem } from "@/lib/types";
+import type { AssistExpansionFocus, AssistItem } from "@/lib/types";
+
+export interface AssistAskOptions {
+  intent?: "answer" | "expand";
+  parentItemId?: string;
+  focus?: AssistExpansionFocus;
+}
 
 export type CaptureStatus =
   | "idle"
@@ -52,7 +58,7 @@ interface UseMeetingCaptureReturn {
    * askError set when relevant) if it couldn't be sent — e.g. mid-reconnect —
    * so the caller can keep the typed question instead of discarding it.
    */
-  sendAsk: (question: string) => boolean;
+  sendAsk: (question: string, options?: AssistAskOptions) => boolean;
   askPending: boolean;
   askError: string | null;
   begin: () => Promise<void>;
@@ -84,8 +90,13 @@ const PING_INTERVAL_MS = 20_000;
 // can't hang on a stuck connection.
 const STOP_DRAIN_TIMEOUT_MS = 6_000;
 // Client-side cap on how long an ask can stay pending before we surface an
-// error (the server may be over budget, or the answer got lost in a reconnect).
-const ASK_TIMEOUT_MS = 20_000;
+// error (the answer got lost in a reconnect, or the socket died silently).
+// MUST stay above the server's own deadline (live_assist_service.CALL_TIMEOUT_S,
+// 60s) plus the persist + WS hop: an interview expansion generates ~2,200
+// tokens and legitimately takes most of a minute. Firing first would report a
+// failure for an answer that then arrives anyway — beside the error, or beside
+// the duplicate a retry produced.
+const ASK_TIMEOUT_MS = 75_000;
 const WORKLET_URL = "/meeting-capture-worklet.js";
 
 // ---------------------------------------------------------------------------
@@ -135,6 +146,11 @@ export function useMeetingCapture(
   // ONLY when their request_id matches — a late answer to a timed-out ask must
   // not clear a newer ask's pending state.
   const activeAskRef = useRef<string | null>(null);
+  // request_id of the ask whose client deadline expired with no reply. The
+  // server's deadline is shorter, so this should only happen when the socket
+  // dropped — but if that answer does turn up, the "no answer arrived" error is
+  // now contradicted by a visible answer, so retire it. Cleared by the next ask.
+  const timedOutAskRef = useRef<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -358,6 +374,15 @@ export function useMeetingCapture(
             askTimerRef.current = null;
             setAskPending(false);
             setAskError(null);
+          } else if (
+            item.source === "ask" &&
+            item.request_id != null &&
+            item.request_id === timedOutAskRef.current
+          ) {
+            // It arrived after all — don't leave "no answer arrived" sitting
+            // above the answer. Pending state belongs to a newer ask, if any.
+            timedOutAskRef.current = null;
+            setAskError(null);
           }
           break;
         }
@@ -370,6 +395,11 @@ export function useMeetingCapture(
             if (askTimerRef.current) clearTimeout(askTimerRef.current);
             askTimerRef.current = null;
             setAskPending(false);
+            setAskError(msg.message ?? "Live assist is unavailable right now.");
+          } else if (requestId != null && requestId === timedOutAskRef.current) {
+            // Late verdict on a timed-out ask: the server's reason ("that took
+            // too long", "over budget") beats our generic guess.
+            timedOutAskRef.current = null;
             setAskError(msg.message ?? "Live assist is unavailable right now.");
           } else if (activeAskRef.current === null) {
             // General assist errors (e.g. budget exhausted — request_id null)
@@ -483,6 +513,10 @@ export function useMeetingCapture(
     setAssistItems([]);
     setAskPending(false);
     setAskError(null);
+    if (askTimerRef.current) clearTimeout(askTimerRef.current);
+    askTimerRef.current = null;
+    activeAskRef.current = null;
+    timedOutAskRef.current = null;
     intentionalCloseRef.current = false;
     reconnectCountRef.current = 0;
     setStatus("requesting");
@@ -570,7 +604,10 @@ export function useMeetingCapture(
   // -------------------------------------------------------------------------
   // Ask box — one in-flight question over the live socket
   // -------------------------------------------------------------------------
-  const sendAsk = useCallback((question: string): boolean => {
+  const sendAsk = useCallback((
+    question: string,
+    options: AssistAskOptions = {},
+  ): boolean => {
     const trimmed = question.trim();
     if (!trimmed) return false;
     const ws = wsRef.current;
@@ -585,14 +622,25 @@ export function useMeetingCapture(
         ? crypto.randomUUID()
         : `ask-${Date.now()}`;
     activeAskRef.current = requestId;
+    // A new ask supersedes the abandoned one — its late answer, if it ever
+    // lands, is just another card and must not touch this ask's state.
+    timedOutAskRef.current = null;
     setAskPending(true);
     setAskError(null);
     ws.send(
-      JSON.stringify({ type: "ask", question: trimmed, request_id: requestId }),
+      JSON.stringify({
+        type: "ask",
+        question: trimmed,
+        request_id: requestId,
+        intent: options.intent ?? "answer",
+        parent_item_id: options.parentItemId ?? null,
+        focus: options.focus ?? null,
+      }),
     );
     if (askTimerRef.current) clearTimeout(askTimerRef.current);
     askTimerRef.current = setTimeout(() => {
       askTimerRef.current = null;
+      timedOutAskRef.current = activeAskRef.current;
       activeAskRef.current = null;
       setAskPending(false);
       setAskError("No answer arrived — try asking again.");

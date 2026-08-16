@@ -25,6 +25,8 @@ frontend/out/
 frontend/.cache/
 frontend/dist/
 frontend/.vercel/
+# Incremental tsc build cache — generated output, one giant one-line diff.
+*.tsbuildinfo
 frontend/npm-debug.log*
 frontend/yarn-debug.log*
 frontend/yarn-error.log*
@@ -108,7 +110,7 @@ temp/
 # Review artifacts
 CODEBASE_REVIEW.md
 CLAUDE_CODEBASE_REVIEW.md
-*_REVIEW.md*.tsbuildinfo
+*_REVIEW.md
 .codex
 meeting_capture.MD
 meeting_capture_phases.md

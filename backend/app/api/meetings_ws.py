@@ -277,6 +277,13 @@ async def _run_capture(
                     assist.submit_ask(
                         str(ctrl.get("question") or ""),
                         str(ctrl.get("request_id") or "") or None,
+                        intent=str(ctrl.get("intent") or "answer"),
+                        parent_item_id=(
+                            str(ctrl.get("parent_item_id"))
+                            if ctrl.get("parent_item_id")
+                            else None
+                        ),
+                        focus=str(ctrl.get("focus")) if ctrl.get("focus") else None,
                     )
                 else:
                     await send_json({

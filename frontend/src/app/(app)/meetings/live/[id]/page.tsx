@@ -246,6 +246,7 @@ export default function LiveMeetingPage({ params }: PageProps) {
                   onAsk={sendAsk}
                   askPending={askPending}
                   askError={askError}
+                  interviewMode={meeting?.template === "interview"}
                   onClose={() => setAssistOpen(false)}
                 />
               </div>
@@ -257,6 +258,7 @@ export default function LiveMeetingPage({ params }: PageProps) {
                   onAsk={sendAsk}
                   askPending={askPending}
                   askError={askError}
+                  interviewMode={meeting?.template === "interview"}
                   onClose={() => setAssistOpen(false)}
                 />
               </div>

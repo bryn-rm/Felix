@@ -9,6 +9,15 @@ Pipeline (proactive path):
         → acceptance gate    (usefulness_score threshold, dedupe, caps)
         → persist to meeting_assist_items + emit {"type": "assist"} over the WS
 
+Interview meetings run the same pipeline with a second exit: the watch call may
+triage the transcript into a technical question instead of a card, which a
+Sonnet solve then answers. That branch is deliberately narrow — only a question
+the OTHER participant put to the user (the template covers the user conducting
+the interview too), only once it is completely stated (an incomplete one arms a
+short recheck rather than waiting out the accumulation gate), and only with the
+monthly budget freshly checked, because a solve costs far more than the watch
+call that proposed it.
+
 Core principle: silence is success. Felix is memory augmentation, not a
 meeting coach — the gate, the prompt, and the acceptance thresholds all bias
 toward showing nothing.
@@ -49,6 +58,9 @@ from app.config import settings
 from app.prompts.live_assist import (
     CARD_KINDS,
     LIVE_ASSIST_ASK_PROMPT,
+    LIVE_ASSIST_INTERVIEW_ANSWER_PROMPT,
+    LIVE_ASSIST_INTERVIEW_EXPAND_PROMPT,
+    LIVE_ASSIST_INTERVIEW_WATCH_PROMPT,
     LIVE_ASSIST_SYSTEM,
     LIVE_ASSIST_WATCH_PROMPT,
     format_shown_titles,
@@ -69,11 +81,26 @@ COALESCE_S = 4.0              # let a speech turn finish before evaluating
 MIN_CALL_INTERVAL_S = 10.0    # floor between watch calls, even on high signal
 ACCUM_MIN_CHARS = 400         # ordinary conversation: this much new transcript…
 ACCUM_MIN_INTERVAL_S = 45.0   # …AND this long since the last call
+# A half-stated interview question is re-evaluated on its own short clock: the
+# continuation is ordinary transcript that would otherwise wait out the 400-char
+# accumulation gate, long after the candidate had to start answering.
+INTERVIEW_RECHECK_S = 6.0
+MAX_INTERVIEW_RECHECKS = 3    # consecutive; a question never completing is a no
 
 # Hard caps (belt over the model's judgment; when tripped the watcher idles)
-MAX_WATCH_CALLS = 60          # per WS connection
+MAX_WATCH_CALLS = 60          # per meeting (survives reconnects — see _watch_calls)
 MAX_PROACTIVE_CARDS = 12      # per meeting
 MIN_CARD_INTERVAL_S = 20.0    # between shown cards
+
+# Hard deadline on any single Anthropic call, retries included. The shared
+# client allows 120s and two retries — five times the browser's ask deadline
+# (useMeetingCapture.ASK_TIMEOUT_MS), so a slow expansion would have the client
+# report "no answer arrived" while the server kept generating, then drop the
+# late answer into the sidebar beside that error, or beside the duplicate a
+# retry produced. Every live-assist call therefore fails HERE first, with an
+# assist_error the client can correlate. Keep it strictly below ASK_TIMEOUT_MS,
+# with room for the persist + WS hop.
+CALL_TIMEOUT_S = 60.0
 
 # Acceptance
 SCORE_THRESHOLD = 0.7         # usefulness_score below this is dropped
@@ -81,11 +108,12 @@ SCORE_THRESHOLD = 0.7         # usefulness_score below this is dropped
 # Context sizes
 TRANSCRIPT_WINDOW_SEGMENTS = 40
 TRANSCRIPT_WINDOW_CHARS = 6000
+INTERVIEW_WINDOW_CHARS = 12000
 DIGEST_CAP_CHARS = 6000
 CONTEXT_RETRY_AFTER_S = 60.0  # lazy re-read of live_context if prefetch was slow
 
 # Ask
-ASK_MAX_CHARS = 1000
+ASK_MAX_CHARS = 6000
 ASK_MIN_INTERVAL_S = 5.0
 MAX_ASKS = 20
 
@@ -265,6 +293,38 @@ _ENTITY_STOPLIST = frozenset(
     "yeah yes thanks right sure great cool".split()
 )
 
+# Interview meetings only. An interviewer usually STATES a problem rather than
+# asking a question — "Implement an LRU cache", "Given a sorted array, return
+# the two indices…". Those turns carry no "?", no question-leading word, and
+# often no novel entity or number, so every gate above sits on them until the
+# 400-char accumulation window; by then the candidate has been talking for a
+# minute. These two patterns give interviews their own prompt trigger.
+#
+# Recall over precision by design: a false trigger costs one Haiku triage call
+# (floored at MIN_CALL_INTERVAL_S and capped by MAX_WATCH_CALLS), while a miss
+# costs the whole feature. Triage is the precision layer, not this.
+_INTERVIEW_TASK_LEAD_RE = re.compile(
+    # sentence start, so "Two sum: find all pairs" counts at the colon…
+    r"(?:^|[.!?:;\n]\s*)"
+    # …past the throat-clearing an interviewer opens with
+    r"(?:(?:ok(?:ay)?|alright|all right|so|now|right|great|cool|perfect|awesome|"
+    r"sure|and|then|first|next)[,\s]+){0,3}"
+    r"(?:implement|write|design|build|code|solve|create|reverse|sort|merge|parse|"
+    r"traverse|compute|calculate|count|find|return|print|given|suppose|assume|"
+    r"consider|imagine|say|let[’']?s|we[’']?ll|here[’']?s|start with|take a look)"
+    r"\b",
+    re.IGNORECASE,
+)
+_INTERVIEW_TASK_PHRASE_RE = re.compile(
+    r"\b(?:your task|you(?:[’']re| are) given|we(?:[’']re| are) given|"
+    r"the problem is|here[’']?s (?:the|a|another) (?:problem|question|exercise)|"
+    r"first (?:question|problem)|next (?:question|problem)|"
+    r"coding (?:question|problem|exercise|challenge)|system design|"
+    r"time complexity|space complexity|big-?o|data structure|"
+    r"walk me through|whiteboard|edge cases?)\b",
+    re.IGNORECASE,
+)
+
 
 class CandidateGate:
     """Deterministic pre-gate: decides which finals are worth an LLM look.
@@ -277,7 +337,9 @@ class CandidateGate:
         new transcript has piled up (the caller supplies elapsed time).
     """
 
-    def __init__(self, keywords: list[str] | None = None) -> None:
+    def __init__(
+        self, keywords: list[str] | None = None, *, interview: bool = False
+    ) -> None:
         self._keywords = {
             k.strip().lower() for k in (keywords or []) if k and k.strip()
         }
@@ -287,6 +349,9 @@ class CandidateGate:
         )
         self._seen_entities: set[str] = set()
         self.accumulated_chars = 0
+        # Set from the meeting template once it is known (see _load_context) —
+        # only interview meetings get the imperative-prompt trigger below.
+        self.interview = interview
 
     def observe(self, speaker: str, text: str) -> str | None:
         """Feed one final segment; return a trigger_type or None (accumulate)."""
@@ -299,6 +364,13 @@ class CandidateGate:
             "?" in text or _QUESTION_LEAD_RE.match(text)
         ):
             return "question"
+        # Only the other participant's turns: a problem the user states
+        # themselves means they are running the interview — never ours to solve.
+        if self.interview and speaker == "them" and (
+            _INTERVIEW_TASK_LEAD_RE.search(text)
+            or _INTERVIEW_TASK_PHRASE_RE.search(text)
+        ):
+            return "interview_prompt"
         if _REQUEST_DECISION_RE.search(text):
             return "request_decision"
 
@@ -330,6 +402,63 @@ class CandidateGate:
 
 def _normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", (title or "").lower())).strip()
+
+
+# ---------------------------------------------------------------------------
+# Question fingerprints — near-duplicate matching for proactive solves
+#
+# The interviewer keeps discussing a problem after stating it, so the sliding
+# transcript window makes triage re-state the same question in different words:
+# "design a URL shortener" becomes "design a highly available URL-shortening
+# service". Normalizing punctuation and case (above) treats those as different
+# questions and pays for a second Sonnet solve.
+#
+# So compare stemmed content words instead, and compare them against the
+# SHORTER question (overlap coefficient, not Jaccard): a re-statement adds
+# qualifiers rather than changing the problem, which would sink a Jaccard score
+# well below any usable threshold.
+# ---------------------------------------------------------------------------
+
+_QUESTION_STOPWORDS = frozenset("""
+about again also and any are can could did does doing done down for from
+give going has have here how into its just like make many may might much
+must need not now off out over please should some such tell than that the
+their them then there these they this those through under use using very
+walk was way were what when where which who why will with would you your
+""".split())
+
+_STEM_SUFFIXES = ("ization", "isation", "ations", "ation", "ings", "ing",
+                  "ers", "er", "ies", "es", "s")
+
+# Overlap at or above this is the same problem restated. Deliberately biased
+# toward silence (the feature's core principle): a variation the gate swallows
+# is one the user can still type into the ask box, which is never deduped.
+QUESTION_OVERLAP_THRESHOLD = 0.8
+QUESTION_MIN_TOKENS = 2       # below this, exact normalization is all we trust
+
+
+def _stem(word: str) -> str:
+    """Crude suffix stripper — enough to fold shortener/shortening onto shorten."""
+    for suffix in _STEM_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[: -len(suffix)]
+    return word
+
+
+def _question_tokens(question: str) -> frozenset[str]:
+    """Stemmed content words — the fingerprint near-duplicate matching uses."""
+    return frozenset(
+        _stem(word)
+        for word in re.findall(r"[a-z0-9]+", (question or "").lower())
+        if len(word) > 2 and word not in _QUESTION_STOPWORDS
+    )
+
+
+def _token_overlap(a: frozenset[str], b: frozenset[str]) -> float:
+    """Overlap coefficient: shared tokens as a fraction of the smaller set."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
 
 
 # ---------------------------------------------------------------------------
@@ -367,15 +496,32 @@ class LiveAssistWatcher:
         )
         self._shown_titles: list[str] = []
         self._shown_normalized: set[str] = set()
+        # Proactive interview solves dedupe on the question, not on the answer
+        # title — the title isn't known until after the expensive call.
+        self._solved_normalized: set[str] = set()
+        self._solved_tokens: list[frozenset[str]] = []
 
         self._started_at = time.monotonic()
         self._last_call_at = float("-inf")
         self._last_card_at = float("-inf")
         self._last_ask_at = float("-inf")
-        self._watch_calls = 0
         self._cards_shown = 0
         self._asks = 0
         self._stopped_for_budget = False
+        self._last_call_truncated = False
+        self._last_call_timed_out = False
+        # Set by a watch call that wants to be run again soon (an interview
+        # question still being stated); consumed by the run loop.
+        self._rearm: tuple[str, float] | None = None
+        self._interview_rechecks = 0
+
+    @property
+    def _watch_calls(self) -> int:
+        """Watch calls spent on this MEETING, across reconnects — see
+        ``_meeting_watch_calls``. Card and ask counters are restored from their
+        persisted rows in start(); watch calls leave no row, so they live in the
+        process-local registry instead."""
+        return _meeting_watch_calls.get(self.meeting_id, 0)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -385,12 +531,14 @@ class LiveAssistWatcher:
         await self._load_context()
 
         rows = await db.query(
-            "SELECT title, source FROM meeting_assist_items "
+            "SELECT title, source, question FROM meeting_assist_items "
             "WHERE user_id = $1 AND meeting_id = $2 ORDER BY created_at",
             self.user_id, self.meeting_id,
         )
         for row in rows:
             self._remember_title(row.get("title") or "")
+            if row.get("source") == "proactive":
+                self._remember_solved(row.get("question") or "")
         # Per-source counters: a meeting full of ask answers must not silence
         # the proactive pipeline, and reconnecting must not reset the ask cap.
         self._cards_shown = sum(1 for r in rows if r.get("source") == "proactive")
@@ -426,12 +574,22 @@ class LiveAssistWatcher:
         except Exception:  # pragma: no cover — unbounded queue shouldn't raise
             logger.debug("live assist enqueue failed", exc_info=True)
 
-    def submit_ask(self, question: str, request_id: str | None) -> None:
+    def submit_ask(
+        self,
+        question: str,
+        request_id: str | None,
+        *,
+        intent: str = "answer",
+        parent_item_id: str | None = None,
+        focus: str | None = None,
+    ) -> None:
         """Sync enqueue of a typed mid-meeting question."""
         if self._closed:
             return
         try:
-            self._events.put_nowait(("ask", question, request_id))
+            self._events.put_nowait(
+                ("ask", question, request_id, intent, parent_item_id, focus)
+            )
         except Exception:  # pragma: no cover
             logger.debug("live assist ask enqueue failed", exc_info=True)
 
@@ -474,11 +632,25 @@ class LiveAssistWatcher:
             except asyncio.TimeoutError:
                 trigger, pending_trigger = pending_trigger, None
                 await self._guarded(self._watch_call(trigger))
+                # The call may have asked to be re-run shortly (a question that
+                # was still being stated). Re-arming here rather than waiting on
+                # the generic accumulation gate is the whole point.
+                if self._rearm is not None:
+                    pending_trigger, pending_deadline = self._rearm
+                    self._rearm = None
                 continue
 
             if event[0] == "ask":
-                _, question, request_id = event
-                await self._guarded(self._handle_ask(question, request_id))
+                _, question, request_id, intent, parent_item_id, focus = event
+                await self._guarded(
+                    self._handle_ask(
+                        question,
+                        request_id,
+                        intent=intent,
+                        parent_item_id=parent_item_id,
+                        focus=focus,
+                    )
+                )
                 continue
 
             _, speaker, text, ts_start = event
@@ -543,6 +715,10 @@ class LiveAssistWatcher:
             self._context = None
         self._meeting_title = row.get("title") or "(untitled)"
         self._template = row.get("template") or "general"
+        # Assigned rather than passed to the constructor: a late-context retry
+        # rebuilds the gate above only when keywords actually arrived, and must
+        # not silently reset accumulation on the no-context path.
+        self._gate.interview = self._template == "interview"
 
     async def _maybe_retry_context(self) -> None:
         """Prefetch may still be running when the watcher starts — re-read once."""
@@ -557,23 +733,31 @@ class LiveAssistWatcher:
     # -- proactive watch call -------------------------------------------------
 
     async def _watch_call(self, trigger: str | None) -> None:
+        self._rearm = None
         if not self._may_watch():
             return
         await self._maybe_retry_context()
         if not await self._budget_ok():
             return
 
-        self._watch_calls += 1
+        _meeting_watch_calls[self.meeting_id] = self._watch_calls + 1
+        _evict_stale_watch_calls(self.meeting_id)
         self._last_call_at = time.monotonic()
         self._gate.reset_accumulation()
 
         window_segments = len(self._window)
-        prompt = LIVE_ASSIST_WATCH_PROMPT.format(
+        is_interview = getattr(self, "_template", "general") == "interview"
+        prompt_template = (
+            LIVE_ASSIST_INTERVIEW_WATCH_PROMPT
+            if is_interview
+            else LIVE_ASSIST_WATCH_PROMPT
+        )
+        prompt = prompt_template.format(
             meeting_title=getattr(self, "_meeting_title", "(untitled)"),
             template=getattr(self, "_template", "general"),
             context_digest=format_digest((self._context or {}).get("digest") or {}),
             shown_titles=format_shown_titles(self._shown_titles),
-            transcript_window=self._format_window(),
+            transcript_window=self._format_window(interview=is_interview),
         )
 
         started = time.monotonic()
@@ -585,6 +769,16 @@ class LiveAssistWatcher:
         )
         latency_ms = int((time.monotonic() - started) * 1000)
 
+        interview_question = (result or {}).get("interview_question")
+        if is_interview and isinstance(interview_question, dict):
+            if await self._dispatch_interview_triage(
+                interview_question, trigger=trigger, triage_latency_ms=latency_ms
+            ):
+                return
+            # Not dispatched (not ours to solve, or not a technical question) —
+            # fall through so a card returned alongside it is still considered.
+
+        self._interview_rechecks = 0
         card = (result or {}).get("card")
         if not card:
             return
@@ -619,6 +813,88 @@ class LiveAssistWatcher:
         self._last_card_at = time.monotonic()
         await self._send_json({"type": "assist", "item": item})
 
+    async def _dispatch_interview_triage(
+        self, triaged: dict, *, trigger: str | None, triage_latency_ms: int
+    ) -> bool:
+        """Act on an ``interview_question`` object from the triage call.
+
+        Returns True when the object was handled (solved, or a recheck armed)
+        and the caller should stop; False when it is not ours to act on and the
+        card path should still run.
+        """
+        question = str(triaged.get("question") or "").strip()
+        answer_type = str(triaged.get("answer_type") or "")
+        # Who put the question decides everything. The interview template covers
+        # the user CONDUCTING an interview just as much as sitting one
+        # (meeting_summary.TEMPLATE_GUIDANCE says so), and "Can you design a URL
+        # shortener?" from the user is their screening prompt, not their problem
+        # to solve. Anything but an explicit "them" is treated as not ours —
+        # fail closed, the same way the feature flags do.
+        asked_by = str(triaged.get("asked_by") or "").strip().lower()
+        if asked_by not in {"them", "they"}:
+            logger.debug(
+                "live assist interview question not addressed to the user "
+                "(asked_by=%r) for meeting %s", asked_by, self.meeting_id,
+            )
+            return False
+        # Deterministic backstop on that attribution: if the other participant
+        # has not spoken in the whole window (system audio not shared, say),
+        # nothing in it was put to the user, whatever the model reports.
+        if not any(speaker == "them" for speaker, _text, _ts in self._window):
+            return False
+        if not question or answer_type not in {"coding", "system_design"}:
+            return False
+
+        # "complete": false means the interviewer is still stating the problem.
+        # A missing field keeps the pre-schema behaviour (treat as complete).
+        complete = triaged.get("complete")
+        if isinstance(complete, str):
+            complete = complete.strip().lower() not in {"false", "no", "0", ""}
+        if complete is False:
+            self._arm_interview_recheck()
+            return True
+
+        self._interview_rechecks = 0
+        await self._solve_interview(
+            question=question,
+            answer_type_hint=answer_type,
+            source="proactive",
+            request_id=None,
+            trigger_type=trigger,
+            triage_latency_ms=triage_latency_ms,
+        )
+        return True
+
+    def _arm_interview_recheck(self) -> None:
+        """Ask the run loop to evaluate again shortly.
+
+        Without this, the continuation of a half-stated question is ordinary
+        transcript: the chars that piled up during coalescing were just cleared
+        by reset_accumulation(), so the promised reconsideration would wait on
+        the 400-char / 45-second gate — minutes after the candidate had to
+        speak. Bounded by MAX_INTERVIEW_RECHECKS so a question that never
+        completes stops costing triage calls.
+        """
+        if self._interview_rechecks >= MAX_INTERVIEW_RECHECKS:
+            self._interview_rechecks = 0
+            return
+        self._interview_rechecks += 1
+        self._rearm = (
+            "interview_recheck",
+            max(
+                time.monotonic() + INTERVIEW_RECHECK_S,
+                self._last_call_at + MIN_CALL_INTERVAL_S,
+            ),
+        )
+
+    def _ask_failure_message(self) -> str:
+        """Retrying a truncated or timed-out answer just repeats it — say so."""
+        if self._last_call_truncated:
+            return "That answer ran too long to show — ask for one part of it."
+        if self._last_call_timed_out:
+            return "That took too long to answer — ask for a smaller piece of it."
+        return "Couldn't answer that just now — try again."
+
     def _accept(self, card: dict) -> tuple[bool, str]:
         """Server-side acceptance gate — never trust the model's own judgment alone."""
         if not isinstance(card, dict):
@@ -642,7 +918,15 @@ class LiveAssistWatcher:
 
     # -- ask -----------------------------------------------------------------
 
-    async def _handle_ask(self, question: str, request_id: str | None) -> None:
+    async def _handle_ask(
+        self,
+        question: str,
+        request_id: str | None,
+        *,
+        intent: str = "answer",
+        parent_item_id: str | None = None,
+        focus: str | None = None,
+    ) -> None:
         async def fail(message: str) -> None:
             await self._send_json(
                 {"type": "assist_error", "request_id": request_id, "message": message}
@@ -650,7 +934,10 @@ class LiveAssistWatcher:
 
         question = (question or "").strip()
         if not question or len(question) > ASK_MAX_CHARS:
-            await fail("Ask a question up to 1000 characters.")
+            await fail("Ask a question up to 6000 characters.")
+            return
+        if intent not in {"answer", "expand"}:
+            await fail("Unsupported live-assist request.")
             return
         now = time.monotonic()
         if self._asks >= MAX_ASKS:
@@ -666,9 +953,71 @@ class LiveAssistWatcher:
             await fail(str(exc.detail))
             return
 
+        # Validate an expansion BEFORE charging the ask budget below: a request
+        # that never reaches the model must not consume one of MAX_ASKS or put
+        # the user into the cooldown.
+        parent: dict | None = None
+        metadata: dict = {}
+        if intent == "expand":
+            if getattr(self, "_template", "general") != "interview":
+                await fail("Answer expansion is available for interview meetings.")
+                return
+            parent = await db.query_one(
+                "SELECT * FROM meeting_assist_items "
+                "WHERE id = $1 AND meeting_id = $2 AND user_id = $3",
+                parent_item_id,
+                self.meeting_id,
+                self.user_id,
+            )
+            metadata = (parent or {}).get("metadata") or {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = {}
+            allowed = metadata.get("expansion_options") or []
+            if not parent or focus not in allowed:
+                await fail("That answer cannot be expanded in this way.")
+                return
+
         self._asks += 1
         self._last_ask_at = now
         await self._maybe_retry_context()
+
+        if parent is not None:
+            prompt = LIVE_ASSIST_INTERVIEW_EXPAND_PROMPT.format(
+                transcript_window=self._format_window(interview=True),
+                question=parent.get("question") or question,
+                parent_body=parent.get("body") or "",
+                focus=focus,
+                answer_type=metadata.get("answer_type") or "general",
+            )
+            await self._finish_interview_answer(
+                prompt=prompt,
+                question=parent.get("question") or question,
+                source="ask",
+                request_id=request_id,
+                trigger_type=None,
+                parent_item_id=str(parent.get("id")),
+                depth="expanded",
+                prompt_feature="live_assist_expand",
+                max_tokens=2200,
+                fallback_answer_type=metadata.get("answer_type") or "general",
+                extra_metadata={"focus": focus},
+                fail=fail,
+            )
+            return
+
+        if getattr(self, "_template", "general") == "interview":
+            await self._solve_interview(
+                question=question,
+                answer_type_hint=None,
+                source="ask",
+                request_id=request_id,
+                trigger_type=None,
+                fail=fail,
+            )
+            return
 
         prompt = LIVE_ASSIST_ASK_PROMPT.format(
             meeting_title=getattr(self, "_meeting_title", "(untitled)"),
@@ -686,7 +1035,7 @@ class LiveAssistWatcher:
         )
         latency_ms = int((time.monotonic() - started) * 1000)
         if not result or not str(result.get("body") or "").strip():
-            await fail("Couldn't answer that just now — try again.")
+            await fail(self._ask_failure_message())
             return
 
         transcript_ts = self._window[-1][2] if self._window else None
@@ -702,6 +1051,7 @@ class LiveAssistWatcher:
             request_id=request_id,
             model=settings.ANTHROPIC_MODEL_SMART,
             metadata={"latency_ms": latency_ms},
+            prompt_feature="live_assist_ask",
         )
         if item is None:
             await fail("Couldn't answer that just now — try again.")
@@ -709,11 +1059,177 @@ class LiveAssistWatcher:
         self._remember_title(item["title"])
         await self._send_json({"type": "assist", "item": item})
 
+    async def _solve_interview(
+        self,
+        *,
+        question: str,
+        answer_type_hint: str | None,
+        source: str,
+        request_id: str | None,
+        trigger_type: str | None,
+        triage_latency_ms: int | None = None,
+        fail=None,
+    ) -> None:
+        # The interviewer keeps discussing a problem long after stating it, so
+        # the gate keeps firing and triage keeps re-emitting the same question,
+        # reworded each time. Dedupe here, before the solve — the post-call
+        # title dedupe would drop the answer only after paying for it, and only
+        # if the two answers happened to be titled alike.
+        claim: tuple[str, frozenset[str]] | None = None
+        if source == "proactive":
+            if self._already_solved(question):
+                return
+            if time.monotonic() - self._last_card_at < MIN_CARD_INTERVAL_S:
+                return
+            # Uninvited, and far more expensive than the watch call that
+            # proposed it: ~1400 smart-model tokens, logged as interactive
+            # usage. BUDGET_RECHECK_EVERY was calibrated for cheap Haiku watch
+            # calls and would let up to 19 of these through after the user goes
+            # over quota, so this one is always checked for real. Before the
+            # dedupe claim below: a question refused for budget is unanswered,
+            # not answered.
+            if not await self._budget_ok(force=True):
+                return
+            claim = self._remember_solved(question)
+        prompt = LIVE_ASSIST_INTERVIEW_ANSWER_PROMPT.format(
+            meeting_title=getattr(self, "_meeting_title", "(untitled)"),
+            context_digest=format_digest((self._context or {}).get("digest") or {}),
+            transcript_window=self._format_window(interview=True),
+            question=question,
+        )
+        outcome = await self._finish_interview_answer(
+            prompt=prompt,
+            question=question,
+            source=source,
+            request_id=request_id,
+            trigger_type=trigger_type,
+            parent_item_id=None,
+            depth="concise",
+            prompt_feature="live_assist_interview",
+            # The concise answer now carries a real code block, not pseudocode.
+            max_tokens=1400,
+            fallback_answer_type=answer_type_hint or "general",
+            extra_metadata={"triage_latency_ms": triage_latency_ms}
+            if triage_latency_ms is not None
+            else {},
+            fail=fail,
+        )
+        # A transient failure is not a decision — let a later gate hit retry it.
+        if claim is not None and outcome == "error":
+            self._forget_solved(claim)
+
+    async def _finish_interview_answer(
+        self,
+        *,
+        prompt: str,
+        question: str,
+        source: str,
+        request_id: str | None,
+        trigger_type: str | None,
+        parent_item_id: str | None,
+        depth: str,
+        prompt_feature: str,
+        max_tokens: int,
+        fallback_answer_type: str,
+        extra_metadata: dict,
+        fail=None,
+    ) -> str:
+        """Solve → accept → persist → emit.
+
+        Returns "sent", "dropped" (the acceptance gate decided against it) or
+        "error" (transient — the same question may be worth retrying).
+        """
+        started = time.monotonic()
+        result = await self._json_ai_call(
+            feature=prompt_feature,
+            model=settings.ANTHROPIC_MODEL_SMART,
+            max_tokens=max_tokens,
+            prompt=prompt,
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if not result or not str(result.get("body") or "").strip():
+            if fail is not None:
+                await fail(self._ask_failure_message())
+            return "error"
+
+        title = str(result.get("title") or question[:80]).strip()
+        # A proactive interview answer is an uninvited card like any other, so
+        # it goes through the same acceptance gate: the model's self-assessed
+        # score is enforced here, not taken on trust, and it is the score the
+        # offline usefulness eval reads back. An ask was invited — it is never
+        # score-gated, and carries no score.
+        usefulness_score = None
+        if source == "proactive":
+            accepted, reason = self._accept({
+                "kind": "answer",
+                "title": title,
+                "body": str(result["body"]).strip(),
+                "usefulness_score": result.get("usefulness_score"),
+            })
+            if not accepted:
+                logger.debug(
+                    "live assist interview answer dropped (%s) for meeting %s",
+                    reason, self.meeting_id,
+                )
+                return "dropped"
+            usefulness_score = float(result.get("usefulness_score") or 0.0)
+
+        answer_type = str(result.get("answer_type") or fallback_answer_type)
+        if answer_type not in {"coding", "system_design", "behavioral", "general"}:
+            answer_type = fallback_answer_type
+        allowed_by_type = {
+            "coding": {"code", "walkthrough", "edge_cases"},
+            "system_design": {"architecture", "scale", "tradeoffs"},
+            "behavioral": set(),
+            "general": set(),
+        }
+        expansion_options = [
+            str(option)
+            for option in (result.get("expansion_options") or [])
+            if str(option) in allowed_by_type.get(answer_type, set())
+        ]
+        metadata = {
+            "answer_type": answer_type,
+            "depth": depth,
+            "parent_item_id": parent_item_id,
+            "expansion_options": expansion_options if depth == "concise" else [],
+            "latency_ms": latency_ms,
+            **extra_metadata,
+        }
+        item = await self._persist_item(
+            kind="answer",
+            source=source,
+            question=question,
+            title=title,
+            body=str(result["body"]).strip(),
+            transcript_ts=self._window[-1][2] if self._window else None,
+            usefulness_score=usefulness_score,
+            trigger_type=trigger_type,
+            request_id=request_id,
+            model=settings.ANTHROPIC_MODEL_SMART,
+            metadata=metadata,
+            prompt_feature=prompt_feature,
+        )
+        if item is None:
+            if fail is not None:
+                await fail("Couldn't answer that just now — try again.")
+            return "error"
+        self._remember_title(item["title"])
+        if source == "proactive":
+            self._cards_shown += 1
+            self._last_card_at = time.monotonic()
+        await self._send_json({"type": "assist", "item": item})
+        return "sent"
+
     # -- shared plumbing ------------------------------------------------------
 
-    async def _budget_ok(self) -> bool:
-        """Re-check the monthly budget every BUDGET_RECHECK_EVERY watch calls."""
-        if self._watch_calls % BUDGET_RECHECK_EVERY != 0:
+    async def _budget_ok(self, *, force: bool = False) -> bool:
+        """Re-check the monthly budget every BUDGET_RECHECK_EVERY watch calls.
+
+        ``force`` bypasses the cadence for spend the cadence was never sized
+        for (a proactive smart-model solve).
+        """
+        if not force and self._watch_calls % BUDGET_RECHECK_EVERY != 0:
             return True
         try:
             from app.middleware.rate_limit import check_monthly_ai_budget
@@ -733,19 +1249,36 @@ class LiveAssistWatcher:
         self, *, feature: str, model: str, max_tokens: int, prompt: str
     ) -> dict | None:
         """One JSON-out Anthropic call with the mandatory ai_calls logging.
-        Any failure (API error, unparseable output) returns None — never a
-        broken card."""
+        Any failure (API error, unparseable output, CALL_TIMEOUT_S elapsed)
+        returns None — never a broken card. Sets _last_call_truncated /
+        _last_call_timed_out so a caller can tell "ran out of room mid-answer"
+        and "took too long" apart from "returned junk"; the three need different
+        messages, because retrying a truncation just truncates again and
+        retrying a timeout on the same prompt just times out again.
+
+        wait_for is the authority on the deadline, not the per-request timeout:
+        the client's max_retries would otherwise multiply that timeout by three.
+        """
         started = time.monotonic()
         response = None
         success = True
         parse_error = False
         error_message: str | None = None
+        self._last_call_truncated = False
+        self._last_call_timed_out = False
         try:
-            response = await _ai.client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=LIVE_ASSIST_SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
+            response = await asyncio.wait_for(
+                _ai.client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=LIVE_ASSIST_SYSTEM,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=CALL_TIMEOUT_S,
+                ),
+                CALL_TIMEOUT_S,
+            )
+            self._last_call_truncated = (
+                getattr(response, "stop_reason", None) == "max_tokens"
             )
             try:
                 result = json.loads(
@@ -754,10 +1287,23 @@ class LiveAssistWatcher:
                 return result if isinstance(result, dict) else None
             except json.JSONDecodeError as e:
                 parse_error = True
-                error_message = f"JSONDecodeError: {e}"
+                error_message = (
+                    f"truncated at max_tokens={max_tokens}"
+                    if self._last_call_truncated
+                    else f"JSONDecodeError: {e}"
+                )
                 return None
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError:
+            success = False
+            self._last_call_timed_out = True
+            error_message = f"timed out after {CALL_TIMEOUT_S:.0f}s"
+            logger.warning(
+                "live assist %s call timed out after %.0fs for meeting %s",
+                feature, CALL_TIMEOUT_S, self.meeting_id,
+            )
+            return None
         except Exception as e:
             success = False
             error_message = f"{type(e).__name__}: {e}"
@@ -793,7 +1339,8 @@ class LiveAssistWatcher:
                     "usefulness_score": fields["usefulness_score"],
                     "trigger_type":     fields["trigger_type"],
                     "prompt_version":   _ai.PROMPT_VERSIONS.get(
-                        "live_assist_watch" if fields["source"] == "proactive" else "live_assist_ask",
+                        fields.get("prompt_feature")
+                        or ("live_assist_watch" if fields["source"] == "proactive" else "live_assist_ask"),
                         "v1",
                     ),
                     "request_id":       fields["request_id"],
@@ -818,13 +1365,53 @@ class LiveAssistWatcher:
         self._shown_titles.append(title)
         self._shown_normalized.add(_normalize_title(title))
 
-    def _format_window(self) -> str:
+    # -- proactive question dedupe -------------------------------------------
+
+    def _already_solved(self, question: str) -> bool:
+        """Has this meeting already paid for an answer to this problem?
+
+        Exact match first (cheap), then content-word overlap for the same
+        problem restated — see the fingerprint helpers above.
+        """
+        normalized = _normalize_title(question)
+        if normalized and normalized in self._solved_normalized:
+            return True
+        tokens = _question_tokens(question)
+        # One content word is too thin a fingerprint to refuse a solve over.
+        if len(tokens) < QUESTION_MIN_TOKENS:
+            return False
+        return any(
+            _token_overlap(tokens, seen) >= QUESTION_OVERLAP_THRESHOLD
+            for seen in self._solved_tokens
+        )
+
+    def _remember_solved(self, question: str) -> tuple[str, frozenset[str]] | None:
+        """Claim a question so a re-statement never pays for a second solve.
+        Returns the claim (or None for an empty question) so a transient failure
+        can hand it back."""
+        normalized = _normalize_title(question)
+        if not normalized:
+            return None
+        tokens = _question_tokens(question)
+        self._solved_normalized.add(normalized)
+        self._solved_tokens.append(tokens)
+        return normalized, tokens
+
+    def _forget_solved(self, claim: tuple[str, frozenset[str]]) -> None:
+        normalized, tokens = claim
+        self._solved_normalized.discard(normalized)
+        try:
+            self._solved_tokens.remove(tokens)
+        except ValueError:  # already released
+            pass
+
+    def _format_window(self, *, interview: bool = False) -> str:
         lines: list[str] = []
         total = 0
         for speaker, text, _ts in reversed(self._window):
             line = f"{speaker}: {text}"
             total += len(line) + 1
-            if total > TRANSCRIPT_WINDOW_CHARS:
+            if total > (INTERVIEW_WINDOW_CHARS if interview else TRANSCRIPT_WINDOW_CHARS):
                 break
             lines.append(line)
         lines.reverse()
@@ -836,6 +1423,34 @@ class LiveAssistWatcher:
 # ---------------------------------------------------------------------------
 
 _watchers: dict[str, LiveAssistWatcher] = {}
+
+# MAX_WATCH_CALLS is a cost cap on the MEETING, not on one socket. Cards and
+# asks are restored from their rows on reconnect; watch calls persist nothing,
+# so without this a flaky connection resets the counter on every reconnect and
+# the cap stops bounding a long or unreliable call at all. Process-local, like
+# _watchers — the advisory lock keeps one meeting on one instance, and the
+# monthly budget is the cross-instance bound.
+_meeting_watch_calls: dict[str, int] = {}
+
+# forget_meeting() clears an entry when a meeting ends; this bounds the leak
+# from meetings that never get there (browser closed, process outlives them).
+# Eviction only loses the cap for that meeting — it can never block a watcher.
+MAX_TRACKED_MEETINGS = 500
+
+
+def _evict_stale_watch_calls(keep: str) -> None:
+    if len(_meeting_watch_calls) <= MAX_TRACKED_MEETINGS:
+        return
+    # dicts iterate in insertion order — drop the meetings seen longest ago.
+    excess = len(_meeting_watch_calls) - MAX_TRACKED_MEETINGS
+    for stale in [m for m in _meeting_watch_calls if m != keep][:excess]:
+        _meeting_watch_calls.pop(stale, None)
+
+
+def forget_meeting(meeting_id: str) -> None:
+    """Drop a finished meeting's watch-call count. Safe to call for meetings
+    that never had a watcher (the feature may be off for this user)."""
+    _meeting_watch_calls.pop(meeting_id, None)
 
 
 async def maybe_start_watcher(
@@ -890,6 +1505,12 @@ async def maybe_start_watcher(
 def item_to_wire(row: dict) -> dict:
     """meeting_assist_items row → the WS/REST item payload."""
     created = row.get("created_at")
+    metadata = row.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
     return {
         "id":            str(row.get("id")),
         "kind":          row.get("kind"),
@@ -902,5 +1523,9 @@ def item_to_wire(row: dict) -> dict:
         # Lets the client correlate an ask answer with ITS pending request —
         # a late answer to an abandoned ask must not settle a newer one.
         "request_id":    row.get("request_id"),
+        "answer_type":   metadata.get("answer_type"),
+        "depth":         metadata.get("depth"),
+        "parent_item_id": metadata.get("parent_item_id"),
+        "expansion_options": metadata.get("expansion_options") or [],
         "created_at":    created.isoformat() if hasattr(created, "isoformat") else created,
     }

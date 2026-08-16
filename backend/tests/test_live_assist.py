@@ -32,7 +32,19 @@ from app.services.live_assist_service import (
     _build_digest,
     _extract_keywords,
     _normalize_title,
+    _question_tokens,
+    _token_overlap,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_meeting_watch_calls():
+    """The watch-call cap is meeting-scoped and process-global by design (it has
+    to outlive a reconnect), and every test here uses meeting "m-1" — so it
+    would otherwise carry between tests."""
+    las._meeting_watch_calls.clear()
+    yield
+    las._meeting_watch_calls.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -52,14 +64,19 @@ async def _wait_until(predicate, timeout=2.0):
 class FakeAnthropicMessages:
     """Scripted messages.create — pops one canned text per call."""
 
-    def __init__(self, responses):
+    def __init__(self, responses, stop_reason="end_turn"):
         self.responses = list(responses)
+        self.stop_reason = stop_reason
         self.calls: list[dict] = []
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
         text = self.responses.pop(0) if self.responses else '{"card": null}'
-        return SimpleNamespace(content=[SimpleNamespace(text=text)], usage=None)
+        return SimpleNamespace(
+            content=[SimpleNamespace(text=text)],
+            usage=None,
+            stop_reason=self.stop_reason,
+        )
 
 
 def _fast_constants(monkeypatch):
@@ -70,10 +87,12 @@ def _fast_constants(monkeypatch):
     monkeypatch.setattr(las, "ACCUM_MIN_INTERVAL_S", 0.02)
     monkeypatch.setattr(las, "MIN_CARD_INTERVAL_S", 0.0)
     monkeypatch.setattr(las, "ASK_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(las, "INTERVIEW_RECHECK_S", 0.01)
 
 
 def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
-                seed_titles=(), seed_items=(), seed_segments=()):
+                seed_titles=(), seed_items=(), seed_segments=(),
+                template="general", parent_item=None, stop_reason="end_turn"):
     """Stub the DB, Anthropic client, logging, and budget for a watcher test.
     Returns (fake_messages, inserted_rows, emitted_payloads, send_json).
     seed_titles seeds prior PROACTIVE cards; seed_items takes full row dicts."""
@@ -83,7 +102,9 @@ def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
     async def query_one(sql, *args):
         if "live_context" in sql:
             return {"live_context": live_context, "title": "Budget sync",
-                    "template": "general"}
+                    "template": template}
+        if "meeting_assist_items" in sql:
+            return parent_item
         return None
 
     async def query(sql, *args):
@@ -113,7 +134,7 @@ def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
     monkeypatch.setattr(
         "app.middleware.rate_limit.check_monthly_ai_budget", AsyncMock()
     )
-    fake = FakeAnthropicMessages(responses)
+    fake = FakeAnthropicMessages(responses, stop_reason=stop_reason)
     monkeypatch.setattr(las._ai, "client", SimpleNamespace(messages=fake))
 
     async def send_json(payload):
@@ -126,6 +147,17 @@ def _card(title="Acme renewal is Friday", kind="fact", score=0.9,
           body="Their contract renewal was agreed for Friday in last week's email thread."):
     return json.dumps({"card": {"kind": kind, "title": title, "body": body,
                                 "usefulness_score": score}})
+
+
+def _triage(question="Design a URL shortener", answer_type="system_design",
+            asked_by="them", complete=True):
+    """A triage verdict from the interview watch call."""
+    return json.dumps({"interview_question": {
+        "question": question,
+        "answer_type": answer_type,
+        "asked_by": asked_by,
+        "complete": complete,
+    }})
 
 
 async def _start_watcher(send_json, **kw):
@@ -279,6 +311,36 @@ def test_gate_date_number_triggers():
     assert gate.observe("me", "let me circle back tomorrow") == "date_number"
 
 
+@pytest.mark.parametrize("text", [
+    "Implement an LRU cache",
+    "Given an array of integers, return the two indices that sum to a target",
+    "Two sum: find all pairs",
+    "Okay so let's start with a coding problem",
+    "Your task is to shorten a URL",
+    "Walk me through how you'd size the cache",
+])
+def test_gate_interview_prompts_trigger_without_a_question_mark(text):
+    """An interviewer STATES the problem. No "?", no question-leading word, no
+    novel entity, no number — every other path would sit on these until 400
+    characters of transcript had piled up."""
+    gate = CandidateGate(interview=True)
+    assert gate.observe("them", text) == "interview_prompt"
+
+
+def test_gate_interview_prompt_requires_interview_and_the_other_party():
+    # Same sentence from the user: they are running the interview, and the
+    # problem is the candidate's to solve, not ours.
+    assert CandidateGate(interview=True).observe("me", "Implement an LRU cache") is None
+    # And an ordinary meeting keeps the ordinary gate.
+    assert CandidateGate().observe("them", "Implement an LRU cache") is None
+
+
+def test_gate_interview_small_talk_still_accumulates():
+    gate = CandidateGate(interview=True)
+    assert gate.observe("them", "yeah that sounds fine to be honest") is None
+    assert gate.observe("them", "nice to meet you, thanks for making the time") is None
+
+
 def test_gate_ordinary_talk_accumulates_silently():
     gate = CandidateGate()
     assert gate.observe("me", "yeah that sounds fine to be honest") is None
@@ -294,6 +356,32 @@ def test_gate_ordinary_talk_accumulates_silently():
 def test_normalize_title_for_dedupe():
     assert _normalize_title("Acme's renewal — Friday!") == "acmes renewal friday"
     assert _normalize_title("ACME  renewal:  Friday") == _normalize_title("Acme renewal, Friday")
+
+
+def test_question_tokens_drop_filler_and_fold_word_forms():
+    """Stopwords and inflections are what make one problem look like two."""
+    assert _question_tokens("How would you design a URL shortener?") == frozenset(
+        {"design", "url", "shorten"}
+    )
+    # shortener / shortening / shorten all collapse onto the same stem.
+    assert "shorten" in _question_tokens("a highly available URL-shortening service")
+
+
+@pytest.mark.parametrize("a,b,duplicate", [
+    # The rephrasing that exact normalization misses.
+    ("Design a URL shortener",
+     "Design a highly available URL-shortening service", True),
+    ("Implement an LRU cache", "So, implement an LRU cache for me", True),
+    # Different problems that share vocabulary must stay separate.
+    ("Reverse a linked list", "Detect a cycle in a linked list", False),
+    ("Design a URL shortener", "Design a rate limiter", False),
+    # A follow-up that changes the problem is not the problem restated.
+    ("Design a URL shortener",
+     "How would you scale that shortener to 100 million users", False),
+])
+def test_token_overlap_separates_restatements_from_new_questions(a, b, duplicate):
+    overlap = _token_overlap(_question_tokens(a), _question_tokens(b))
+    assert (overlap >= las.QUESTION_OVERLAP_THRESHOLD) is duplicate
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +520,65 @@ async def test_watch_call_cap_stops_model_calls(monkeypatch):
     assert len(fake.calls) == 1  # cap held
 
 
+async def test_watch_call_cap_is_meeting_scoped_not_connection_scoped(monkeypatch):
+    """MAX_WATCH_CALLS caps the spend on a MEETING. Reconnecting restores the
+    card and ask counters from their rows; watch calls persist no row, so a
+    flaky connection would otherwise reset the cap on every reconnect."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_WATCH_CALLS", 1)
+    fake, _, _, send_json = _wire_fakes(
+        monkeypatch, responses=['{"card": null}', '{"card": null}'],
+    )
+    first = await _start_watcher(send_json)
+    try:
+        first.on_final("them", "What do you think?", 1.0)
+        await _wait_until(lambda: len(fake.calls) == 1)
+    finally:
+        await first.aclose()
+
+    second = await _start_watcher(send_json)   # same meeting, new socket
+    try:
+        second.on_final("them", "And what about this?", 2.0)
+        await asyncio.sleep(0.08)
+    finally:
+        await second.aclose()
+
+    assert len(fake.calls) == 1
+    # …and the count is released once the meeting actually ends.
+    las.forget_meeting("m-1")
+    assert las._meeting_watch_calls == {}
+
+
+async def test_call_deadline_beats_the_client_and_reports_it(monkeypatch):
+    """A call that outruns CALL_TIMEOUT_S must fail here, with a correlated
+    assist_error, rather than run on past the browser's ask deadline and land a
+    late answer beside the error it caused."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "CALL_TIMEOUT_S", 0.02)
+    fake, inserted, emitted, send_json = _wire_fakes(monkeypatch)
+
+    async def never_returns(**kwargs):
+        fake.calls.append(kwargs)
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(fake, "create", never_returns)
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("What did they decide about pricing?", "req-slow")
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert inserted == []
+    assert emitted == [{
+        "type": "assist_error",
+        "request_id": "req-slow",
+        "message": "That took too long to answer — ask for a smaller piece of it.",
+    }]
+    # The per-request timeout is passed too, so httpx tears the socket down.
+    assert fake.calls[0]["timeout"] == 0.02
+
+
 async def test_ordinary_talk_only_calls_after_accumulation(monkeypatch):
     _fast_constants(monkeypatch)
     fake, _, _, send_json = _wire_fakes(monkeypatch, responses=['{"card": null}'])
@@ -553,6 +700,539 @@ async def test_ask_round_trip(monkeypatch):
     assert row["request_id"] == "req-1"
     assert emitted[0]["type"] == "assist"
     assert emitted[0]["item"]["kind"] == "answer"
+
+
+async def test_typed_interview_question_uses_general_knowledge(monkeypatch):
+    _fast_constants(monkeypatch)
+    response = json.dumps({
+        "title": "Two-sum approach",
+        "body": "**Approach** Use a hash map.\n**Complexity** O(n) time.",
+        "answer_type": "coding",
+        "expansion_options": ["code", "walkthrough", "edge_cases", "invalid"],
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch, responses=[response], template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("Solve two sum", "req-interview")
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert fake.calls[0]["model"] == las.settings.ANTHROPIC_MODEL_SMART
+    assert "general technical knowledge" in fake.calls[0]["messages"][0]["content"]
+    # The answer must be shaped like an interview answer: clarify, weigh the
+    # options aloud, then a simple runnable example — elaboration comes later.
+    prompt = fake.calls[0]["messages"][0]["content"]
+    for section in ("**Clarify**", "**Approach**", "**Trade-offs**",
+                    "**Code**", "**Complexity**", "**Next**"):
+        assert section in prompt
+    assert "never pseudocode" in prompt
+    assert fake.calls[0]["max_tokens"] == 1400
+    assert inserted[0]["metadata"]["answer_type"] == "coding"
+    assert inserted[0]["metadata"]["expansion_options"] == [
+        "code", "walkthrough", "edge_cases",
+    ]
+    # An invited answer is never score-gated, so it carries no score — only
+    # uninvited proactive cards feed the usefulness eval.
+    assert inserted[0]["usefulness_score"] is None
+    assert emitted[0]["item"]["answer_type"] == "coding"
+    assert emitted[0]["item"]["depth"] == "concise"
+
+
+async def test_interview_watch_triages_then_solves_complete_question(monkeypatch):
+    _fast_constants(monkeypatch)
+    triage = _triage()
+    answer = json.dumps({
+        "title": "URL shortener design",
+        "body": "**Architecture** API, ID generator, database, and cache.",
+        "answer_type": "system_design",
+        "expansion_options": ["architecture", "scale", "tradeoffs"],
+        "usefulness_score": 0.9,
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch, responses=[triage, answer], template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "How would you design a URL shortener?", 4.0)
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert [call["model"] for call in fake.calls] == [
+        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.ANTHROPIC_MODEL_SMART,
+    ]
+    assert inserted[0]["source"] == "proactive"
+    assert inserted[0]["metadata"]["answer_type"] == "system_design"
+    # The model's own score is persisted, not a hardcoded 1.0 — this column is
+    # what the offline usefulness eval reads.
+    assert inserted[0]["usefulness_score"] == 0.9
+    assert emitted[0]["item"]["expansion_options"] == [
+        "architecture", "scale", "tradeoffs",
+    ]
+
+
+async def test_stated_interview_problem_reaches_triage_immediately(monkeypatch):
+    """The imperative prompt an interviewer actually uses must reach triage on
+    its own turn, not after the generic accumulation window."""
+    _fast_constants(monkeypatch)
+    answer = json.dumps({
+        "title": "LRU cache",
+        "body": "**Approach** Hash map plus doubly linked list.",
+        "answer_type": "coding",
+        "expansion_options": ["code"],
+        "usefulness_score": 0.9,
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage(question="Implement an LRU cache",
+                           answer_type="coding"), answer],
+        template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        # Well under ACCUM_MIN_CHARS — the accumulation gate cannot explain a call.
+        watcher.on_final("them", "Implement an LRU cache", 4.0)
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert len(fake.calls) == 2
+    assert inserted[0]["trigger_type"] == "interview_prompt"
+    assert emitted[0]["item"]["answer_type"] == "coding"
+
+
+async def test_incomplete_interview_question_is_reconsidered(monkeypatch):
+    """A question still being stated returns complete:false. The continuation is
+    ordinary low-signal transcript, so without an explicit recheck it would wait
+    out the 400-char / 45s accumulation gate."""
+    _fast_constants(monkeypatch)
+    answer = json.dumps({
+        "title": "Two sum",
+        "body": "**Approach** One pass with a hash map.",
+        "answer_type": "coding",
+        "expansion_options": [],
+        "usefulness_score": 0.9,
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[
+            _triage(question="Given an array of integers",
+                    answer_type="coding", complete=False),
+            _triage(question="Given an array, return two indices summing to a target",
+                    answer_type="coding"),
+            answer,
+        ],
+        template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "Given an array of integers", 4.0)
+        await _wait_until(lambda: len(fake.calls) == 1)
+        # Continuation with no trigger of its own and under ACCUM_MIN_CHARS.
+        watcher.on_final("them", "and it should be fast", 6.0)
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert [c["model"] for c in fake.calls] == [
+        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.ANTHROPIC_MODEL_SMART,
+    ]
+    assert inserted[0]["question"] == (
+        "Given an array, return two indices summing to a target"
+    )
+    assert inserted[0]["trigger_type"] == "interview_recheck"
+
+
+async def test_incomplete_interview_question_rechecks_are_bounded(monkeypatch):
+    """A "question" that never completes must stop costing triage calls."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_INTERVIEW_RECHECKS", 1)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage(complete=False)] * 5,
+        template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "Design a URL shortener", 4.0)
+        await _wait_until(lambda: len(fake.calls) == 2)
+        await asyncio.sleep(0.08)
+    finally:
+        await watcher.aclose()
+
+    assert len(fake.calls) == 2  # the initial triage plus one recheck
+    assert inserted == [] and emitted == []
+
+
+async def test_user_own_interview_question_is_not_solved(monkeypatch):
+    """The interview template covers the user CONDUCTING the interview. Solving
+    the question they just put to a candidate would be answering the wrong side
+    of the call — and "Can you design a URL shortener?" clears the generic
+    request gate, so it does reach triage."""
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage(asked_by="me")],
+        template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        # The candidate is on the call, so the "them" backstop below is not what
+        # refuses this one — the attribution is.
+        watcher.on_final("them", "hi, glad to be here", 1.0)
+        watcher.on_final("me", "Can you design a URL shortener for me?", 4.0)
+        await _wait_until(lambda: fake.calls)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    # Triage ran; the expensive solve did not.
+    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert inserted == [] and emitted == []
+    # The prompt has to give the model what it needs to attribute the question.
+    prompt = fake.calls[0]["messages"][0]["content"]
+    assert '"me" is the user' in prompt
+    assert '"asked_by"' in prompt
+
+
+async def test_interview_solve_needs_the_other_party_on_the_transcript(monkeypatch):
+    """Backstop on the model's attribution: when only the user's mic has
+    produced transcript, no question in it was put to them."""
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch, responses=[_triage()], template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        # "can you" clears the generic request gate, so triage does run.
+        watcher.on_final("me", "Can you design a URL shortener?", 4.0)
+        await _wait_until(lambda: fake.calls)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert inserted == [] and emitted == []
+
+
+async def test_unattributed_interview_question_falls_back_to_the_card(monkeypatch):
+    """Fail closed on a missing asked_by — but a card returned alongside it is
+    an ordinary grounded card and must still be shown."""
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[json.dumps({
+            "interview_question": {"question": "Design a URL shortener",
+                                   "answer_type": "system_design"},
+            "card": {"kind": "context", "title": "Rana led the platform rewrite",
+                     "body": "She ran the same migration at Acme last year.",
+                     "usefulness_score": 0.9},
+        })],
+        template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "Design a URL shortener", 4.0)
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert inserted[0]["kind"] == "context"
+
+
+async def test_proactive_solve_rechecks_budget_before_spending(monkeypatch):
+    """Budget drill: the watch-call recheck cadence was sized for cheap Haiku
+    calls. A proactive solve is a 1400-token smart-model call charged as
+    interactive usage, so it gets its own check rather than riding the cadence
+    for up to 19 more calls."""
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch, responses=[_triage()], template="interview",
+    )
+    monkeypatch.setattr(
+        "app.middleware.rate_limit.check_monthly_ai_budget",
+        # In budget when the watch call runs, over it by the time the solve does.
+        AsyncMock(side_effect=[None,
+                               HTTPException(status_code=429, detail="over budget")]),
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "Design a URL shortener", 4.0)
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert inserted == []
+    assert emitted == [{"type": "assist_error", "request_id": None,
+                        "message": "over budget"}]
+    # Refused for budget, not answered — the question stays solvable later.
+    assert watcher._already_solved("Design a URL shortener") is False
+
+
+async def test_proactive_interview_answer_below_threshold_is_dropped(monkeypatch):
+    """An uninvited interview answer goes through the same acceptance gate as
+    any other card — a low self-assessed score means silence."""
+    _fast_constants(monkeypatch)
+    triage = _triage(question="Can you see my screen?", answer_type="coding")
+    answer = json.dumps({
+        "title": "Screen sharing",
+        "body": "They asked whether their screen is visible.",
+        "answer_type": "general",
+        "expansion_options": [],
+        "usefulness_score": 0.2,
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch, responses=[triage, answer], template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "Can you see my screen and the editor?", 4.0)
+        await _wait_until(lambda: len(fake.calls) == 2)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    assert inserted == [] and emitted == []
+
+
+async def test_same_interview_question_is_not_re_solved(monkeypatch):
+    """The interviewer keeps discussing a problem after stating it, so triage
+    keeps re-emitting it. The second hit must not reach the smart model."""
+    _fast_constants(monkeypatch)
+    answer = json.dumps({
+        "title": "URL shortener design",
+        "body": "**Architecture** API, ID generator, database, and cache.",
+        "answer_type": "system_design",
+        "expansion_options": [],
+        "usefulness_score": 0.9,
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        # Second triage restates the same problem with different casing.
+        responses=[_triage(), answer, _triage(question="design a URL shortener!")],
+        template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "How would you design a URL shortener?", 4.0)
+        await _wait_until(lambda: emitted)
+        watcher.on_final("them", "So how would you shard that URL store?", 20.0)
+        await _wait_until(lambda: len(fake.calls) == 3)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    smart_calls = [c for c in fake.calls
+                   if c["model"] == las.settings.ANTHROPIC_MODEL_SMART]
+    assert len(smart_calls) == 1
+    assert len(inserted) == 1
+
+
+async def test_restated_interview_question_is_not_re_solved(monkeypatch):
+    """The sliding transcript window makes triage reword the same problem.
+    "Design a URL shortener" and "Design a highly available URL-shortening
+    service" are one problem — the second must not buy a second Sonnet solve."""
+    _fast_constants(monkeypatch)
+    answer = json.dumps({
+        "title": "URL shortener design",
+        "body": "**Architecture** API, ID generator, database, and cache.",
+        "answer_type": "system_design",
+        "expansion_options": [],
+        "usefulness_score": 0.9,
+    })
+    restated = _triage(question="Design a highly available URL-shortening service")
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage(), answer, restated],
+        template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "How would you design a URL shortener?", 4.0)
+        await _wait_until(lambda: emitted)
+        watcher.on_final("them", "How would you keep that available at scale?", 20.0)
+        await _wait_until(lambda: len(fake.calls) == 3)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    smart_calls = [c for c in fake.calls
+                   if c["model"] == las.settings.ANTHROPIC_MODEL_SMART]
+    assert len(smart_calls) == 1
+    assert len(inserted) == 1
+
+
+async def test_different_interview_question_still_solved(monkeypatch):
+    """The near-duplicate gate must not swallow a genuinely new problem that
+    happens to share vocabulary with the last one."""
+    _fast_constants(monkeypatch)
+
+    def _answer(title):
+        return json.dumps({
+            "title": title,
+            "body": "**Approach** Two pointers over the list.",
+            "answer_type": "coding",
+            "expansion_options": [],
+            "usefulness_score": 0.9,
+        })
+
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[
+            _triage(question="Reverse a linked list", answer_type="coding"),
+            _answer("Reversing a linked list"),
+            _triage(question="Detect a cycle in a linked list", answer_type="coding"),
+            _answer("Cycle detection"),
+        ],
+        template="interview",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "Can you reverse a linked list for me?", 4.0)
+        await _wait_until(lambda: emitted)
+        watcher.on_final("them", "Now, can you detect a cycle in a linked list?", 20.0)
+        await _wait_until(lambda: len(inserted) == 2)
+    finally:
+        await watcher.aclose()
+
+    assert [r["title"] for r in inserted] == [
+        "Reversing a linked list", "Cycle detection",
+    ]
+
+
+async def test_solved_question_dedupe_survives_reconnect(monkeypatch):
+    """A reconnect replays prior cards; a question already solved on the last
+    connection must not be solved again on this one."""
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage()],
+        template="interview",
+        seed_items=[{"title": "URL shortener design", "source": "proactive",
+                     "question": "Design a URL shortener"}],
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "How would you design a URL shortener?", 4.0)
+        await _wait_until(lambda: fake.calls)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert inserted == [] and emitted == []
+
+
+async def test_interview_answer_expansion_links_to_parent(monkeypatch):
+    _fast_constants(monkeypatch)
+    parent = {
+        "id": "parent-1",
+        "question": "Solve two sum",
+        "body": "Use a hash map.",
+        "metadata": {
+            "answer_type": "coding",
+            "expansion_options": ["code", "walkthrough", "edge_cases"],
+        },
+    }
+    response = json.dumps({
+        "title": "Complete implementation",
+        "body": "```python\ndef two_sum(nums, target):\n    return []\n```",
+        "answer_type": "coding",
+        "expansion_options": [],
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[response],
+        template="interview",
+        parent_item=parent,
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask(
+            "Solve two sum",
+            "req-expand",
+            intent="expand",
+            parent_item_id="parent-1",
+            focus="code",
+        )
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert fake.calls[0]["max_tokens"] == 2200
+    assert inserted[0]["metadata"]["parent_item_id"] == "parent-1"
+    assert inserted[0]["metadata"]["depth"] == "expanded"
+    assert inserted[0]["metadata"]["focus"] == "code"
+    assert emitted[0]["item"]["parent_item_id"] == "parent-1"
+
+
+async def test_truncated_answer_reports_a_distinct_error(monkeypatch):
+    """A code block cut off at max_tokens is unparseable JSON. Telling the user
+    to "try again" invites an identical truncation — say what actually went
+    wrong instead, and log it as truncation rather than a generic parse error."""
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=['{"title": "Two sum", "body": "```python\\ndef two_sum(nums'],
+        template="interview",
+        stop_reason="max_tokens",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("Solve two sum", "req-trunc")
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert emitted[0]["type"] == "assist_error"
+    assert "ran too long" in emitted[0]["message"]
+    assert inserted == []
+    logged = las.log_ai_call.await_args_list[-1].kwargs
+    assert logged["parse_error"] is True
+    assert "truncated at max_tokens=1400" in logged["error_message"]
+
+
+async def test_rejected_expansion_does_not_consume_an_ask(monkeypatch):
+    """A request that never reaches the model must not cost one of MAX_ASKS or
+    put the user into the ask cooldown."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "ASK_MIN_INTERVAL_S", 60.0)
+    answer = json.dumps({
+        "title": "Two-sum approach",
+        "body": "Use a hash map.",
+        "answer_type": "coding",
+        "expansion_options": [],
+    })
+    fake, _, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[answer],
+        template="interview",
+        parent_item=None,  # the parent card is gone / never existed
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("Solve two sum", "req-expand", intent="expand",
+                           parent_item_id="gone", focus="code")
+        await _wait_until(lambda: emitted)
+        assert emitted[0]["type"] == "assist_error"
+        assert fake.calls == []
+        assert watcher._asks == 0
+        # The 60s cooldown must not have started either — a real ask still lands.
+        watcher.submit_ask("Solve two sum", "req-ask")
+        await _wait_until(lambda: len(emitted) == 2)
+        assert watcher._asks == 1
+    finally:
+        await watcher.aclose()
+
+    assert emitted[1]["type"] == "assist"
 
 
 async def test_ask_title_dedupes_later_proactive_card(monkeypatch):
@@ -801,7 +1481,7 @@ class _FakeWatcher:
     def on_final(self, speaker, text, ts_start):
         self.finals.append((speaker, text, ts_start))
 
-    def submit_ask(self, question, request_id):
+    def submit_ask(self, question, request_id, **_options):
         self.asks.append((question, request_id))
 
     async def aclose(self):

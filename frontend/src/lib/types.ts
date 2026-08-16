@@ -123,6 +123,20 @@ export type AssistKind =
   | "contradiction"
   | "follow_up";
 
+export type AssistAnswerType =
+  | "coding"
+  | "system_design"
+  | "behavioral"
+  | "general";
+
+export type AssistExpansionFocus =
+  | "code"
+  | "walkthrough"
+  | "edge_cases"
+  | "architecture"
+  | "scale"
+  | "tradeoffs";
+
 export interface AssistItem {
   id: string;
   kind: AssistKind;
@@ -134,6 +148,10 @@ export interface AssistItem {
   dismissed: boolean;
   /** Client-supplied correlation id for ask answers (null for proactive). */
   request_id: string | null;
+  answer_type?: AssistAnswerType | null;
+  depth?: "concise" | "expanded" | null;
+  parent_item_id?: string | null;
+  expansion_options?: AssistExpansionFocus[];
   created_at: string;
 }
 

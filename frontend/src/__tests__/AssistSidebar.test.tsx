@@ -79,6 +79,19 @@ describe("AssistSidebar", () => {
     expect((input as HTMLInputElement).value).toBe("");
   });
 
+  it("sends on Enter and keeps Shift+Enter as a newline", () => {
+    const props = setup();
+    const input = screen.getByLabelText(/ask felix a question/i);
+    fireEvent.change(input, { target: { value: "Who is Sarah?" } });
+
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(props.onAsk).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(props.onAsk).toHaveBeenCalledWith("Who is Sarah?");
+    expect((input as HTMLTextAreaElement).value).toBe("");
+  });
+
   it("disables submit while an ask is pending and shows errors", () => {
     setup({ askPending: true, askError: "over budget" });
     expect(screen.getByLabelText(/send question/i)).toBeDisabled();
@@ -93,5 +106,31 @@ describe("AssistSidebar", () => {
 
     expect(props.onAsk).toHaveBeenCalled();
     expect((input as HTMLInputElement).value).toBe("Who is Sarah?");
+  });
+
+  it("renders interview markdown and requests a linked expansion", () => {
+    const interviewItem: AssistItem = {
+      ...items[1],
+      id: "interview-1",
+      question: "Solve two sum",
+      body: "**Approach** Use a map.\n```python\ndef solve():\n    pass\n```",
+      answer_type: "coding",
+      depth: "concise",
+      expansion_options: ["code", "edge_cases"],
+    };
+    const props = setup({ items: [interviewItem], interviewMode: true });
+
+    expect(screen.getByText("Approach")).toBeInTheDocument();
+    expect(screen.getByText(/def solve/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/paste an interview prompt/i)).toHaveAttribute(
+      "maxlength",
+      "6000",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Full solution" }));
+    expect(props.onAsk).toHaveBeenCalledWith("Solve two sum", {
+      intent: "expand",
+      parentItemId: "interview-1",
+      focus: "code",
+    });
   });
 });

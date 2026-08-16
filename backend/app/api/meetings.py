@@ -19,7 +19,11 @@ from pydantic import BaseModel, Field
 from app import db
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import check_monthly_ai_budget, limiter
-from app.services.live_assist_service import _assist_enabled, item_to_wire
+from app.services.live_assist_service import (
+    _assist_enabled,
+    forget_meeting,
+    item_to_wire,
+)
 from app.services.meeting_prep_service import meeting_prep_service
 from app.services.meeting_service import _capture_enabled, meeting_service
 from app.utils.background import spawn
@@ -213,6 +217,10 @@ async def end_capture(
     if not result:
         # Not owned, or not in 'recording' — nothing to end.
         raise HTTPException(status_code=404, detail="meeting not found or not recording")
+    # The meeting-scoped assist watch-call count outlives the WS connection on
+    # purpose (reconnects must not reset the cap); this is where it stops being
+    # needed.
+    forget_meeting(meeting_id)
     return result
 
 

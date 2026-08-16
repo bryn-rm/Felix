@@ -1,18 +1,20 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Loader2, SendHorizonal, Sparkles, X } from "lucide-react";
 import type { AssistItem } from "@/lib/types";
+import type { AssistAskOptions } from "@/hooks/useMeetingCapture";
 import { AssistCard } from "./AssistCard";
 
 interface AssistSidebarProps {
   items: AssistItem[];
   onDismiss: (id: string) => void;
   /** Returns false when the question couldn't be sent (e.g. reconnecting). */
-  onAsk: (question: string) => boolean;
+  onAsk: (question: string, options?: AssistAskOptions) => boolean;
   askPending: boolean;
   askError: string | null;
   onClose: () => void;
+  interviewMode?: boolean;
 }
 
 /**
@@ -27,6 +29,7 @@ export function AssistSidebar({
   askPending,
   askError,
   onClose,
+  interviewMode = false,
 }: AssistSidebarProps) {
   const [question, setQuestion] = useState("");
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -37,12 +40,25 @@ export function AssistSidebar({
     if (el) el.scrollTop = el.scrollHeight;
   }, [items.length]);
 
-  function submit(e: FormEvent) {
-    e.preventDefault();
+  function send() {
     if (askPending || !question.trim()) return;
     // Keep the typed question if the send failed (e.g. socket reconnecting) so
     // the user can retry instead of retyping it.
     if (onAsk(question)) setQuestion("");
+  }
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    send();
+  }
+
+  // A textarea has no implicit form submit, and mid-meeting the user reaches
+  // for Enter, not the send button. Shift+Enter keeps the newline so a pasted
+  // multi-line interview prompt is still editable.
+  function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    send();
   }
 
   return (
@@ -71,7 +87,13 @@ export function AssistSidebar({
           </p>
         ) : (
           items.map((item) => (
-            <AssistCard key={item.id} item={item} onDismiss={onDismiss} />
+            <AssistCard
+              key={item.id}
+              item={item}
+              onDismiss={onDismiss}
+              onExpand={onAsk}
+              askPending={askPending}
+            />
           ))
         )}
       </div>
@@ -79,13 +101,15 @@ export function AssistSidebar({
       <form onSubmit={submit} className="border-t border-white/[0.04] p-3">
         {askError && <p className="mb-2 text-xs text-red-400">{askError}</p>}
         <div className="flex items-center gap-2">
-          <input
+          <textarea
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            maxLength={1000}
-            placeholder="Ask Felix…"
+            onKeyDown={onKeyDown}
+            maxLength={6000}
+            rows={interviewMode ? 3 : 2}
+            placeholder={interviewMode ? "Ask Felix or paste an interview prompt…" : "Ask Felix…"}
             aria-label="Ask Felix a question"
-            className="min-w-0 flex-1 rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none"
+            className="min-w-0 flex-1 resize-none rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none"
           />
           <button
             type="submit"

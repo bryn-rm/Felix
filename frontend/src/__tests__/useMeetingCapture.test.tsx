@@ -273,6 +273,9 @@ describe("useMeetingCapture send buffer (finding #4)", () => {
 // ---------------------------------------------------------------------------
 
 describe("useMeetingCapture live assist protocol", () => {
+  // Mirrors ASK_TIMEOUT_MS in the hook (not exported).
+  const ASK_TIMEOUT_MS = 75_000;
+
   const card = (
     id: string,
     source: "proactive" | "ask" = "proactive",
@@ -336,6 +339,30 @@ describe("useMeetingCapture live assist protocol", () => {
     expect(result.current.askError).toBeNull();
   });
 
+  it("sends linked interview expansion fields", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+
+    act(() => result.current.sendAsk("Solve two sum", {
+      intent: "expand",
+      parentItemId: "item-1",
+      focus: "code",
+    }));
+
+    const askFrame = ws.sent
+      .filter((d): d is string => typeof d === "string")
+      .map((d) => JSON.parse(d))
+      .find((m) => m.type === "ask");
+    expect(askFrame).toMatchObject({
+      type: "ask",
+      question: "Solve two sum",
+      intent: "expand",
+      parent_item_id: "item-1",
+      focus: "code",
+    });
+  });
+
   it("a late answer to a timed-out ask does not settle a newer ask", async () => {
     mockGetToken.mockResolvedValue("tok");
     const { result } = renderHook(() => useMeetingCapture("m-1"));
@@ -344,7 +371,7 @@ describe("useMeetingCapture live assist protocol", () => {
     act(() => result.current.sendAsk("first question?"));
     const firstId = lastAskId(ws);
     act(() => {
-      jest.advanceTimersByTime(20_000); // first ask times out
+      jest.advanceTimersByTime(ASK_TIMEOUT_MS); // first ask times out
     });
     act(() => result.current.sendAsk("second question?"));
     expect(result.current.askPending).toBe(true);
@@ -419,9 +446,59 @@ describe("useMeetingCapture live assist protocol", () => {
     expect(result.current.askPending).toBe(true);
 
     act(() => {
-      jest.advanceTimersByTime(20_000);
+      jest.advanceTimersByTime(ASK_TIMEOUT_MS);
     });
     expect(result.current.askPending).toBe(false);
     expect(result.current.askError).toMatch(/try asking again/i);
+  });
+
+  it("outlasts the server's own call deadline", () => {
+    // The server gives up at live_assist_service.CALL_TIMEOUT_S (60s) and sends
+    // a correlated assist_error. Firing first would report a failure for an
+    // answer still on its way — see the ASK_TIMEOUT_MS comment in the hook.
+    expect(ASK_TIMEOUT_MS).toBeGreaterThan(60_000);
+  });
+
+  it("a late answer retires the timeout error instead of contradicting it", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+
+    act(() => result.current.sendAsk("slow question?"));
+    const askId = lastAskId(ws);
+    act(() => {
+      jest.advanceTimersByTime(ASK_TIMEOUT_MS);
+    });
+    expect(result.current.askError).toMatch(/try asking again/i);
+
+    // It arrived after all (a reconnect delayed it). The answer is now visible;
+    // leaving "no answer arrived" above it would be a lie.
+    act(() => ws._message({ type: "assist", item: card("i-7", "ask", askId) }));
+
+    expect(result.current.assistItems.map((i) => i.id)).toEqual(["i-7"]);
+    expect(result.current.askError).toBeNull();
+    expect(result.current.askPending).toBe(false);
+  });
+
+  it("a late assist_error replaces the generic timeout message", async () => {
+    mockGetToken.mockResolvedValue("tok");
+    const { result } = renderHook(() => useMeetingCapture("m-1"));
+    const ws = await startRecording(result);
+
+    act(() => result.current.sendAsk("slow question?"));
+    const askId = lastAskId(ws);
+    act(() => {
+      jest.advanceTimersByTime(ASK_TIMEOUT_MS);
+    });
+
+    act(() =>
+      ws._message({
+        type: "assist_error",
+        request_id: askId,
+        message: "That took too long to answer — ask for a smaller piece of it.",
+      }),
+    );
+
+    expect(result.current.askError).toMatch(/smaller piece/i);
   });
 });
