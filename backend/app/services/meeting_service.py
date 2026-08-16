@@ -24,6 +24,12 @@ from datetime import datetime, timedelta, timezone
 from app import db
 from app.config import settings
 from app.middleware.auth import get_google_credentials
+from app.models.meeting import (
+    MeetingType,
+    MeetingUserRole,
+    uses_candidate_assist,
+    validate_meeting_mode,
+)
 from app.services.ai_service import ai_service
 from app.services.calendar_service import CalendarService
 from app.services.commitment_service import _parse_deadline, commitment_service
@@ -45,6 +51,8 @@ class MeetingService:
         calendar_event_id: str | None = None,
         title: str | None = None,
         template: str = "general",
+        meeting_type: MeetingType | None = "general",
+        user_role: MeetingUserRole | None = None,
     ) -> dict:
         """Create a `recording` meeting row and return its id.
 
@@ -54,6 +62,7 @@ class MeetingService:
         """
         if not await _capture_enabled(user_id):
             raise PermissionError("meeting capture is disabled")
+        validate_meeting_mode(meeting_type, user_role)
 
         now = datetime.now(timezone.utc)
         resolved_title = title
@@ -73,6 +82,8 @@ class MeetingService:
                 "attendees":         attendees,
                 "date":              now,
                 "template":          template,
+                "meeting_type":      meeting_type,
+                "user_role":         user_role,
                 "status":            "recording",
                 "source":            "browser_capture",
                 "started_at":        now,
@@ -252,7 +263,17 @@ class MeetingService:
                 )
 
         # 2. Interview meetings → job tracker (guarded, best-effort).
-        if (meeting.get("template") or "") == "interview":
+        # Only when the USER was the candidate. An interviewer's meeting is an
+        # interview too, but the job application it discusses belongs to the
+        # person across the table — matching it against the user's own tracked
+        # applications (which falls back to company-name-in-title) would file a
+        # stranger's interview notes onto the user's timeline. Legacy rows have
+        # no stored role and keep the old template-only behaviour.
+        if uses_candidate_assist(
+            meeting.get("meeting_type"),
+            meeting.get("user_role"),
+            meeting.get("template"),
+        ):
             try:
                 await self._link_interview_to_job(user_id, meeting, summary)
             except Exception:

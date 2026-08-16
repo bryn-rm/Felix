@@ -21,6 +21,10 @@ import {
   type NotesEditorHandle,
 } from "@/components/meetings/NotesEditor";
 import { RecordingIndicator } from "@/components/meetings/RecordingIndicator";
+import {
+  assistModeLabel,
+  usesCandidateInterviewAssist,
+} from "@/components/meetings/constants";
 
 interface PageProps {
   params: { id: string };
@@ -67,6 +71,10 @@ export default function LiveMeetingPage({ params }: PageProps) {
     if (assistOpen) setAssistSeen(cards.length);
   }, [assistOpen, cards.length]);
   const unseenCards = assistOpen ? 0 : Math.max(0, cards.length - assistSeen);
+  // Both derive from one resolver: a legacy interview row runs candidate
+  // assist, so it must carry a badge too rather than doing it invisibly.
+  const candidateInterviewAssist = usesCandidateInterviewAssist(meeting);
+  const activeMode = assistModeLabel(meeting);
 
   const finalize = useCallback(async () => {
     if (finalizingRef.current) return;
@@ -131,7 +139,14 @@ export default function LiveMeetingPage({ params }: PageProps) {
             <h1 className="text-lg font-semibold text-slate-100">
               {meeting?.title || "Untitled meeting"}
             </h1>
-            <RecordingIndicator status={status} />
+            <div className="flex items-center gap-2">
+              <RecordingIndicator status={status} />
+              {activeMode && (
+                <span className="rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-xs text-indigo-300">
+                  {activeMode}
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -246,7 +261,7 @@ export default function LiveMeetingPage({ params }: PageProps) {
                   onAsk={sendAsk}
                   askPending={askPending}
                   askError={askError}
-                  interviewMode={meeting?.template === "interview"}
+                  interviewMode={candidateInterviewAssist}
                   onClose={() => setAssistOpen(false)}
                 />
               </div>
@@ -258,7 +273,7 @@ export default function LiveMeetingPage({ params }: PageProps) {
                   onAsk={sendAsk}
                   askPending={askPending}
                   askError={askError}
-                  interviewMode={meeting?.template === "interview"}
+                  interviewMode={candidateInterviewAssist}
                   onClose={() => setAssistOpen(false)}
                 />
               </div>

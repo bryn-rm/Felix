@@ -5,17 +5,11 @@ import { api } from "@/lib/api";
 import type {
   Meeting,
   MeetingDetail,
-  MeetingTemplate,
+  StartMeetingInput,
 } from "@/lib/types";
 
 interface MeetingListResponse {
   meetings: Meeting[];
-}
-
-interface StartMeetingInput {
-  template: MeetingTemplate;
-  title?: string | null;
-  calendar_event_id?: string | null;
 }
 
 /**

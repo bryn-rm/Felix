@@ -65,7 +65,11 @@ PROMPT_VERSIONS: dict[str, str] = {
     "meeting_prep":       "v1",
     "commitment_detect":  "v1",
     "job_detect":         "v1",
+    # Two watch prompts, two keys: the general prompt is unchanged, so bumping
+    # the interview one must not restamp general cards with a version their
+    # prompt never had (the usefulness eval segments on this field).
     "live_assist_watch":  "v1",
+    "live_assist_interview_watch": "v1",
     "live_assist_ask":    "v1",
     "live_assist_interview": "v1",
     "live_assist_expand": "v1",

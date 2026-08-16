@@ -79,6 +79,95 @@ def test_start_delegates_to_service_when_enabled(client, monkeypatch):
     assert resp.json() == {"meeting_id": "m-99"}
     assert start.await_args.kwargs["template"] == "one_on_one"
     assert start.await_args.kwargs["title"] == "Roadmap"
+    assert start.await_args.kwargs["meeting_type"] == "general"
+    assert start.await_args.kwargs["user_role"] is None
+
+
+def test_start_rejects_interview_without_role():
+    from pydantic import ValidationError
+
+    from app.api.meetings import StartMeetingBody
+
+    with pytest.raises(ValidationError, match="Interview meetings require"):
+        StartMeetingBody(meeting_type="interview")
+
+
+@pytest.mark.parametrize("role", ["candidate", "interviewer"])
+async def test_start_passes_explicit_interview_role(monkeypatch, role):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_capture_enabled", AsyncMock(return_value=True))
+    start = AsyncMock(return_value={"meeting_id": "m-1"})
+    monkeypatch.setattr(meetings_api.meeting_service, "start_meeting", start)
+
+    body = meetings_api.StartMeetingBody(
+        template="interview",
+        meeting_type="interview",
+        user_role=role,
+    )
+    result = await meetings_api.start_capture.__wrapped__(
+        body,
+        request=None,
+        current_user={"id": "user-cap-1", "email": "cap@example.com"},
+    )
+
+    assert result == {"meeting_id": "m-1"}
+    assert start.await_args.kwargs["meeting_type"] == "interview"
+    assert start.await_args.kwargs["user_role"] == role
+
+
+async def test_start_preserves_legacy_interview_when_type_is_omitted(monkeypatch):
+    """Cached clients sending only the former template contract keep the old
+    interview behavior instead of being treated as an explicit General."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_capture_enabled", AsyncMock(return_value=True))
+    start = AsyncMock(return_value={"meeting_id": "m-legacy"})
+    monkeypatch.setattr(meetings_api.meeting_service, "start_meeting", start)
+
+    body = meetings_api.StartMeetingBody(template="interview")
+    assert body.meeting_type == "general"  # Pydantic's public default
+    assert "meeting_type" not in body.model_fields_set
+
+    result = await meetings_api.start_capture.__wrapped__(
+        body,
+        request=None,
+        current_user={"id": "user-cap-1", "email": "cap@example.com"},
+    )
+
+    assert result == {"meeting_id": "m-legacy"}
+    assert start.await_args.kwargs["template"] == "interview"
+    assert start.await_args.kwargs["meeting_type"] is None
+    assert start.await_args.kwargs["user_role"] is None
+
+
+async def test_explicit_general_still_overrides_interview_template(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_capture_enabled", AsyncMock(return_value=True))
+    start = AsyncMock(return_value={"meeting_id": "m-general"})
+    monkeypatch.setattr(meetings_api.meeting_service, "start_meeting", start)
+
+    body = meetings_api.StartMeetingBody(
+        template="interview",
+        meeting_type="general",
+    )
+    assert "meeting_type" in body.model_fields_set
+
+    await meetings_api.start_capture.__wrapped__(
+        body,
+        request=None,
+        current_user={"id": "user-cap-1", "email": "cap@example.com"},
+    )
+
+    assert start.await_args.kwargs["template"] == "general"
+    assert start.await_args.kwargs["meeting_type"] == "general"
 
 
 def test_start_coerces_unknown_template_to_general(client, monkeypatch):
@@ -93,6 +182,31 @@ def test_start_coerces_unknown_template_to_general(client, monkeypatch):
     client.post("/meetings/start", json={"template": "nonsense"})
 
     assert start.await_args.kwargs["template"] == "general"
+
+
+@pytest.mark.parametrize("body,expected", [
+    # An explicit General must never carry the interview template: _fan_out
+    # keys off it and would promote the meeting to the job tracker.
+    ({"meeting_type": "general", "template": "interview"}, "general"),
+    # …and an explicit Interview always gets it, whatever was requested.
+    (
+        {"meeting_type": "interview", "user_role": "candidate",
+         "template": "standup"},
+        "interview",
+    ),
+])
+def test_start_derives_template_from_meeting_type(client, monkeypatch, body, expected):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_capture_enabled", AsyncMock(return_value=True))
+    start = AsyncMock(return_value={"meeting_id": "m-1"})
+    monkeypatch.setattr(meetings_api.meeting_service, "start_meeting", start)
+
+    client.post("/meetings/start", json=body)
+
+    assert start.await_args.kwargs["template"] == expected
 
 
 def test_end_404_when_not_recording(client, monkeypatch):

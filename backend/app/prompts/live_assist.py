@@ -102,9 +102,11 @@ Return JSON only:
 
 LIVE_ASSIST_INTERVIEW_WATCH_PROMPT = """The user is in a live interview. Decide whether to surface grounded context, solve ONE technical interview question that was put TO the user, or stay silent.
 
-Speaker tags: "me" is the user you are helping; "them" is the other participant. The user may be the CANDIDATE or the INTERVIEWER — the transcript is your only evidence of which. Report who put the question in "asked_by":
+Meeting role: {role_guidance}
+
+Speaker tags are authoritative: "me" is the user you are helping; "them" is the other participant. Report who put the question in "asked_by":
 - "them" — the other participant asked it, so the user has to answer it. Only these are solved.
-- "me" — the user asked it. They are running the interview and the question is the candidate's to answer; handing the user its solution is wrong. Report it as "me" and it will not be solved.
+- "me" — the user asked it; handing them a proactive solution to their own prompt is wrong. Report it as "me" and it will not be solved.
 
 Technical questions include coding/algorithms and system-design/architecture problems. Do not report greetings, logistics, interviewer checks (for example "can you see my screen?"), or behavioral questions as interview_question — return a card or null for those.
 

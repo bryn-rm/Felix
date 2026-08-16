@@ -210,6 +210,58 @@ async def test_interview_fanout_fires_when_mode_on_and_job_matches(monkeypatch):
     assert "Strong candidate" in kwargs["detail"]
 
 
+async def test_interview_fanout_skipped_when_user_is_the_interviewer(monkeypatch):
+    """An interviewer's meeting is an interview, but the application discussed
+    belongs to the candidate. Matching it against the USER's tracked jobs (which
+    falls back to company-name-in-title) would file a stranger's interview notes
+    onto the user's own timeline."""
+    job = {"id": "job-1", "company": "Acme", "role_title": "Eng",
+           "contact_email": "recruiter@acme.com", "status": "interview"}
+    fake = FakeDB(
+        meeting=_meeting(
+            template="interview",
+            meeting_type="interview",
+            user_role="interviewer",
+            attendees=["recruiter@acme.com"],
+        ),
+        jobs=[job], job_search_mode=True,
+    )
+    _install_db(monkeypatch, fake)
+    monkeypatch.setattr(ai_service, "summarize_meeting", AsyncMock(return_value=_interview_summary()))
+    add_event = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.job_tracker_service.job_tracker_service.add_event", add_event
+    )
+
+    await meeting_service.summarize_meeting("u-1", "m-1")
+
+    add_event.assert_not_awaited()
+
+
+async def test_interview_fanout_fires_for_explicit_candidate(monkeypatch):
+    job = {"id": "job-1", "company": "Acme", "role_title": "Eng",
+           "contact_email": "recruiter@acme.com", "status": "interview"}
+    fake = FakeDB(
+        meeting=_meeting(
+            template="interview",
+            meeting_type="interview",
+            user_role="candidate",
+            attendees=["recruiter@acme.com"],
+        ),
+        jobs=[job], job_search_mode=True,
+    )
+    _install_db(monkeypatch, fake)
+    monkeypatch.setattr(ai_service, "summarize_meeting", AsyncMock(return_value=_interview_summary()))
+    add_event = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.job_tracker_service.job_tracker_service.add_event", add_event
+    )
+
+    await meeting_service.summarize_meeting("u-1", "m-1")
+
+    add_event.assert_awaited_once()
+
+
 async def test_interview_fanout_skipped_when_job_mode_off(monkeypatch):
     job = {"id": "job-1", "company": "Acme", "role_title": "Eng",
            "contact_email": "recruiter@acme.com", "status": "interview"}
@@ -348,5 +400,41 @@ async def test_start_meeting_creates_recording_row(monkeypatch):
     assert row["status"] == "recording"
     assert row["source"] == "browser_capture"
     assert row["template"] == "one_on_one"
+    assert row["meeting_type"] == "general"
+    assert row["user_role"] is None
     assert row["title"] == "Roadmap"
     assert row["started_at"] is not None
+
+
+async def test_start_meeting_accepts_unclassified_legacy_interview(monkeypatch):
+    fake = FakeDB()
+    _install_db(monkeypatch, fake)
+
+    await meeting_service.start_meeting(
+        "u-1",
+        template="interview",
+        meeting_type=None,
+        user_role=None,
+    )
+
+    row = fake.inserts("meetings")[0]
+    assert row["template"] == "interview"
+    assert row["meeting_type"] is None
+    assert row["user_role"] is None
+
+
+@pytest.mark.parametrize("role", ["candidate", "interviewer"])
+async def test_start_meeting_persists_interview_role(monkeypatch, role):
+    fake = FakeDB()
+    _install_db(monkeypatch, fake)
+
+    await meeting_service.start_meeting(
+        "u-1",
+        template="interview",
+        meeting_type="interview",
+        user_role=role,
+    )
+
+    row = fake.inserts("meetings")[0]
+    assert row["meeting_type"] == "interview"
+    assert row["user_role"] == role

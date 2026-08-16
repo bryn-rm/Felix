@@ -9,14 +9,14 @@ Pipeline (proactive path):
         → acceptance gate    (usefulness_score threshold, dedupe, caps)
         → persist to meeting_assist_items + emit {"type": "assist"} over the WS
 
-Interview meetings run the same pipeline with a second exit: the watch call may
-triage the transcript into a technical question instead of a card, which a
-Sonnet solve then answers. That branch is deliberately narrow — only a question
-the OTHER participant put to the user (the template covers the user conducting
-the interview too), only once it is completely stated (an incomplete one arms a
-short recheck rather than waiting out the accumulation gate), and only with the
-monthly budget freshly checked, because a solve costs far more than the watch
-call that proposed it.
+Candidate interview meetings run the same pipeline with a second exit: the watch
+call may triage the transcript into a technical question instead of a card,
+which a Sonnet solve then answers. That branch is deliberately narrow — only a
+question the OTHER participant put to the user, only once it is completely
+stated (an incomplete one arms a short recheck rather than waiting out the
+accumulation gate), and only with the monthly budget freshly checked, because a
+solve costs far more than the watch call that proposed it. Explicit interviewer
+meetings retain the general card flow and never enter this candidate solve path.
 
 Core principle: silence is success. Felix is memory augmentation, not a
 meeting coach — the gate, the prompt, and the acceptance thresholds all bias
@@ -55,6 +55,11 @@ from fastapi import HTTPException
 
 from app import db
 from app.config import settings
+from app.models.meeting import (
+    CANDIDATE_ASSIST_MODES,
+    AssistMeetingMode,
+    resolve_assist_meeting_mode,
+)
 from app.prompts.live_assist import (
     CARD_KINDS,
     LIVE_ASSIST_ASK_PROMPT,
@@ -501,6 +506,14 @@ class LiveAssistWatcher:
         self._solved_normalized: set[str] = set()
         self._solved_tokens: list[frozenset[str]] = []
 
+        # Meeting configuration, filled in by _load_context. Initialized here so
+        # every read site can be a plain attribute access: _load_context returns
+        # early when the row is missing, and these defaults are the fail-closed
+        # answer for that case.
+        self._meeting_title = "(untitled)"
+        self._template = "general"
+        self._assist_meeting_mode: AssistMeetingMode = "general"
+
         self._started_at = time.monotonic()
         self._last_call_at = float("-inf")
         self._last_card_at = float("-inf")
@@ -514,6 +527,12 @@ class LiveAssistWatcher:
         # question still being stated); consumed by the run loop.
         self._rearm: tuple[str, float] | None = None
         self._interview_rechecks = 0
+
+    @property
+    def _candidate_assist(self) -> bool:
+        """Is the user the one being interviewed? Derived, never stored — a
+        second copy of this could go stale against _assist_meeting_mode."""
+        return self._assist_meeting_mode in CANDIDATE_ASSIST_MODES
 
     @property
     def _watch_calls(self) -> int:
@@ -696,7 +715,8 @@ class LiveAssistWatcher:
 
     async def _load_context(self) -> None:
         row = await db.query_one(
-            "SELECT live_context, title, template FROM meetings "
+            "SELECT live_context, title, template, meeting_type, user_role "
+            "FROM meetings "
             "WHERE id = $1 AND user_id = $2",
             self.meeting_id, self.user_id,
         )
@@ -715,10 +735,15 @@ class LiveAssistWatcher:
             self._context = None
         self._meeting_title = row.get("title") or "(untitled)"
         self._template = row.get("template") or "general"
+        self._assist_meeting_mode = resolve_assist_meeting_mode(
+            row.get("meeting_type"),
+            row.get("user_role"),
+            self._template,
+        )
         # Assigned rather than passed to the constructor: a late-context retry
         # rebuilds the gate above only when keywords actually arrived, and must
         # not silently reset accumulation on the no-context path.
-        self._gate.interview = self._template == "interview"
+        self._gate.interview = self._candidate_assist
 
     async def _maybe_retry_context(self) -> None:
         """Prefetch may still be running when the watcher starts — re-read once."""
@@ -746,15 +771,31 @@ class LiveAssistWatcher:
         self._gate.reset_accumulation()
 
         window_segments = len(self._window)
-        is_interview = getattr(self, "_template", "general") == "interview"
+        is_interview = self._candidate_assist
+        # Two different prompts share this call site, so they get two feature
+        # keys: bumping the interview prompt must not restamp general-meeting
+        # cards with a version their prompt never had — the offline usefulness
+        # eval segments on exactly that field.
+        watch_feature = (
+            "live_assist_interview_watch" if is_interview else "live_assist_watch"
+        )
         prompt_template = (
             LIVE_ASSIST_INTERVIEW_WATCH_PROMPT
             if is_interview
             else LIVE_ASSIST_WATCH_PROMPT
         )
         prompt = prompt_template.format(
-            meeting_title=getattr(self, "_meeting_title", "(untitled)"),
-            template=getattr(self, "_template", "general"),
+            meeting_title=self._meeting_title,
+            template=self._template,
+            role_guidance=(
+                "The user explicitly selected Candidate. Do not infer or change "
+                "their role; only technical questions spoken by 'them' are theirs "
+                "to answer."
+                if self._assist_meeting_mode == "interview_candidate"
+                else "No explicit role was stored for this legacy interview. "
+                "Infer who posed the question from the speaker tags and solve "
+                "only questions spoken by 'them'."
+            ),
             context_digest=format_digest((self._context or {}).get("digest") or {}),
             shown_titles=format_shown_titles(self._shown_titles),
             transcript_window=self._format_window(interview=is_interview),
@@ -762,7 +803,7 @@ class LiveAssistWatcher:
 
         started = time.monotonic()
         result = await self._json_ai_call(
-            feature="live_assist_watch",
+            feature=watch_feature,
             model=settings.ANTHROPIC_MODEL_FAST,
             max_tokens=350,
             prompt=prompt,
@@ -772,7 +813,9 @@ class LiveAssistWatcher:
         interview_question = (result or {}).get("interview_question")
         if is_interview and isinstance(interview_question, dict):
             if await self._dispatch_interview_triage(
-                interview_question, trigger=trigger, triage_latency_ms=latency_ms
+                interview_question,
+                trigger=trigger,
+                triage_latency_ms=latency_ms,
             ):
                 return
             # Not dispatched (not ours to solve, or not a technical question) —
@@ -805,6 +848,7 @@ class LiveAssistWatcher:
                 "window_segments": window_segments,
                 "latency_ms": latency_ms,
             },
+            prompt_feature=watch_feature,
         )
         if item is None:
             return
@@ -814,7 +858,11 @@ class LiveAssistWatcher:
         await self._send_json({"type": "assist", "item": item})
 
     async def _dispatch_interview_triage(
-        self, triaged: dict, *, trigger: str | None, triage_latency_ms: int
+        self,
+        triaged: dict,
+        *,
+        trigger: str | None,
+        triage_latency_ms: int,
     ) -> bool:
         """Act on an ``interview_question`` object from the triage call.
 
@@ -824,12 +872,9 @@ class LiveAssistWatcher:
         """
         question = str(triaged.get("question") or "").strip()
         answer_type = str(triaged.get("answer_type") or "")
-        # Who put the question decides everything. The interview template covers
-        # the user CONDUCTING an interview just as much as sitting one
-        # (meeting_summary.TEMPLATE_GUIDANCE says so), and "Can you design a URL
-        # shortener?" from the user is their screening prompt, not their problem
-        # to solve. Anything but an explicit "them" is treated as not ours —
-        # fail closed, the same way the feature flags do.
+        # Speaker semantics are stable end-to-end: "me" is always the Felix
+        # user and "them" is the other participant. Anything but an explicit
+        # "them" attribution is not the candidate's prompt and fails closed.
         asked_by = str(triaged.get("asked_by") or "").strip().lower()
         if asked_by not in {"them", "they"}:
             logger.debug(
@@ -837,12 +882,23 @@ class LiveAssistWatcher:
                 "(asked_by=%r) for meeting %s", asked_by, self.meeting_id,
             )
             return False
-        # Deterministic backstop on that attribution: if the other participant
-        # has not spoken in the whole window (system audio not shared, say),
-        # nothing in it was put to the user, whatever the model reports.
+        # Deterministic backstop: the other participant has not spoken in the
+        # window at all (system audio not shared, say), so nothing in it was put
+        # to the user whatever the model reports.
         if not any(speaker == "them" for speaker, _text, _ts in self._window):
             return False
         if not question or answer_type not in {"coding", "system_design"}:
+            return False
+        # Second backstop, on the question's CONTENT rather than on any one
+        # turn: whose words does it actually match? Speaker-based checks can't
+        # get both failure modes right — the user asking a question triage then
+        # misattributes, and the interviewer stating the problem inside a
+        # coalesce window some earlier turn opened. The transcript settles it.
+        if not self._question_came_from_them(question):
+            logger.debug(
+                "live assist interview question matches the user's own speech, "
+                "not the other participant's, for meeting %s", self.meeting_id,
+            )
             return False
 
         # "complete": false means the interviewer is still stating the problem.
@@ -864,6 +920,27 @@ class LiveAssistWatcher:
             triage_latency_ms=triage_latency_ms,
         )
         return True
+
+    def _question_came_from_them(self, question: str) -> bool:
+        """Is the triaged question better covered by the other participant's
+        words than by the user's own?
+
+        Triage paraphrases, so this compares content-word coverage rather than
+        looking for the sentence verbatim. Ties go to "them": ``asked_by`` has
+        already said so, and this is a backstop against misattribution, not a
+        second opinion. Too thin a question to judge defers to ``asked_by``.
+        """
+        tokens = _question_tokens(question)
+        if len(tokens) < QUESTION_MIN_TOKENS:
+            return True
+
+        def coverage(speaker: str) -> float:
+            said = _question_tokens(
+                " ".join(t for s, t, _ts in self._window if s == speaker)
+            )
+            return len(tokens & said) / len(tokens)
+
+        return coverage("them") >= coverage("me")
 
     def _arm_interview_recheck(self) -> None:
         """Ask the run loop to evaluate again shortly.
@@ -959,8 +1036,14 @@ class LiveAssistWatcher:
         parent: dict | None = None
         metadata: dict = {}
         if intent == "expand":
-            if getattr(self, "_template", "general") != "interview":
-                await fail("Answer expansion is available for interview meetings.")
+            # An Interviewer-mode meeting IS an interview, so the old wording
+            # read as a contradiction to the only user who can hit this. What
+            # gates expansion is being the one answering, not the template.
+            if not self._candidate_assist:
+                await fail(
+                    "Answer expansion is available when you're the candidate "
+                    "in an interview."
+                )
                 return
             parent = await db.query_one(
                 "SELECT * FROM meeting_assist_items "
@@ -1008,7 +1091,7 @@ class LiveAssistWatcher:
             )
             return
 
-        if getattr(self, "_template", "general") == "interview":
+        if self._candidate_assist:
             await self._solve_interview(
                 question=question,
                 answer_type_hint=None,
@@ -1020,8 +1103,8 @@ class LiveAssistWatcher:
             return
 
         prompt = LIVE_ASSIST_ASK_PROMPT.format(
-            meeting_title=getattr(self, "_meeting_title", "(untitled)"),
-            template=getattr(self, "_template", "general"),
+            meeting_title=self._meeting_title,
+            template=self._template,
             context_digest=format_digest((self._context or {}).get("digest") or {}),
             transcript_window=self._format_window(),
             question=question,
@@ -1092,7 +1175,7 @@ class LiveAssistWatcher:
                 return
             claim = self._remember_solved(question)
         prompt = LIVE_ASSIST_INTERVIEW_ANSWER_PROMPT.format(
-            meeting_title=getattr(self, "_meeting_title", "(untitled)"),
+            meeting_title=self._meeting_title,
             context_digest=format_digest((self._context or {}).get("digest") or {}),
             transcript_window=self._format_window(interview=True),
             question=question,

@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 
+from app.models.meeting import resolve_assist_meeting_mode, uses_candidate_assist
 from app.services import live_assist_service as las
 from app.services.live_assist_service import (
     CandidateGate,
@@ -92,7 +93,8 @@ def _fast_constants(monkeypatch):
 
 def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
                 seed_titles=(), seed_items=(), seed_segments=(),
-                template="general", parent_item=None, stop_reason="end_turn"):
+                template="general", meeting_type=None, user_role=None,
+                parent_item=None, stop_reason="end_turn"):
     """Stub the DB, Anthropic client, logging, and budget for a watcher test.
     Returns (fake_messages, inserted_rows, emitted_payloads, send_json).
     seed_titles seeds prior PROACTIVE cards; seed_items takes full row dicts."""
@@ -102,7 +104,8 @@ def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
     async def query_one(sql, *args):
         if "live_context" in sql:
             return {"live_context": live_context, "title": "Budget sync",
-                    "template": template}
+                    "template": template, "meeting_type": meeting_type,
+                    "user_role": user_role}
         if "meeting_assist_items" in sql:
             return parent_item
         return None
@@ -158,6 +161,38 @@ def _triage(question="Design a URL shortener", answer_type="system_design",
         "asked_by": asked_by,
         "complete": complete,
     }})
+
+
+def test_explicit_meeting_mode_precedes_legacy_template_fallback():
+    assert resolve_assist_meeting_mode("general", None, "interview") == "general"
+    assert resolve_assist_meeting_mode(
+        "interview", "candidate", "general"
+    ) == "interview_candidate"
+    assert resolve_assist_meeting_mode(
+        "interview", "interviewer", "interview"
+    ) == "interview_interviewer"
+    assert resolve_assist_meeting_mode(None, None, "interview") == "legacy_interview"
+    assert resolve_assist_meeting_mode(None, None, "general") == "general"
+    # An unrecognised explicit value is not a legacy row — it must not inherit
+    # the template fallback. (The frontend mirror in constants.ts got this
+    # wrong; the CHECK constraint is what keeps it unreachable in practice.)
+    assert resolve_assist_meeting_mode("Interview", None, "interview") == "general"
+
+
+def test_watch_prompts_have_separate_version_keys():
+    """The two watch prompts share a call site but not a version. Bumping the
+    interview prompt must not restamp general-meeting cards — the offline
+    usefulness eval segments card quality on exactly this field."""
+    versions = las._ai.PROMPT_VERSIONS
+    assert "live_assist_watch" in versions
+    assert "live_assist_interview_watch" in versions
+
+
+def test_uses_candidate_assist_covers_only_the_user_being_interviewed():
+    assert uses_candidate_assist("interview", "candidate", "interview") is True
+    assert uses_candidate_assist(None, None, "interview") is True   # legacy row
+    assert uses_candidate_assist("interview", "interviewer", "interview") is False
+    assert uses_candidate_assist("general", None, "general") is False
 
 
 async def _start_watcher(send_json, **kw):
@@ -773,6 +808,178 @@ async def test_interview_watch_triages_then_solves_complete_question(monkeypatch
     assert emitted[0]["item"]["expansion_options"] == [
         "architecture", "scale", "tradeoffs",
     ]
+
+
+async def test_explicit_candidate_mode_solves_other_participant_prompt(monkeypatch):
+    _fast_constants(monkeypatch)
+    answer = json.dumps({
+        "title": "LRU cache",
+        "body": "**Approach** Hash map plus doubly linked list.",
+        "answer_type": "coding",
+        "expansion_options": ["code"],
+        "usefulness_score": 0.9,
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage(question="Implement an LRU cache", answer_type="coding"), answer],
+        template="interview",
+        meeting_type="interview",
+        user_role="candidate",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "Implement an LRU cache", 4.0)
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert [call["model"] for call in fake.calls] == [
+        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.ANTHROPIC_MODEL_SMART,
+    ]
+    assert inserted[0]["question"] == "Implement an LRU cache"
+    assert "explicitly selected Candidate" in fake.calls[0]["messages"][0]["content"]
+
+
+async def test_candidate_prompt_after_user_turn_is_still_solved(monkeypatch):
+    """The candidate speaking first must not suppress the interviewer's problem.
+
+    The candidate's own answer can trip the gate (a number, a new entity),
+    opening a coalesce window of up to MIN_CALL_INTERVAL_S. The interviewer then
+    states the problem inside that window. Attributing the call to whichever
+    turn happened to ARM it would silence the feature at exactly the moment it
+    exists for, so attribution is derived from the transcript instead.
+    """
+    _fast_constants(monkeypatch)
+    answer = json.dumps({
+        "title": "LRU cache",
+        "body": "**Approach** Hash map plus doubly linked list.",
+        "answer_type": "coding",
+        "expansion_options": ["code"],
+        "usefulness_score": 0.9,
+    })
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[
+            _triage(question="Implement an LRU cache", answer_type="coding"),
+            answer,
+        ],
+        template="interview",
+        meeting_type="interview",
+        user_role="candidate",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        # "me" arms the pending trigger (a date/number turn)…
+        watcher.on_final("me", "I shipped 3 services at my last job in 2024", 1.0)
+        # …and "them" states the problem before the deadline elapses.
+        watcher.on_final("them", "Implement an LRU cache", 4.0)
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert [call["model"] for call in fake.calls] == [
+        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.ANTHROPIC_MODEL_SMART,
+    ]
+    assert inserted[0]["question"] == "Implement an LRU cache"
+
+
+def test_question_attribution_reads_the_transcript_not_the_speaker_tag():
+    """The content check in isolation — both failure modes, one signal."""
+    watcher = LiveAssistWatcher(
+        user_id="u-1", meeting_id="m-att", send_json=AsyncMock(),
+    )
+    watcher._window.extend([
+        ("me", "I shipped 3 services at my last job", 1.0),
+        ("them", "Implement an LRU cache with O(1) get and put", 2.0),
+        ("me", "Ok, let me think about that for a second", 3.0),
+    ])
+    assert watcher._question_came_from_them("Implement an LRU cache") is True
+
+    watcher._window.clear()
+    watcher._window.extend([
+        ("them", "Thanks, ready when you are", 1.0),
+        ("me", "Can you design a URL shortener?", 2.0),
+    ])
+    assert watcher._question_came_from_them("Design a URL shortener") is False
+
+
+async def test_explicit_candidate_mode_never_solves_own_direct_prompt(monkeypatch):
+    """The server backstop wins even if triage misattributes the user's turn."""
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage(asked_by="them")],
+        template="interview",
+        meeting_type="interview",
+        user_role="candidate",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "Thanks, ready when you are", 1.0)
+        watcher.on_final("me", "Can you design a URL shortener?", 4.0)
+        await _wait_until(lambda: fake.calls)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    assert [call["model"] for call in fake.calls] == [
+        las.settings.ANTHROPIC_MODEL_FAST
+    ]
+    assert inserted == [] and emitted == []
+
+
+async def test_explicit_interviewer_mode_does_not_use_candidate_solve(monkeypatch):
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage(asked_by="me")],
+        template="interview",
+        meeting_type="interview",
+        user_role="interviewer",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("me", "Can you design a URL shortener?", 4.0)
+        await _wait_until(lambda: fake.calls)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    assert watcher._gate.interview is False
+    assert [call["model"] for call in fake.calls] == [
+        las.settings.ANTHROPIC_MODEL_FAST
+    ]
+    assert "memory augmentation, not a meeting coach" in (
+        fake.calls[0]["messages"][0]["content"]
+    )
+    assert inserted == [] and emitted == []
+
+
+async def test_explicit_general_is_not_promoted_by_interview_template(monkeypatch):
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[_triage()],
+        template="interview",
+        meeting_type="general",
+        user_role=None,
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.on_final("them", "How would you design a URL shortener?", 4.0)
+        await _wait_until(lambda: fake.calls)
+        await asyncio.sleep(0.05)
+    finally:
+        await watcher.aclose()
+
+    assert watcher._gate.interview is False
+    assert [call["model"] for call in fake.calls] == [
+        las.settings.ANTHROPIC_MODEL_FAST
+    ]
+    assert "live interview" not in fake.calls[0]["messages"][0]["content"]
+    assert inserted == [] and emitted == []
 
 
 async def test_stated_interview_problem_reaches_triage_immediately(monkeypatch):

@@ -11,14 +11,13 @@ The live audio socket lives in a separate, unprefixed router
 (`app/api/meetings_ws.py`) — see §2.2 / Phase 6.
 """
 
-from typing import Literal
-
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import db
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import check_monthly_ai_budget, limiter
+from app.models.meeting import MeetingType, MeetingUserRole, validate_meeting_mode
 from app.services.live_assist_service import (
     _assist_enabled,
     forget_meeting,
@@ -141,6 +140,13 @@ class StartMeetingBody(BaseModel):
     calendar_event_id: str | None = None
     title: str | None = Field(default=None, max_length=500)
     template: str = "general"
+    meeting_type: MeetingType = "general"
+    user_role: MeetingUserRole | None = None
+
+    @model_validator(mode="after")
+    def validate_type_and_role(self):
+        validate_meeting_mode(self.meeting_type, self.user_role)
+        return self
 
 
 class NotesBody(BaseModel):
@@ -157,13 +163,39 @@ async def start_capture(
     """Open a new browser-capture meeting and return its id (status='recording')."""
     user_id = current_user["id"]
     await _require_capture_enabled(user_id)
-    template = body.template if body.template in _TEMPLATES else "general"
+    # Cached clients know only the old template field. Preserve their interview
+    # contract as an unclassified legacy meeting so the existing template-based
+    # assist fallback, interview summary, and job fan-out all still run. The
+    # field-set check distinguishes omission from an authoritative explicit
+    # General selection using the same apparent Pydantic value.
+    legacy_interview = (
+        "meeting_type" not in body.model_fields_set
+        and body.template == "interview"
+    )
+    if legacy_interview:
+        meeting_type = None
+        user_role = None
+        template = "interview"
+    elif body.meeting_type == "interview":
+        meeting_type = body.meeting_type
+        user_role = body.user_role
+        template = "interview"
+    else:
+        meeting_type = body.meeting_type
+        user_role = body.user_role
+        template = (
+            body.template
+            if body.template in _TEMPLATES and body.template != "interview"
+            else "general"
+        )
     try:
         return await meeting_service.start_meeting(
             user_id,
             calendar_event_id=body.calendar_event_id,
             title=body.title,
             template=template,
+            meeting_type=meeting_type,
+            user_role=user_role,
         )
     except PermissionError:
         # Race: flag flipped off between the gate check and start. Stay closed.

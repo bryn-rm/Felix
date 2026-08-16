@@ -7,15 +7,15 @@ import { Radio } from "lucide-react";
 import { useMeetings } from "@/hooks/useMeetings";
 import { MeetingList } from "@/components/meetings/MeetingList";
 import { StartCaptureModal } from "@/components/meetings/StartCaptureModal";
-import type { MeetingTemplate } from "@/lib/types";
+import type { StartMeetingInput } from "@/lib/types";
 
 export default function MeetingsPage() {
   const router = useRouter();
   const { meetings, isLoading, error, startMeeting, deleteMeeting } = useMeetings();
   const [modalOpen, setModalOpen] = useState(false);
 
-  async function handleStart(template: MeetingTemplate, title: string) {
-    const id = await startMeeting({ template, title: title || null });
+  async function handleStart(input: StartMeetingInput) {
+    const id = await startMeeting(input);
     setModalOpen(false);
     router.push(`/meetings/live/${id}`);
   }

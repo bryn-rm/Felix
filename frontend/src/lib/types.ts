@@ -293,6 +293,17 @@ export type MeetingTemplate =
   | "standup"
   | "user_research";
 
+export type MeetingType = "general" | "interview";
+export type MeetingUserRole = "candidate" | "interviewer";
+
+export interface StartMeetingInput {
+  template: MeetingTemplate;
+  title?: string | null;
+  calendar_event_id?: string | null;
+  meeting_type: MeetingType;
+  user_role: MeetingUserRole | null;
+}
+
 export type MeetingStatus =
   | "idle"
   | "recording"
@@ -309,6 +320,9 @@ export interface Meeting {
   attendees: string[];
   date: string | null;
   template: MeetingTemplate | string | null;
+  /** NULL only for meetings created before explicit mode selection existed. */
+  meeting_type: MeetingType | null;
+  user_role: MeetingUserRole | null;
   status: MeetingStatus;
   source: string;
   user_notes: string | null;

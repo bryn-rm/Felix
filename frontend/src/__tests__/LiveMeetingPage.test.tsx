@@ -38,11 +38,12 @@ let sendAsk: jest.Mock;
 interface SetupOptions {
   assistFlag?: boolean;
   assistItems?: unknown[];
+  meeting?: Record<string, unknown>;
 }
 
 function setup(
   endMeetingImpl: () => Promise<unknown>,
-  { assistFlag = false, assistItems = [] }: SetupOptions = {},
+  { assistFlag = false, assistItems = [], meeting = {} }: SetupOptions = {},
 ) {
   failCapture = jest.fn();
   stop = jest.fn().mockResolvedValue(undefined);
@@ -68,7 +69,7 @@ function setup(
     failCapture,
   });
   mockUseMeeting.mockReturnValue({
-    meeting: { title: "Sync", user_notes: "" },
+    meeting: { title: "Sync", user_notes: "", ...meeting },
     saveNotes: jest.fn().mockResolvedValue(undefined),
   });
   mockUseMeetings.mockReturnValue({ endMeeting });
@@ -142,6 +143,18 @@ const sampleCard = {
 };
 
 describe("LiveMeetingPage live assist", () => {
+  it("shows the explicitly selected interview mode", () => {
+    setup(() => Promise.resolve({}), {
+      meeting: {
+        meeting_type: "interview",
+        user_role: "candidate",
+        template: "interview",
+      },
+    });
+
+    expect(screen.getByText("Interview · Candidate")).toBeInTheDocument();
+  });
+
   it("renders no assist affordance when live_assist_mode is off", () => {
     setup(() => Promise.resolve({}), { assistFlag: false });
 
