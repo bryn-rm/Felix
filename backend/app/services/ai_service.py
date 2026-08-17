@@ -70,9 +70,9 @@ PROMPT_VERSIONS: dict[str, str] = {
     # prompt never had (the usefulness eval segments on this field).
     "live_assist_watch":  "v1",
     "live_assist_interview_watch": "v1",
-    "live_assist_ask":    "v1",
-    "live_assist_standalone_ask": "v1",
-    "live_assist_interview": "v1",
+    "live_assist_ask":    "v2",
+    "live_assist_standalone_ask": "v2",
+    "live_assist_interview": "v2",
     "live_assist_expand": "v1",
 }
 

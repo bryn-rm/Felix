@@ -640,6 +640,12 @@ class LiveAssistWatcher:
         )
         self._shown_titles: list[str] = []
         self._shown_normalized: set[str] = set()
+        # Persisted meeting-scoped assistant conversation. Unlike the live
+        # transcript window, this is intentionally retained for the whole
+        # meeting so referential follow-ups such as "tell me more about that"
+        # survive both a WebSocket reconnect and the manual REST transport's
+        # fresh watcher per request. MAX_ASKS bounds user turns for the meeting.
+        self._conversation: list[tuple[str, str, str, str]] = []
         # Proactive interview solves dedupe on the question, not on the answer
         # title — the title isn't known until after the expensive call.
         self._solved_normalized: set[str] = set()
@@ -697,12 +703,13 @@ class LiveAssistWatcher:
         await self._load_context()
 
         rows = await db.query(
-            "SELECT title, source, question, created_at FROM meeting_assist_items "
+            "SELECT title, body, source, question, created_at FROM meeting_assist_items "
             "WHERE user_id = $1 AND meeting_id = $2 ORDER BY created_at",
             self.user_id, self.meeting_id,
         )
         for row in rows:
             self._remember_title(row.get("title") or "")
+            self._remember_conversation_item(row)
             if row.get("source") == "proactive":
                 self._remember_solved(row.get("question") or "")
         # Per-source counters: a meeting full of ask answers must not silence
@@ -1290,6 +1297,7 @@ class LiveAssistWatcher:
             template=self._template,
             context_digest=self._format_context(),
             transcript_window=self._format_window(),
+            conversation_history=self._format_conversation(),
             question=question,
         )
         started = time.monotonic()
@@ -1369,6 +1377,7 @@ class LiveAssistWatcher:
             meeting_title=self._meeting_title,
             context_digest=self._format_context(),
             transcript_window=self._format_window(interview=True),
+            conversation_history=self._format_conversation(),
             question=question,
         )
         outcome = await self._finish_interview_answer(
@@ -1630,6 +1639,7 @@ class LiveAssistWatcher:
             return None
         if not row:
             return None
+        self._remember_conversation_item(row)
         return item_to_wire(row)
 
     def _remember_title(self, title: str) -> None:
@@ -1638,6 +1648,22 @@ class LiveAssistWatcher:
             return
         self._shown_titles.append(title)
         self._shown_normalized.add(_normalize_title(title))
+
+    def _remember_conversation_item(self, row: dict) -> None:
+        """Keep one persisted assist item as meeting-scoped conversation.
+
+        Ask items preserve both sides of the exchange. Proactive cards preserve
+        what Felix surfaced so a later "expand on that" can resolve the card in
+        front of the user too. Rows without a body are legacy/incomplete and
+        cannot contribute useful context.
+        """
+        body = str(row.get("body") or "").strip()
+        if not body:
+            return
+        source = str(row.get("source") or "")
+        question = str(row.get("question") or "").strip()
+        title = str(row.get("title") or "").strip()
+        self._conversation.append((source, question, title, body))
 
     # -- proactive question dedupe -------------------------------------------
 
@@ -1684,6 +1710,29 @@ class LiveAssistWatcher:
         if self._standalone and self._manual_notes:
             context += f"\n\nCurrent manual notes:\n{self._manual_notes}"
         return context
+
+    def _format_conversation(self) -> str:
+        """Render every assistant exchange retained for this meeting.
+
+        The meeting-level MAX_ASKS cap bounds direct exchanges; proactive cards
+        have their own cap. Keeping all of them avoids turning references to an
+        early topic into guesswork later in the same meeting.
+        """
+        if not self._conversation:
+            return "(none yet)"
+        turns: list[str] = []
+        for source, question, title, body in self._conversation:
+            if source == "ask":
+                user_line = (
+                    f"User: {question}"
+                    if question
+                    else "User: (follow-up request)"
+                )
+                turns.append(f"{user_line}\nFelix: {body}")
+            else:
+                label = f"Felix surfaced [{title}]" if title else "Felix surfaced"
+                turns.append(f"{label}: {body}")
+        return "\n\n".join(turns)
 
     def _format_window(self, *, interview: bool = False) -> str:
         lines: list[str] = []

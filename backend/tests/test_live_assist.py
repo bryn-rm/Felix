@@ -835,6 +835,38 @@ async def test_ask_round_trip(monkeypatch):
     assert emitted[0]["item"]["kind"] == "answer"
 
 
+async def test_recorded_meeting_follow_up_sees_earlier_assistant_exchange(monkeypatch):
+    """A long-lived capture watcher must add each persisted answer to the next
+    prompt, not rely only on the rolling transcript window."""
+    _fast_constants(monkeypatch)
+    fake, _, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[
+            json.dumps({
+                "title": "Pricing approach",
+                "body": "Start with a usage-based plan for the pilot.",
+            }),
+            json.dumps({
+                "title": "More pricing detail",
+                "body": "Use three usage bands and review them after 90 days.",
+            }),
+        ],
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("What pricing approach should we use?", "req-1")
+        await _wait_until(lambda: len(emitted) == 1)
+        watcher.submit_ask("Tell me more about that topic.", "req-2")
+        await _wait_until(lambda: len(emitted) == 2)
+    finally:
+        await watcher.aclose()
+
+    follow_up_prompt = fake.calls[1]["messages"][0]["content"]
+    assert "What pricing approach should we use?" in follow_up_prompt
+    assert "Start with a usage-based plan for the pilot." in follow_up_prompt
+    assert "Tell me more about that topic." in follow_up_prompt
+
+
 async def test_standalone_ask_uses_history_and_current_manual_notes(monkeypatch):
     _fast_constants(monkeypatch)
     fake, inserted, emitted, send_json = _wire_fakes(
@@ -854,7 +886,7 @@ async def test_standalone_ask_uses_history_and_current_manual_notes(monkeypatch)
     prompt = fake.calls[0]["messages"][0]["content"]
     assert "Previous meeting: agreed £40." in prompt
     assert "They are asking whether pricing changed." in prompt
-    assert inserted[0]["prompt_version"] == "v1"
+    assert inserted[0]["prompt_version"] == "v2"
 
 
 async def test_typed_interview_question_uses_general_knowledge(monkeypatch):
@@ -2032,6 +2064,35 @@ async def test_standalone_ask_answers_and_persists(monkeypatch):
     assert payload["item"]["body"] == "You agreed £40 last time."
     assert rows[0]["source"] == "ask"
     assert not any("meeting_transcript_segments" in s for s in seen_sql)
+
+
+async def test_standalone_follow_up_hydrates_earlier_exchange(monkeypatch):
+    """Manual asks rebuild their watcher per REST request, so conversational
+    memory must come back from persisted meeting_assist_items."""
+    _fast_constants(monkeypatch)
+    fake, rows, _ = _standalone_fakes(
+        monkeypatch,
+        responses=[
+            _answer("Pricing approach", "Start with usage-based pricing."),
+            _answer("Pricing detail", "Use three bands for the pilot."),
+        ],
+    )
+
+    first = await las.answer_standalone_question(
+        user_id="u-1", meeting_id="m-1",
+        question="What pricing approach should we use?", request_id="req-1",
+    )
+    second = await las.answer_standalone_question(
+        user_id="u-1", meeting_id="m-1",
+        question="Tell me more about that topic.", request_id="req-2",
+    )
+
+    assert first["type"] == second["type"] == "assist"
+    assert len(rows) == 2
+    follow_up_prompt = fake.calls[1]["messages"][0]["content"]
+    assert "What pricing approach should we use?" in follow_up_prompt
+    assert "Start with usage-based pricing." in follow_up_prompt
+    assert "Tell me more about that topic." in follow_up_prompt
 
 
 async def test_standalone_ask_cooldown_survives_the_per_request_watcher(monkeypatch):
