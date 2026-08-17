@@ -96,6 +96,27 @@ describe("AssistSidebar", () => {
     expect((input as HTMLTextAreaElement).value).toBe("");
   });
 
+  it("clears immediately and shows progress while an async ask is in flight", async () => {
+    let resolveAsk: ((sent: boolean) => void) | undefined;
+    const ask = new Promise<boolean>((resolve) => {
+      resolveAsk = resolve;
+    });
+    setup({
+      onAsk: jest.fn(() => ask),
+    });
+    const input = screen.getByLabelText(/ask felix a question/i);
+    fireEvent.change(input, { target: { value: "Tell me more about that." } });
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect((input as HTMLTextAreaElement).value).toBe("");
+    expect(screen.getByRole("status")).toHaveTextContent(/asking felix/i);
+    expect(screen.getByLabelText(/send question/i)).toBeDisabled();
+
+    await act(async () => resolveAsk?.(true));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
   it("disables submit while an ask is pending and shows errors", () => {
     setup({ askPending: true, askError: "over budget" });
     expect(screen.getByLabelText(/send question/i)).toBeDisabled();

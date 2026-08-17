@@ -135,7 +135,10 @@ CONTEXT_RETRY_AFTER_S = 60.0  # lazy re-read of live_context if prefetch was slo
 
 # Ask
 ASK_MAX_CHARS = 6000
-ASK_MIN_INTERVAL_S = 5.0
+# A burst backstop, not a conversational delay. Both transports already
+# serialize asks and cap them per meeting; five seconds rejected legitimate
+# follow-ups when the previous answer returned quickly.
+ASK_MIN_INTERVAL_S = 1.0
 MAX_ASKS = 20
 
 # Budget
@@ -670,6 +673,7 @@ class LiveAssistWatcher:
         self._stopped_for_budget = False
         self._last_call_truncated = False
         self._last_call_timed_out = False
+        self._last_call_parse_error = False
         # Set by a watch call that wants to be run again soon (an interview
         # question still being stated); consumed by the run loop.
         self._rearm: tuple[str, float] | None = None
@@ -1301,7 +1305,7 @@ class LiveAssistWatcher:
             question=question,
         )
         started = time.monotonic()
-        result = await self._json_ai_call(
+        result = await self._json_ai_answer_call(
             feature=(
                 "live_assist_standalone_ask"
                 if self._standalone
@@ -1423,12 +1427,20 @@ class LiveAssistWatcher:
         "error" (transient — the same question may be worth retrying).
         """
         started = time.monotonic()
-        result = await self._json_ai_call(
-            feature=prompt_feature,
-            model=settings.ANTHROPIC_MODEL_SMART,
-            max_tokens=max_tokens,
-            prompt=prompt,
-        )
+        if source == "ask":
+            result = await self._json_ai_answer_call(
+                feature=prompt_feature,
+                model=settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=max_tokens,
+                prompt=prompt,
+            )
+        else:
+            result = await self._json_ai_call(
+                feature=prompt_feature,
+                model=settings.ANTHROPIC_MODEL_SMART,
+                max_tokens=max_tokens,
+                prompt=prompt,
+            )
         latency_ms = int((time.monotonic() - started) * 1000)
         if not result or not str(result.get("body") or "").strip():
             if fail is not None:
@@ -1549,6 +1561,7 @@ class LiveAssistWatcher:
         error_message: str | None = None
         self._last_call_truncated = False
         self._last_call_timed_out = False
+        self._last_call_parse_error = False
         try:
             response = await asyncio.wait_for(
                 _ai.client.messages.create(
@@ -1567,9 +1580,15 @@ class LiveAssistWatcher:
                 result = json.loads(
                     _ai._strip_markdown_fences(response.content[0].text)
                 )
-                return result if isinstance(result, dict) else None
+                if isinstance(result, dict):
+                    return result
+                parse_error = True
+                self._last_call_parse_error = True
+                error_message = f"expected JSON object, got {type(result).__name__}"
+                return None
             except json.JSONDecodeError as e:
                 parse_error = True
+                self._last_call_parse_error = True
                 error_message = (
                     f"truncated at max_tokens={max_tokens}"
                     if self._last_call_truncated
@@ -1604,6 +1623,36 @@ class LiveAssistWatcher:
                 error_message=error_message,
                 quota_scope="interactive",
             )
+
+    async def _json_ai_answer_call(
+        self, *, feature: str, model: str, max_tokens: int, prompt: str
+    ) -> dict | None:
+        """Run an interactive answer, retrying one malformed model response.
+
+        The Anthropic client already retries transport/provider failures. This
+        only covers a model response that arrived but was not valid answer JSON
+        (or omitted its body), which is the case where asking the exact same
+        question again often works. Timeouts and truncations are deliberately
+        not retried: they would repeat a long wait or an answer that cannot fit.
+        """
+        result = await self._json_ai_call(
+            feature=feature,
+            model=model,
+            max_tokens=max_tokens,
+            prompt=prompt,
+        )
+        if result and str(result.get("body") or "").strip():
+            return result
+        if self._last_call_timed_out or self._last_call_truncated:
+            return result
+        if result is None and not self._last_call_parse_error:
+            return None
+        return await self._json_ai_call(
+            feature=feature,
+            model=model,
+            max_tokens=max_tokens,
+            prompt=prompt,
+        )
 
     async def _persist_item(self, **fields) -> dict | None:
         """Insert a meeting_assist_items row; return the wire-format item dict."""

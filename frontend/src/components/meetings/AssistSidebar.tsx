@@ -46,10 +46,12 @@ export function AssistSidebar({
   onBeforeAsk,
 }: AssistSidebarProps) {
   const [question, setQuestion] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   // askPending only goes true once onAsk runs, which is after an await here —
   // this closes the window where two fast Enters would both get through.
   const sendingRef = useRef(false);
+  const busy = submitting || askPending;
 
   // Keep the newest card in view as they arrive.
   useEffect(() => {
@@ -58,8 +60,13 @@ export function AssistSidebar({
   }, [items.length]);
 
   async function send() {
-    if (askPending || sendingRef.current || !question.trim()) return;
+    if (busy || sendingRef.current || !question.trim()) return;
+    const submittedQuestion = question;
     sendingRef.current = true;
+    setSubmitting(true);
+    // Give immediate feedback. If the transport ultimately fails, restore the
+    // question below so retry is still one keypress and no text is lost.
+    setQuestion("");
     try {
       try {
         await onBeforeAsk?.();
@@ -69,9 +76,14 @@ export function AssistSidebar({
       }
       // Keep the typed question if the send failed (e.g. socket reconnecting,
       // or the request errored) so the user can retry instead of retyping it.
-      if (await onAsk(question)) setQuestion("");
+      if (!(await onAsk(submittedQuestion))) {
+        // Do not overwrite a next question the user started drafting while the
+        // previous one was in flight.
+        setQuestion((current) => current || submittedQuestion);
+      }
     } finally {
       sendingRef.current = false;
+      setSubmitting(false);
     }
   }
 
@@ -128,7 +140,15 @@ export function AssistSidebar({
       </div>
 
       <form onSubmit={submit} className="border-t border-white/[0.04] p-3">
-        {askError && <p className="mb-2 text-xs text-red-400">{askError}</p>}
+        {askError && !submitting && (
+          <p className="mb-2 text-xs text-red-400">{askError}</p>
+        )}
+        {busy && (
+          <p role="status" className="mb-2 flex items-center gap-1.5 text-xs text-indigo-300">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Asking Felix…
+          </p>
+        )}
         <div className="flex items-center gap-2">
           <textarea
             value={question}
@@ -144,15 +164,16 @@ export function AssistSidebar({
                   : "Ask Felix…"
             }
             aria-label="Ask Felix a question"
+            aria-busy={busy}
             className="min-w-0 flex-1 resize-none rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none"
           />
           <button
             type="submit"
-            disabled={askPending || !question.trim()}
+            disabled={busy || !question.trim()}
             aria-label="Send question"
             className="rounded-lg bg-indigo-600 p-2 text-white transition-colors hover:bg-indigo-500 disabled:opacity-40"
           >
-            {askPending ? (
+            {busy ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <SendHorizonal className="h-4 w-4" />

@@ -867,6 +867,33 @@ async def test_recorded_meeting_follow_up_sees_earlier_assistant_exchange(monkey
     assert "Tell me more about that topic." in follow_up_prompt
 
 
+async def test_typed_ask_retries_one_malformed_model_response(monkeypatch):
+    """A valid retry should be returned in the original request instead of
+    making the user press Enter a second time with unchanged text."""
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[
+            "not valid json",
+            json.dumps({
+                "title": "Pricing detail",
+                "body": "Use three bands for the pilot.",
+            }),
+        ],
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("Tell me more about pricing.", "req-retry")
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert len(fake.calls) == 2
+    assert len(inserted) == 1
+    assert emitted[0]["type"] == "assist"
+    assert emitted[0]["item"]["body"] == "Use three bands for the pilot."
+
+
 async def test_standalone_ask_uses_history_and_current_manual_notes(monkeypatch):
     _fast_constants(monkeypatch)
     fake, inserted, emitted, send_json = _wire_fakes(
