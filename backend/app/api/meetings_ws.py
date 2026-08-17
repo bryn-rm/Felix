@@ -40,6 +40,7 @@ from app import db
 from app.api.voice import _authenticate_ws
 from app.config import settings
 from app.middleware.rate_limit import check_monthly_ai_budget
+from app.models.meeting import MEETING_SOURCE_CAPTURE
 from app.services import live_assist_service, meeting_stt_service
 from app.services.meeting_service import _capture_enabled
 
@@ -169,8 +170,9 @@ async def meeting_capture_stream(websocket: WebSocket, meeting_id: str) -> None:
 
     # 5. Ownership + recording check.
     meeting = await db.query_one(
-        "SELECT id, status FROM meetings WHERE id = $1 AND user_id = $2",
-        meeting_id, user_id,
+        "SELECT id, status FROM meetings "
+        "WHERE id = $1 AND user_id = $2 AND source = $3",
+        meeting_id, user_id, MEETING_SOURCE_CAPTURE,
     )
     if not meeting or meeting.get("status") != "recording":
         await websocket.send_json({"type": "error", "message": "meeting not open for capture"})

@@ -40,7 +40,7 @@ export function AssistCard({
 }: {
   item: AssistItem;
   onDismiss: (id: string) => void;
-  onExpand?: (question: string, options: AssistAskOptions) => boolean;
+  onExpand?: (question: string, options: AssistAskOptions) => boolean | Promise<boolean>;
   askPending?: boolean;
 }) {
   const kind = KIND_STYLE[item.kind] ?? KIND_STYLE.context;
@@ -76,7 +76,7 @@ export function AssistCard({
               key={focus}
               type="button"
               disabled={askPending}
-              onClick={() => onExpand(item.question ?? item.title, {
+              onClick={() => void onExpand(item.question ?? item.title, {
                 intent: "expand",
                 parentItemId: item.id,
                 focus,

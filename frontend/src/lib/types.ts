@@ -302,6 +302,8 @@ export interface StartMeetingInput {
   calendar_event_id?: string | null;
   meeting_type: MeetingType;
   user_role: MeetingUserRole | null;
+  /** Opens the notes + assistant workspace without starting audio capture. */
+  assistant_only?: boolean;
 }
 
 export type MeetingStatus =

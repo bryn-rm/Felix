@@ -1,12 +1,23 @@
 """
-Auto-end safety net for browser-capture meetings — Phase 7.
+Auto-end safety net for open meetings — Phase 7.
 
 Finalizes meetings the client never explicitly stopped (tab closed, crash,
 forgot to press stop). Driven by ``scheduler.check_stale_meetings`` every 5 min.
+The invariant is that no meeting is left stuck ``'recording'``, and it holds for
+**both** sources — each just measures idleness against what it actually produces.
 
-Single trigger — **silence timeout**: no new transcript segment for
+Capture meetings — **silence timeout**: no new transcript segment for
 ``SILENCE_TIMEOUT_MINUTES``. A quiet meeting is an abandoned meeting; an active
 one is left alone.
+
+Manual assistant sessions produce no transcript at all, so silence would fire
+instantly and guillotine a live in-person meeting. They are measured instead
+against the things a manual session *does* write — a notes autosave (which
+touches ``updated_at``) or an assist card — with the much longer
+``MANUAL_IDLE_TIMEOUT_MINUTES``. Closing the tab or the sidebar leaves the row
+open with no client that will ever call ``/end`` again, so without this branch
+every abandoned session accumulated as a permanent "Open" row that stayed
+ask-able forever.
 
     History: there was a second trigger — "past the linked calendar event's
     scheduled end". It ended meetings on ``now >= scheduled_end`` regardless of
@@ -43,26 +54,38 @@ from fastapi import HTTPException
 
 from app import db
 from app.middleware.rate_limit import check_monthly_ai_budget
+from app.models.meeting import MEETING_SOURCE_MANUAL
 from app.services.meeting_service import meeting_service
 
 logger = logging.getLogger(__name__)
 
-# No new finalized segment for this long → assume the meeting was abandoned.
+# No new finalized segment for this long → assume the capture was abandoned.
 SILENCE_TIMEOUT_MINUTES = 10
+
+# A manual session's only activity signals are a notes autosave and an assist
+# card, and an in-person meeting can easily run long stretches with neither
+# (listening, not typing). Ending one early would drop the assistant mid-meeting,
+# so this is deliberately far more patient than the capture timeout — it exists
+# to reap genuinely abandoned sessions, not to bound live ones.
+MANUAL_IDLE_TIMEOUT_MINUTES = 180
 
 
 async def check_stale_meetings() -> int:
     """Finalize every stale recording meeting. Returns the count finalized."""
     rows = await db.query(
+        # Scalar subqueries, not two LEFT JOINs: joining both child tables would
+        # cross-multiply segments by assist items per meeting before the
+        # aggregate collapsed them again.
         """
-        SELECT m.id, m.user_id, m.started_at,
-               MAX(seg.created_at) AS last_segment_at
+        SELECT m.id, m.user_id, m.started_at, m.source, m.updated_at,
+               (SELECT MAX(created_at) FROM meeting_transcript_segments
+                 WHERE meeting_id = m.id) AS last_segment_at,
+               (SELECT MAX(created_at) FROM meeting_assist_items
+                 WHERE meeting_id = m.id) AS last_assist_at
         FROM meetings m
         JOIN settings s ON s.user_id = m.user_id
-        LEFT JOIN meeting_transcript_segments seg ON seg.meeting_id = m.id
         WHERE m.status = 'recording'
           AND s.meeting_capture_mode = TRUE
-        GROUP BY m.id, m.user_id, m.started_at
         """,
     )
     if not rows:
@@ -124,16 +147,31 @@ async def check_stale_meetings() -> int:
 
 
 def _is_stale(row: dict, now: datetime) -> bool:
-    """A recording meeting is stale once it goes quiet: no new finalized segment
-    for ``SILENCE_TIMEOUT_MINUTES``. Idle time is measured from the last segment,
-    falling back to ``started_at`` when none has landed yet so a freshly-started
-    meeting isn't ended on its first sweep. An actively-transcribing meeting —
-    even one running past its scheduled slot — is never truncated."""
-    last_activity = row.get("last_segment_at") or row.get("started_at")
-    if last_activity is None:
+    """A recording meeting is stale once it goes quiet for its source's timeout.
+
+    Capture meetings measure idleness from the last finalized transcript segment,
+    so an actively-transcribing meeting — even one running past its scheduled
+    slot — is never truncated. Manual sessions have no segments, so they measure
+    from the newest of their own signals instead: a notes autosave (``updated_at``)
+    or an assist card.
+
+    Both fall back to ``started_at`` when nothing has landed yet, so a
+    freshly-started meeting isn't ended on its first sweep."""
+    if row.get("source") == MEETING_SOURCE_MANUAL:
+        candidates = [row.get("last_assist_at"), row.get("updated_at")]
+        timeout_minutes = MANUAL_IDLE_TIMEOUT_MINUTES
+    else:
+        candidates = [row.get("last_segment_at")]
+        timeout_minutes = SILENCE_TIMEOUT_MINUTES
+
+    stamps = [_as_utc(c) for c in candidates if c is not None]
+    started = row.get("started_at")
+    if not stamps and started is not None:
+        stamps = [_as_utc(started)]
+    if not stamps:
         return False
-    idle_seconds = (now - _as_utc(last_activity)).total_seconds()
-    return idle_seconds >= SILENCE_TIMEOUT_MINUTES * 60
+    idle_seconds = (now - max(stamps)).total_seconds()
+    return idle_seconds >= timeout_minutes * 60
 
 
 def _as_utc(value: datetime) -> datetime:

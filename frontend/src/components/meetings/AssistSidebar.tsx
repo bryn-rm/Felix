@@ -9,12 +9,24 @@ import { AssistCard } from "./AssistCard";
 interface AssistSidebarProps {
   items: AssistItem[];
   onDismiss: (id: string) => void;
-  /** Returns false when the question couldn't be sent (e.g. reconnecting). */
-  onAsk: (question: string, options?: AssistAskOptions) => boolean;
+  /**
+   * Returns false when the question couldn't be sent or answered. The WebSocket
+   * transport knows that synchronously (the socket is either open or it isn't);
+   * the REST transport only knows once the response lands, so this may also be
+   * a promise — either way the typed question survives a failure.
+   */
+  onAsk: (question: string, options?: AssistAskOptions) => boolean | Promise<boolean>;
   askPending: boolean;
   askError: string | null;
   onClose: () => void;
   interviewMode?: boolean;
+  standaloneMode?: boolean;
+  /**
+   * Run just before the question goes out — the live page uses it to flush the
+   * debounced notes autosave, so an ask about a line typed a second ago isn't
+   * answered against notes the server hasn't seen yet.
+   */
+  onBeforeAsk?: () => void | Promise<void>;
 }
 
 /**
@@ -30,9 +42,14 @@ export function AssistSidebar({
   askError,
   onClose,
   interviewMode = false,
+  standaloneMode = false,
+  onBeforeAsk,
 }: AssistSidebarProps) {
   const [question, setQuestion] = useState("");
   const listRef = useRef<HTMLDivElement | null>(null);
+  // askPending only goes true once onAsk runs, which is after an await here —
+  // this closes the window where two fast Enters would both get through.
+  const sendingRef = useRef(false);
 
   // Keep the newest card in view as they arrive.
   useEffect(() => {
@@ -40,16 +57,27 @@ export function AssistSidebar({
     if (el) el.scrollTop = el.scrollHeight;
   }, [items.length]);
 
-  function send() {
-    if (askPending || !question.trim()) return;
-    // Keep the typed question if the send failed (e.g. socket reconnecting) so
-    // the user can retry instead of retyping it.
-    if (onAsk(question)) setQuestion("");
+  async function send() {
+    if (askPending || sendingRef.current || !question.trim()) return;
+    sendingRef.current = true;
+    try {
+      try {
+        await onBeforeAsk?.();
+      } catch {
+        // A failed notes flush is not a reason to refuse the question — it just
+        // means the answer sees slightly older notes.
+      }
+      // Keep the typed question if the send failed (e.g. socket reconnecting,
+      // or the request errored) so the user can retry instead of retyping it.
+      if (await onAsk(question)) setQuestion("");
+    } finally {
+      sendingRef.current = false;
+    }
   }
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    send();
+    void send();
   }
 
   // A textarea has no implicit form submit, and mid-meeting the user reaches
@@ -58,7 +86,7 @@ export function AssistSidebar({
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
     e.preventDefault();
-    send();
+    void send();
   }
 
   return (
@@ -82,8 +110,9 @@ export function AssistSidebar({
       <div ref={listRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
         {items.length === 0 ? (
           <p className="pt-6 text-center text-xs leading-relaxed text-slate-600">
-            Felix is listening quietly. When something relevant comes up —
-            context, a fact, an open commitment — it appears here.
+            {standaloneMode
+              ? "Ask about previous meetings, something happening now, or any other question."
+              : "Felix is listening quietly. When something relevant comes up — context, a fact, an open commitment — it appears here."}
           </p>
         ) : (
           items.map((item) => (
@@ -107,7 +136,13 @@ export function AssistSidebar({
             onKeyDown={onKeyDown}
             maxLength={6000}
             rows={interviewMode ? 3 : 2}
-            placeholder={interviewMode ? "Ask Felix or paste an interview prompt…" : "Ask Felix…"}
+            placeholder={
+              interviewMode
+                ? "Ask Felix or paste an interview prompt…"
+                : standaloneMode
+                  ? "Ask about a previous meeting or anything else…"
+                  : "Ask Felix…"
+            }
             aria-label="Ask Felix a question"
             className="min-w-0 flex-1 resize-none rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none"
           />

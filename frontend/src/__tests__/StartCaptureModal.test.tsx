@@ -10,6 +10,30 @@ function consent() {
 
 
 describe("StartCaptureModal meeting mode", () => {
+  it("opens a manual assistant without recording consent", async () => {
+    const onStart = jest.fn().mockResolvedValue(undefined);
+    render(
+      <StartCaptureModal
+        open
+        mode="manual"
+        onClose={jest.fn()}
+        onStart={onStart}
+      />,
+    );
+
+    expect(screen.getByText("Open meeting assistant")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open assistant" }));
+
+    await waitFor(() => expect(onStart).toHaveBeenCalledWith({
+      template: "general",
+      title: null,
+      meeting_type: "general",
+      user_role: null,
+      assistant_only: true,
+    }));
+  });
+
   it("defaults to General and sends an explicit general configuration", async () => {
     const onStart = jest.fn().mockResolvedValue(undefined);
     render(<StartCaptureModal open onClose={jest.fn()} onStart={onStart} />);

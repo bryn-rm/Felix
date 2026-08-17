@@ -94,7 +94,8 @@ def _fast_constants(monkeypatch):
 def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
                 seed_titles=(), seed_items=(), seed_segments=(),
                 template="general", meeting_type=None, user_role=None,
-                parent_item=None, stop_reason="end_turn"):
+                parent_item=None, stop_reason="end_turn", source=None,
+                user_notes=None):
     """Stub the DB, Anthropic client, logging, and budget for a watcher test.
     Returns (fake_messages, inserted_rows, emitted_payloads, send_json).
     seed_titles seeds prior PROACTIVE cards; seed_items takes full row dicts."""
@@ -105,7 +106,8 @@ def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
         if "live_context" in sql:
             return {"live_context": live_context, "title": "Budget sync",
                     "template": template, "meeting_type": meeting_type,
-                    "user_role": user_role}
+                    "user_role": user_role, "source": source,
+                    "user_notes": user_notes}
         if "meeting_assist_items" in sql:
             return parent_item
         return None
@@ -299,6 +301,102 @@ def test_build_digest_caps_total_size(monkeypatch):
         "owed_by_user_list": "c" * 80,
     })
     assert sum(len(v) for v in digest.values()) <= 100
+
+
+# ---------------------------------------------------------------------------
+# Standalone prefetch — the recent-meetings digest a manual session runs on
+# ---------------------------------------------------------------------------
+
+
+def _episode(title, *, occurred_at=None, **over):
+    base = {
+        "title": title,
+        "occurred_at": occurred_at or datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc),
+        "tldr": None, "decisions": None, "action_items": None,
+        "enhanced_notes": None, "user_notes": None,
+    }
+    base.update(over)
+    return base
+
+
+def test_digest_dates_meetings_in_the_users_timezone():
+    """A 21:00 Los Angeles meeting is stored as the NEXT day in UTC. Labelling
+    it with the UTC date makes "what did we decide yesterday?" resolve against
+    the wrong record."""
+    late_evening = datetime(2026, 8, 11, 4, 0, tzinfo=timezone.utc)  # 21:00 Aug 10 PDT
+    rows = [_episode("Pricing sync", occurred_at=late_evening, tldr="Agreed £40.")]
+
+    local = las._format_previous_meetings(rows, tz_name="America/Los_Angeles")
+    utc = las._format_previous_meetings(rows, tz_name="UTC")
+
+    assert "(2026-08-10)" in local
+    assert "(2026-08-11)" in utc
+
+
+def test_digest_never_emits_a_truncated_json_payload(monkeypatch):
+    """Slicing a json.dumps() line mid-token hands the model a broken fragment,
+    not a shorter answer. Oversized JSON is dropped whole instead."""
+    monkeypatch.setattr(las, "DIGEST_CAP_CHARS", 300)
+    monkeypatch.setattr(las, "MIN_EPISODE_CHARS", 200)
+    rows = [_episode(
+        "Roadmap",
+        decisions=[{"text": "We will ship the redesign in Q4", "owner": "me"}] * 20,
+    )]
+
+    digest = las._format_previous_meetings(rows)
+
+    assert len(digest) <= 300
+    for line in digest.splitlines():
+        if line.startswith("Decisions: "):
+            json.loads(line[len("Decisions: "):])  # parses, or this raises
+
+
+def test_digest_shares_its_budget_so_one_big_meeting_cannot_starve_the_rest(monkeypatch):
+    """Spending the cap strictly in recency order let a single meeting with
+    large enhanced_notes consume all of it and drop every other meeting."""
+    monkeypatch.setattr(las, "DIGEST_CAP_CHARS", 900)
+    monkeypatch.setattr(las, "MIN_EPISODE_CHARS", 100)
+    rows = [
+        _episode("Huge one", user_notes="x" * 5000),
+        _episode("Middle one", tldr="Agreed the pricing."),
+        _episode("Last one", tldr="Signed off the design."),
+    ]
+
+    digest = las._format_previous_meetings(rows)
+
+    assert len(digest) <= 900
+    for title in ("Huge one", "Middle one", "Last one"):
+        assert title in digest
+
+
+async def test_manual_prefetch_stores_history_without_dead_keywords(monkeypatch):
+    monkeypatch.setattr(las, "_assist_enabled", AsyncMock(return_value=True))
+
+    async def query_one(sql, *args):
+        if "FROM meetings" in sql:
+            return {"calendar_event_id": None, "title": "Client catch-up",
+                    "attendees": [], "template": "general", "started_at": None,
+                    "date": None, "source": "manual_notes"}
+        return {"timezone": "Europe/London"}
+
+    monkeypatch.setattr(las.db, "query_one", query_one)
+    monkeypatch.setattr(las.db, "query", AsyncMock(return_value=[
+        _episode("Previous catch-up", tldr="Agreed to revisit pricing."),
+    ]))
+    written = {}
+
+    async def execute(sql, *args):
+        written["ctx"] = args[2]
+        return "UPDATE 1"
+
+    monkeypatch.setattr(las.db, "execute", execute)
+
+    await las.prefetch_context("u-1", "m-1")
+
+    assert "Agreed to revisit pricing." in written["ctx"]["digest"]["past_episodes"]
+    # Keywords only ever feed CandidateGate, which observes transcript segments
+    # — a standalone session has none, so computing them was dead work.
+    assert written["ctx"]["keywords"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -735,6 +833,28 @@ async def test_ask_round_trip(monkeypatch):
     assert row["request_id"] == "req-1"
     assert emitted[0]["type"] == "assist"
     assert emitted[0]["item"]["kind"] == "answer"
+
+
+async def test_standalone_ask_uses_history_and_current_manual_notes(monkeypatch):
+    _fast_constants(monkeypatch)
+    fake, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[json.dumps({"title": "Pricing context", "body": "The saved context says £40."})],
+        live_context={"digest": {"past_episodes": "Previous meeting: agreed £40."}},
+        source="manual_notes",
+        user_notes="They are asking whether pricing changed.",
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("What was the previous price?", "req-manual")
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    prompt = fake.calls[0]["messages"][0]["content"]
+    assert "Previous meeting: agreed £40." in prompt
+    assert "They are asking whether pricing changed." in prompt
+    assert inserted[0]["prompt_version"] == "v1"
 
 
 async def test_typed_interview_question_uses_general_knowledge(monkeypatch):
@@ -1827,3 +1947,176 @@ async def test_ws_ask_without_assist_returns_error(monkeypatch):
 
     errors = [m for m in ws.sent if m.get("type") == "assist_error"]
     assert errors and errors[0]["request_id"] == "r-9"
+
+
+# ---------------------------------------------------------------------------
+# Standalone asks — the REST transport a manual session uses instead of the WS
+# ---------------------------------------------------------------------------
+
+
+def _standalone_fakes(monkeypatch, *, responses=(), asks=(), ai_delay=0.0):
+    """DB + Anthropic fakes where the assist-items query reflects inserts, so a
+    second ask sees what the first persisted (which is what the caps read)."""
+    rows: list[dict] = [dict(a) for a in asks]
+    seen_sql: list[str] = []
+
+    async def query_one(sql, *args):
+        seen_sql.append(sql)
+        if "live_context" in sql:
+            return {"live_context": None, "title": "Client catch-up",
+                    "template": "general", "meeting_type": None,
+                    "user_role": None, "source": "manual_notes",
+                    "user_notes": "They asked about pricing."}
+        return None
+
+    async def query(sql, *args):
+        seen_sql.append(sql)
+        if "meeting_assist_items" in sql:
+            return [dict(r) for r in rows]
+        return []
+
+    async def insert(table, data):
+        row = dict(data)
+        row["id"] = f"item-{len(rows) + 1}"
+        row["created_at"] = datetime.now(timezone.utc)
+        row["dismissed"] = False
+        rows.append(row)
+        return row
+
+    class SlowMessages(FakeAnthropicMessages):
+        async def create(self, **kwargs):
+            if ai_delay:
+                await asyncio.sleep(ai_delay)
+            return await super().create(**kwargs)
+
+    monkeypatch.setattr(las.db, "query_one", query_one)
+    monkeypatch.setattr(las.db, "query", query)
+    monkeypatch.setattr(las.db, "insert", insert)
+    monkeypatch.setattr(las.db, "advisory_unlock", AsyncMock())
+    monkeypatch.setattr(las, "log_ai_call", AsyncMock())
+    monkeypatch.setattr("app.middleware.rate_limit.check_monthly_ai_budget", AsyncMock())
+    fake = SlowMessages(responses)
+    monkeypatch.setattr(las._ai, "client", SimpleNamespace(messages=fake))
+    return fake, rows, seen_sql
+
+
+def _answer(title="Pricing", body="You agreed £40 last time."):
+    return json.dumps({"title": title, "body": body})
+
+
+async def test_standalone_start_skips_the_run_task_and_the_transcript_query(monkeypatch):
+    """A manual session has no transcript and never enqueues an event, so both
+    the segments query and the run task are pure per-request waste."""
+    _fast_constants(monkeypatch)
+    _, _, seen_sql = _standalone_fakes(monkeypatch)
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=AsyncMock())
+
+    await watcher.start(run_loop=False)
+    try:
+        assert watcher._task is None
+        assert not any("meeting_transcript_segments" in s for s in seen_sql)
+    finally:
+        await watcher.aclose()
+
+
+async def test_standalone_ask_answers_and_persists(monkeypatch):
+    _fast_constants(monkeypatch)
+    _, rows, seen_sql = _standalone_fakes(monkeypatch, responses=[_answer()])
+
+    payload = await las.answer_standalone_question(
+        user_id="u-1", meeting_id="m-1",
+        question="What did we agree on pricing?", request_id="req-1",
+    )
+
+    assert payload["type"] == "assist"
+    assert payload["item"]["body"] == "You agreed £40 last time."
+    assert rows[0]["source"] == "ask"
+    assert not any("meeting_transcript_segments" in s for s in seen_sql)
+
+
+async def test_standalone_ask_cooldown_survives_the_per_request_watcher(monkeypatch):
+    """`_last_ask_at` is monotonic and starts at -inf, so a watcher rebuilt per
+    request would make ASK_MIN_INTERVAL_S unenforceable on this transport."""
+    monkeypatch.setattr(las, "ASK_MIN_INTERVAL_S", 60.0)
+    _standalone_fakes(monkeypatch, responses=[_answer()], asks=[{
+        "title": "Pricing", "source": "ask", "question": "earlier one",
+        "created_at": datetime.now(timezone.utc),
+    }])
+
+    payload = await las.answer_standalone_question(
+        user_id="u-1", meeting_id="m-1", question="And the delivery date?",
+        request_id="req-2",
+    )
+
+    assert payload["type"] == "assist_error"
+    assert "one question at a time" in payload["message"].lower()
+
+
+async def test_concurrent_standalone_asks_cannot_race_past_the_cap(monkeypatch):
+    """Both requests read `_asks` from the persisted rows before either writes,
+    so without serialization both pass the MAX_ASKS check and both spend a call."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_ASKS", 1)
+    fake, rows, _ = _standalone_fakes(
+        monkeypatch, responses=[_answer(), _answer("Second", "Also £40.")],
+        ai_delay=0.02,
+    )
+
+    first, second = await asyncio.gather(
+        las.answer_standalone_question(
+            user_id="u-1", meeting_id="m-1", question="First?", request_id="r-1"),
+        las.answer_standalone_question(
+            user_id="u-1", meeting_id="m-1", question="Second?", request_id="r-2"),
+    )
+
+    kinds = sorted([first["type"], second["type"]])
+    assert kinds == ["assist", "assist_error"]
+    assert len(rows) == 1
+    assert len(fake.calls) == 1          # the blocked ask spent nothing
+    # The slot is released either way, so it cannot leak per meeting.
+    assert "m-1" not in las._standalone_ask_slots
+
+
+async def test_standalone_ask_reports_an_unexpected_failure_as_assist_error(monkeypatch):
+    """The WS path runs _handle_ask inside _guarded. Without an equivalent here
+    a transient DB error escaped the route as a bare 500 the client couldn't
+    correlate to its request."""
+    _fast_constants(monkeypatch)
+    _standalone_fakes(monkeypatch, responses=[_answer()])
+    monkeypatch.setattr(las.db, "query", AsyncMock(side_effect=RuntimeError("db down")))
+
+    payload = await las.answer_standalone_question(
+        user_id="u-1", meeting_id="m-1", question="What did we agree?",
+        request_id="req-3",
+    )
+
+    assert payload["type"] == "assist_error"
+    assert payload["request_id"] == "req-3"
+    assert "m-1" not in las._standalone_ask_slots
+
+
+async def test_standalone_prompt_keeps_the_newest_manual_notes(monkeypatch):
+    """Head-truncating the notes drops exactly what the user is asking about in
+    a long meeting — the newest lines. _format_window keeps the tail; so does this."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "TRANSCRIPT_WINDOW_CHARS", 120)
+    fake, _, _ = _standalone_fakes(monkeypatch, responses=[_answer()])
+
+    async def query_one(sql, *args):
+        if "live_context" in sql:
+            return {"live_context": None, "title": "Client catch-up",
+                    "template": "general", "meeting_type": None, "user_role": None,
+                    "source": "manual_notes",
+                    "user_notes": "OLD-OPENING " + ("filler " * 40) + "NEWEST-LINE"}
+        return None
+
+    monkeypatch.setattr(las.db, "query_one", query_one)
+
+    await las.answer_standalone_question(
+        user_id="u-1", meeting_id="m-1", question="What did they just say?",
+        request_id="req-4",
+    )
+
+    prompt = fake.calls[0]["messages"][0]["content"]
+    assert "NEWEST-LINE" in prompt
+    assert "OLD-OPENING" not in prompt

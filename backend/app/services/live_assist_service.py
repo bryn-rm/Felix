@@ -36,6 +36,14 @@ Concurrency contract with ``meetings_ws``:
   • all awaits happen inside the watcher's own task; ``aclose`` cancels rather
     than drains a long AI call.
 
+Manual assistant sessions have no socket to enqueue onto, so
+``answer_standalone_question`` drives one ask directly on a short-lived watcher
+(``start(run_loop=False)``) and awaits it on the request. That path is the one
+exception to the enqueue contract above; the limits it would otherwise lose to a
+per-request instance are restored explicitly — the ask cooldown is seeded from
+the newest persisted ask, and concurrent asks for one meeting serialize through
+``_standalone_ask_slot`` so the MAX_ASKS check can't be raced.
+
 Fail closed: everything is gated on ``settings.live_assist_mode`` AND
 ``settings.meeting_capture_mode`` (see ``_assist_enabled``).
 """
@@ -48,6 +56,7 @@ import logging
 import re
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
@@ -57,6 +66,7 @@ from app import db
 from app.config import settings
 from app.models.meeting import (
     CANDIDATE_ASSIST_MODES,
+    MEETING_SOURCE_MANUAL,
     AssistMeetingMode,
     resolve_assist_meeting_mode,
 )
@@ -66,12 +76,14 @@ from app.prompts.live_assist import (
     LIVE_ASSIST_INTERVIEW_ANSWER_PROMPT,
     LIVE_ASSIST_INTERVIEW_EXPAND_PROMPT,
     LIVE_ASSIST_INTERVIEW_WATCH_PROMPT,
+    LIVE_ASSIST_STANDALONE_ASK_PROMPT,
     LIVE_ASSIST_SYSTEM,
     LIVE_ASSIST_WATCH_PROMPT,
     format_shown_titles,
 )
 from app.services import ai_service as _ai
 from app.services.ai_service import log_ai_call
+from app.services.timezone_utils import local_date_of
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +127,10 @@ TRANSCRIPT_WINDOW_SEGMENTS = 40
 TRANSCRIPT_WINDOW_CHARS = 6000
 INTERVIEW_WINDOW_CHARS = 12000
 DIGEST_CAP_CHARS = 6000
+# Floor on one past meeting's share of the digest, so the even split can't
+# degenerate into ten unreadable slivers, and the shortest line worth emitting.
+MIN_EPISODE_CHARS = 400
+MIN_LINE_CHARS = 40
 CONTEXT_RETRY_AFTER_S = 60.0  # lazy re-read of live_context if prefetch was slow
 
 # Ask
@@ -230,11 +246,58 @@ async def prefetch_context(user_id: str, meeting_id: str) -> None:
         if not await _assist_enabled(user_id):
             return
         meeting = await db.query_one(
-            "SELECT calendar_event_id, title, attendees, template, started_at, date "
+            "SELECT calendar_event_id, title, attendees, template, started_at, date, source "
             "FROM meetings WHERE id = $1 AND user_id = $2",
             meeting_id, user_id,
         )
         if not meeting:
+            return
+
+        # A standalone session has no attendees or transcript to scope context
+        # around. Give it a compact recent-meetings snapshot instead so the user
+        # can ask questions such as "what did we decide last time?" immediately.
+        if meeting.get("source") == MEETING_SOURCE_MANUAL:
+            rows = await db.query(
+                """
+                SELECT m.title, COALESCE(m.started_at, m.date, m.created_at) AS occurred_at,
+                       m.user_notes, s.tldr, s.decisions, s.action_items,
+                       s.enhanced_notes
+                FROM meetings m
+                LEFT JOIN LATERAL (
+                    SELECT tldr, decisions, action_items, enhanced_notes
+                    FROM meeting_summaries
+                    WHERE user_id = $1 AND meeting_id = m.id
+                    ORDER BY created_at DESC LIMIT 1
+                ) s ON TRUE
+                WHERE m.user_id = $1 AND m.id <> $2
+                  AND (m.status = 'done' OR COALESCE(m.user_notes, '') <> '')
+                ORDER BY COALESCE(m.started_at, m.date, m.created_at) DESC
+                LIMIT 10
+                """,
+                user_id, meeting_id,
+            )
+            tz_row = await db.query_one(
+                "SELECT timezone FROM settings WHERE user_id = $1", user_id,
+            )
+            history = _format_previous_meetings(
+                rows, tz_name=(tz_row or {}).get("timezone") or "UTC",
+            )
+            live_context = {
+                "digest": {"past_episodes": history} if history else {},
+                # No keywords on purpose. They feed exactly one consumer —
+                # CandidateGate, which only ever observes transcript segments —
+                # and a standalone session has no transcript by construction, so
+                # anything computed here could never be read.
+                "keywords": [],
+                "meeting_title": meeting.get("title") or "(untitled)",
+                "template": meeting.get("template") or "general",
+                "prefetched_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.execute(
+                "UPDATE meetings SET live_context = $3, updated_at = NOW() "
+                "WHERE id = $1 AND user_id = $2",
+                meeting_id, user_id, live_context,
+            )
             return
 
         # gather_meeting_context takes a calendar-event dict but tolerates
@@ -267,6 +330,82 @@ async def prefetch_context(user_id: str, meeting_id: str) -> None:
         logger.warning(
             "live assist prefetch failed for meeting %s", meeting_id, exc_info=True
         )
+
+
+def _format_previous_meetings(rows: list[dict], *, tz_name: str = "UTC") -> str:
+    """Render recent saved meetings into a bounded, prompt-friendly digest.
+
+    The budget is shared out across meetings rather than spent strictly in
+    recency order — one meeting with large enhanced_notes would otherwise
+    consume all of DIGEST_CAP_CHARS and starve the other nine out entirely.
+    Each meeting gets an even share of what's left, so an early small meeting
+    hands its slack to the ones after it.
+    """
+    blocks: list[str] = []
+    remaining = DIGEST_CAP_CHARS
+    for index, row in enumerate(rows):
+        rows_left = len(rows) - index
+        budget = min(remaining, max(MIN_EPISODE_CHARS, remaining // rows_left))
+        if budget <= 0:
+            break
+        block = _format_previous_meeting(row, tz_name, budget)
+        if block:
+            blocks.append(block)
+            remaining -= len(block)
+    return "\n\n".join(blocks)
+
+
+def _format_previous_meeting(row: dict, tz_name: str, budget: int) -> str:
+    """One meeting's digest block, rendered within ``budget`` characters."""
+    occurred = row.get("occurred_at")
+    if isinstance(occurred, datetime):
+        # The user's local date, not UTC — these labels are what they reason
+        # about, and a late-evening meeting carries the next day's UTC date.
+        date = local_date_of(occurred, tz_name).isoformat()
+    else:
+        date = str(occurred or "")[:10]
+
+    header = f"Meeting: {row.get('title') or 'Untitled'}" + (f" ({date})" if date else "")
+    lines = [_truncate(header, budget)]
+    used = len(lines[0])
+
+    # (line, may_truncate). JSON payloads are all-or-nothing: half of a
+    # json.dumps() output is a syntactically broken fragment, not a shorter
+    # answer, so they're dropped whole when they don't fit. Prose can be cut.
+    candidates: list[tuple[str, bool]] = []
+    if row.get("tldr"):
+        candidates.append((f"Summary: {row['tldr']}", True))
+    if row.get("decisions"):
+        candidates.append((f"Decisions: {json.dumps(row['decisions'], default=str)}", False))
+    if row.get("action_items"):
+        candidates.append(
+            (f"Action items: {json.dumps(row['action_items'], default=str)}", False)
+        )
+    if row.get("enhanced_notes"):
+        candidates.append(
+            (f"Enhanced notes: {json.dumps(row['enhanced_notes'], default=str)}", False)
+        )
+    elif row.get("user_notes"):
+        candidates.append((f"Manual notes: {row['user_notes']}", True))
+
+    for line, may_truncate in candidates:
+        room = budget - used - 1  # the joining newline
+        if room < MIN_LINE_CHARS:
+            break
+        if len(line) > room:
+            if not may_truncate:
+                continue  # a shorter later line may still fit
+            line = _truncate(line, room)
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Cut prose to ``limit`` characters, marking that it was cut."""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +652,8 @@ class LiveAssistWatcher:
         self._meeting_title = "(untitled)"
         self._template = "general"
         self._assist_meeting_mode: AssistMeetingMode = "general"
+        self._standalone = False
+        self._manual_notes = ""
 
         self._started_at = time.monotonic()
         self._last_call_at = float("-inf")
@@ -544,13 +685,19 @@ class LiveAssistWatcher:
 
     # -- lifecycle -----------------------------------------------------------
 
-    async def start(self) -> None:
+    async def start(self, *, run_loop: bool = True) -> None:
         """Seed state from the DB (context, shown titles, transcript window) so
-        a reconnect resumes instead of re-suggesting, then start the run task."""
+        a reconnect resumes instead of re-suggesting, then start the run task.
+
+        ``run_loop=False`` seeds without creating that task: the standalone REST
+        ask path drives ``_handle_ask`` directly and never enqueues an event, so
+        a run task there would only block on an empty queue until ``aclose``
+        cancelled it.
+        """
         await self._load_context()
 
         rows = await db.query(
-            "SELECT title, source, question FROM meeting_assist_items "
+            "SELECT title, source, question, created_at FROM meeting_assist_items "
             "WHERE user_id = $1 AND meeting_id = $2 ORDER BY created_at",
             self.user_id, self.meeting_id,
         )
@@ -562,25 +709,51 @@ class LiveAssistWatcher:
         # the proactive pipeline, and reconnecting must not reset the ask cap.
         self._cards_shown = sum(1 for r in rows if r.get("source") == "proactive")
         self._asks = sum(1 for r in rows if r.get("source") == "ask")
+        self._seed_ask_cooldown(rows)
 
-        segments = await db.query(
-            "SELECT speaker, text, ts_start FROM meeting_transcript_segments "
-            "WHERE user_id = $1 AND meeting_id = $2 "
-            "ORDER BY ts_start DESC LIMIT $3",
-            self.user_id, self.meeting_id, TRANSCRIPT_WINDOW_SEGMENTS,
-        )
-        for seg in reversed(segments):
-            self._window.append(
-                (seg["speaker"], seg["text"], float(seg.get("ts_start") or 0.0))
+        # A standalone session has no transcript segments by construction, so
+        # this query is guaranteed to come back empty — and the REST ask path
+        # pays for start() on every single request.
+        if not self._standalone:
+            segments = await db.query(
+                "SELECT speaker, text, ts_start FROM meeting_transcript_segments "
+                "WHERE user_id = $1 AND meeting_id = $2 "
+                "ORDER BY ts_start DESC LIMIT $3",
+                self.user_id, self.meeting_id, TRANSCRIPT_WINDOW_SEGMENTS,
             )
+            for seg in reversed(segments):
+                self._window.append(
+                    (seg["speaker"], seg["text"], float(seg.get("ts_start") or 0.0))
+                )
 
         # A newer connection may have taken over (and aclosed us) while the
         # seed queries were in flight — in that case never start the loop.
-        if self._closed:
+        if self._closed or not run_loop:
             return
         self._task = asyncio.create_task(
             self._run(), name=f"live_assist:{self.meeting_id}"
         )
+
+    def _seed_ask_cooldown(self, rows: list[dict]) -> None:
+        """Carry ASK_MIN_INTERVAL_S across watcher instances for this meeting.
+
+        ``_last_ask_at`` is monotonic and starts at -inf, so a watcher rebuilt
+        per request (the standalone REST path) or on reconnect would let the
+        next ask through immediately. The newest persisted ask row dates the
+        last one; translate its age into this process's monotonic clock.
+        """
+        stamps = [
+            r["created_at"] for r in rows
+            if r.get("source") == "ask" and r.get("created_at")
+        ]
+        if not stamps:
+            return
+        newest = max(stamps)
+        if newest.tzinfo is None:
+            newest = newest.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - newest).total_seconds()
+        if 0 <= age < ASK_MIN_INTERVAL_S:
+            self._last_ask_at = time.monotonic() - age
 
     def on_final(self, speaker: str, text: str, ts_start: float) -> None:
         """Sync enqueue from the WS transcript path — must never block or raise."""
@@ -715,7 +888,7 @@ class LiveAssistWatcher:
 
     async def _load_context(self) -> None:
         row = await db.query_one(
-            "SELECT live_context, title, template, meeting_type, user_role "
+            "SELECT live_context, title, template, meeting_type, user_role, source, user_notes "
             "FROM meetings "
             "WHERE id = $1 AND user_id = $2",
             self.meeting_id, self.user_id,
@@ -735,6 +908,11 @@ class LiveAssistWatcher:
             self._context = None
         self._meeting_title = row.get("title") or "(untitled)"
         self._template = row.get("template") or "general"
+        self._standalone = row.get("source") == MEETING_SOURCE_MANUAL
+        # Keep the TAIL, like _format_window does for transcripts. In a long
+        # in-person meeting the notes the user is asking about are the newest
+        # ones, which is exactly what head-truncation would throw away.
+        self._manual_notes = (row.get("user_notes") or "")[-TRANSCRIPT_WINDOW_CHARS:]
         self._assist_meeting_mode = resolve_assist_meeting_mode(
             row.get("meeting_type"),
             row.get("user_role"),
@@ -796,7 +974,7 @@ class LiveAssistWatcher:
                 "Infer who posed the question from the speaker tags and solve "
                 "only questions spoken by 'them'."
             ),
-            context_digest=format_digest((self._context or {}).get("digest") or {}),
+            context_digest=self._format_context(),
             shown_titles=format_shown_titles(self._shown_titles),
             transcript_window=self._format_window(interview=is_interview),
         )
@@ -1102,16 +1280,25 @@ class LiveAssistWatcher:
             )
             return
 
-        prompt = LIVE_ASSIST_ASK_PROMPT.format(
+        prompt_template = (
+            LIVE_ASSIST_STANDALONE_ASK_PROMPT
+            if self._standalone
+            else LIVE_ASSIST_ASK_PROMPT
+        )
+        prompt = prompt_template.format(
             meeting_title=self._meeting_title,
             template=self._template,
-            context_digest=format_digest((self._context or {}).get("digest") or {}),
+            context_digest=self._format_context(),
             transcript_window=self._format_window(),
             question=question,
         )
         started = time.monotonic()
         result = await self._json_ai_call(
-            feature="live_assist_ask",
+            feature=(
+                "live_assist_standalone_ask"
+                if self._standalone
+                else "live_assist_ask"
+            ),
             model=settings.ANTHROPIC_MODEL_SMART,
             max_tokens=400,
             prompt=prompt,
@@ -1134,7 +1321,11 @@ class LiveAssistWatcher:
             request_id=request_id,
             model=settings.ANTHROPIC_MODEL_SMART,
             metadata={"latency_ms": latency_ms},
-            prompt_feature="live_assist_ask",
+            prompt_feature=(
+                "live_assist_standalone_ask"
+                if self._standalone
+                else "live_assist_ask"
+            ),
         )
         if item is None:
             await fail("Couldn't answer that just now — try again.")
@@ -1176,7 +1367,7 @@ class LiveAssistWatcher:
             claim = self._remember_solved(question)
         prompt = LIVE_ASSIST_INTERVIEW_ANSWER_PROMPT.format(
             meeting_title=self._meeting_title,
-            context_digest=format_digest((self._context or {}).get("digest") or {}),
+            context_digest=self._format_context(),
             transcript_window=self._format_window(interview=True),
             question=question,
         )
@@ -1488,6 +1679,12 @@ class LiveAssistWatcher:
         except ValueError:  # already released
             pass
 
+    def _format_context(self) -> str:
+        context = format_digest((self._context or {}).get("digest") or {})
+        if self._standalone and self._manual_notes:
+            context += f"\n\nCurrent manual notes:\n{self._manual_notes}"
+        return context
+
     def _format_window(self, *, interview: bool = False) -> str:
         lines: list[str] = []
         total = 0
@@ -1534,6 +1731,103 @@ def forget_meeting(meeting_id: str) -> None:
     """Drop a finished meeting's watch-call count. Safe to call for meetings
     that never had a watcher (the feature may be off for this user)."""
     _meeting_watch_calls.pop(meeting_id, None)
+
+
+class _AskSlot:
+    """One meeting's REST-ask mutex, plus the count of holders/waiters on it."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
+# Serializes standalone asks per meeting. Each REST ask rebuilds a watcher from
+# the persisted rows, so two concurrent requests would both read the same
+# `_asks` count, both pass the MAX_ASKS check, and both spend a Sonnet call —
+# the route's 12/minute allowance is not itself a concurrency bound. Entries are
+# dropped once nobody holds or waits on them, so this cannot grow unbounded.
+_standalone_ask_slots: dict[str, _AskSlot] = {}
+
+
+@asynccontextmanager
+async def _standalone_ask_slot(meeting_id: str):
+    slot = _standalone_ask_slots.get(meeting_id)
+    if slot is None:
+        slot = _AskSlot()
+        _standalone_ask_slots[meeting_id] = slot
+    # Incremented before the first await, so a concurrent caller always sees a
+    # nonzero count and never removes the slot out from under this one.
+    slot.users += 1
+    try:
+        async with slot.lock:
+            yield
+    finally:
+        slot.users -= 1
+        if slot.users == 0 and _standalone_ask_slots.get(meeting_id) is slot:
+            del _standalone_ask_slots[meeting_id]
+
+
+async def answer_standalone_question(
+    *,
+    user_id: str,
+    meeting_id: str,
+    question: str,
+    request_id: str | None,
+    intent: str = "answer",
+    parent_item_id: str | None = None,
+    focus: str | None = None,
+    user_email: str | None = None,
+) -> dict:
+    """Run one typed ask without opening an audio/WebSocket session.
+
+    The watcher is reused so manual asks keep the same limits, persistence,
+    interview-answer format, and expansion behaviour as captured meetings.
+
+    Always resolves to an ``assist`` or ``assist_error`` payload. The WS path
+    runs ``_handle_ask`` inside ``_guarded``; without an equivalent here an
+    unexpected failure (a transient DB error in the persist, say) would escape
+    as a bare 500 with nothing the client could correlate to its request.
+    """
+    emitted: list[dict] = []
+
+    async def collect(payload: dict) -> None:
+        emitted.append(payload)
+
+    async with _standalone_ask_slot(meeting_id):
+        watcher = LiveAssistWatcher(
+            user_id=user_id,
+            meeting_id=meeting_id,
+            send_json=collect,
+            user_email=user_email,
+        )
+        try:
+            await watcher.start(run_loop=False)
+            await watcher._handle_ask(
+                question,
+                request_id,
+                intent=intent,
+                parent_item_id=parent_item_id,
+                focus=focus,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "standalone ask failed for meeting %s", meeting_id, exc_info=True
+            )
+        finally:
+            await watcher.aclose()
+
+    for payload in reversed(emitted):
+        if payload.get("type") in {"assist", "assist_error"}:
+            return payload
+    return {
+        "type": "assist_error",
+        "request_id": request_id,
+        "message": "Couldn’t answer that just now — try again.",
+    }
 
 
 async def maybe_start_watcher(

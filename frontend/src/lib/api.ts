@@ -49,6 +49,12 @@ export interface ApiOptions {
    * transient 403s before giving up). Errors are still thrown as normal.
    */
   skipAuthRedirect?: boolean;
+  /**
+   * Abort signal for this call. `fetch` has no timeout of its own, so any
+   * caller whose UI blocks on the response (a pending spinner, a disabled
+   * input) needs one of these to bound how long a stalled request can wedge it.
+   */
+  signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +76,7 @@ async function doFetch(
   path: string,
   body: unknown,
   authorization: string,
+  signal?: AbortSignal,
 ): Promise<Response> {
   return fetch(`${API_BASE}${path}`, {
     method,
@@ -78,6 +85,7 @@ async function doFetch(
       "Content-Type": "application/json",
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
 }
 
@@ -88,7 +96,7 @@ async function request<T>(
   options?: ApiOptions,
 ): Promise<T> {
   let authorization = await getAuthHeader();
-  let res = await doFetch(method, path, body, authorization);
+  let res = await doFetch(method, path, body, authorization, options?.signal);
 
   // The browser throttles Supabase's silent refresh while the tab is hidden,
   // so the cached access token may be expired on the first call after focus.
@@ -97,7 +105,7 @@ async function request<T>(
     const token = await getFreshAccessToken({ forceRefresh: true });
     if (token) {
       authorization = `Bearer ${token}`;
-      res = await doFetch(method, path, body, authorization);
+      res = await doFetch(method, path, body, authorization, options?.signal);
     }
   }
 

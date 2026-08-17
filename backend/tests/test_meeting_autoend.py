@@ -22,7 +22,11 @@ import pytest
 from fastapi import HTTPException
 
 from app.jobs import meeting_autoend_checker as checker
-from app.jobs.meeting_autoend_checker import SILENCE_TIMEOUT_MINUTES
+from app.jobs.meeting_autoend_checker import (
+    MANUAL_IDLE_TIMEOUT_MINUTES,
+    SILENCE_TIMEOUT_MINUTES,
+)
+from app.models.meeting import MEETING_SOURCE_CAPTURE, MEETING_SOURCE_MANUAL
 
 
 def _now():
@@ -34,11 +38,26 @@ def _row(**over):
         "id": "m-1",
         "user_id": "u-1",
         "calendar_event_id": None,
+        "source": MEETING_SOURCE_CAPTURE,
         "started_at": _now() - timedelta(minutes=30),
         "last_segment_at": _now(),
+        "last_assist_at": None,
+        "updated_at": _now(),
     }
     base.update(over)
     return base
+
+
+def _manual_row(**over):
+    """A manual assistant session: no transcript segments, ever."""
+    base = {
+        "source": MEETING_SOURCE_MANUAL,
+        "last_segment_at": None,
+        "last_assist_at": None,
+        "updated_at": _now(),
+    }
+    base.update(over)
+    return _row(**base)
 
 
 def _install(monkeypatch, rows, *, end_result={"meeting_id": "m-1", "status": "processing"}):
@@ -59,6 +78,22 @@ def _install(monkeypatch, rows, *, end_result={"meeting_id": "m-1", "status": "p
 # ---------------------------------------------------------------------------
 # Silence timeout
 # ---------------------------------------------------------------------------
+
+async def test_sweep_selects_both_sources_with_their_activity_signals(monkeypatch):
+    """No source is excluded — a manual session left open must be reaped too."""
+    query = AsyncMock(return_value=[])
+    monkeypatch.setattr("app.db.query", query)
+
+    assert await checker.check_stale_meetings() == 0
+
+    sql = " ".join(query.await_args.args[0].split())
+    assert "m.source =" not in sql  # selected for the idle rule, never filtered on
+    assert "AS last_segment_at" in sql
+    assert "AS last_assist_at" in sql
+    # Scalar subqueries, so the two child tables never cross-multiply.
+    assert "JOIN meeting_transcript_segments" not in sql
+    assert "JOIN meeting_assist_items" not in sql
+
 
 async def test_silence_timeout_finalizes(monkeypatch):
     stale = _row(last_segment_at=_now() - timedelta(minutes=SILENCE_TIMEOUT_MINUTES + 1))
@@ -88,6 +123,49 @@ async def test_no_segments_yet_uses_started_at(monkeypatch):
     n = await checker.check_stale_meetings()
 
     assert n == 0
+    end_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Manual assistant sessions — no transcript, so a different idle measure
+# ---------------------------------------------------------------------------
+
+async def test_abandoned_manual_session_is_finalized(monkeypatch):
+    """The whole point: closing the tab leaves a manual session open with no
+    client that will ever call /end, so the sweep must reap it."""
+    abandoned = _manual_row(
+        updated_at=_now() - timedelta(minutes=MANUAL_IDLE_TIMEOUT_MINUTES + 1),
+        started_at=_now() - timedelta(minutes=MANUAL_IDLE_TIMEOUT_MINUTES + 5),
+    )
+    end_mock = _install(monkeypatch, [abandoned])
+
+    assert await checker.check_stale_meetings() == 1
+    end_mock.assert_awaited_once_with("u-1", "m-1")
+
+
+async def test_manual_session_is_not_ended_by_the_silence_timeout(monkeypatch):
+    """A manual session never produces a segment, so the capture timeout would
+    end an in-person meeting minutes after it started."""
+    live = _manual_row(
+        updated_at=_now() - timedelta(minutes=SILENCE_TIMEOUT_MINUTES + 5),
+        started_at=_now() - timedelta(minutes=SILENCE_TIMEOUT_MINUTES + 10),
+    )
+    end_mock = _install(monkeypatch, [live])
+
+    assert await checker.check_stale_meetings() == 0
+    end_mock.assert_not_awaited()
+
+
+async def test_manual_session_idle_measured_from_newest_signal(monkeypatch):
+    """A recent assist card keeps the session alive even when the notes have not
+    been touched for longer than the timeout."""
+    asking_not_typing = _manual_row(
+        updated_at=_now() - timedelta(minutes=MANUAL_IDLE_TIMEOUT_MINUTES + 30),
+        last_assist_at=_now() - timedelta(minutes=5),
+    )
+    end_mock = _install(monkeypatch, [asking_not_typing])
+
+    assert await checker.check_stale_meetings() == 0
     end_mock.assert_not_awaited()
 
 

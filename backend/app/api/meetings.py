@@ -11,17 +11,27 @@ The live audio socket lives in a separate, unprefixed router
 (`app/api/meetings_ws.py`) — see §2.2 / Phase 6.
 """
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from app import db
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import check_monthly_ai_budget, limiter
-from app.models.meeting import MeetingType, MeetingUserRole, validate_meeting_mode
+from app.models.meeting import (
+    MEETING_SOURCE_CAPTURE,
+    MEETING_SOURCE_MANUAL,
+    MeetingType,
+    MeetingUserRole,
+    validate_meeting_mode,
+)
 from app.services.live_assist_service import (
     _assist_enabled,
+    answer_standalone_question,
     forget_meeting,
     item_to_wire,
+    prefetch_context,
 )
 from app.services.meeting_prep_service import meeting_prep_service
 from app.services.meeting_service import _capture_enabled, meeting_service
@@ -142,6 +152,7 @@ class StartMeetingBody(BaseModel):
     template: str = "general"
     meeting_type: MeetingType = "general"
     user_role: MeetingUserRole | None = None
+    assistant_only: bool = False
 
     @model_validator(mode="after")
     def validate_type_and_role(self):
@@ -153,6 +164,17 @@ class NotesBody(BaseModel):
     content: str = Field(default="", max_length=100_000)
 
 
+class AssistAskBody(BaseModel):
+    question: str = Field(min_length=1, max_length=6000)
+    request_id: str | None = Field(default=None, max_length=200)
+    intent: str = Field(default="answer", pattern="^(answer|expand)$")
+    # Typed as UUID because it is compared against a uuid column: an arbitrary
+    # string reaches asyncpg and raises InvalidTextRepresentationError deep in
+    # the ask path. Pydantic rejects it at the boundary as a 422 instead.
+    parent_item_id: UUID | None = None
+    focus: str | None = Field(default=None, max_length=50)
+
+
 @router.post("/start")
 @limiter.limit("20/minute")
 async def start_capture(
@@ -160,7 +182,7 @@ async def start_capture(
     request: Request,
     current_user: dict = Depends(get_current_user),
 ):
-    """Open a new browser-capture meeting and return its id (status='recording')."""
+    """Open an audio-capture or manual-assistant session and return its id."""
     user_id = current_user["id"]
     await _require_capture_enabled(user_id)
     # Cached clients know only the old template field. Preserve their interview
@@ -196,6 +218,7 @@ async def start_capture(
             template=template,
             meeting_type=meeting_type,
             user_role=user_role,
+            source=MEETING_SOURCE_MANUAL if body.assistant_only else MEETING_SOURCE_CAPTURE,
         )
     except PermissionError:
         # Race: flag flipped off between the gate check and start. Stay closed.
@@ -221,7 +244,12 @@ async def save_capture_notes(
     """Persist the live notes (debounced autosave from the live page)."""
     user_id = current_user["id"]
     await _require_capture_enabled(user_id)
-    await meeting_service.save_user_notes(user_id, meeting_id, body.content)
+    saved = await meeting_service.save_user_notes(user_id, meeting_id, body.content)
+    if not saved:
+        # The session is closed (or not the user's). Say so rather than
+        # accepting a write that the guarded UPDATE silently dropped — the
+        # summary was built from these notes and must keep agreeing with them.
+        raise HTTPException(status_code=409, detail="meeting is no longer open for notes")
     return {"saved": True}
 
 
@@ -287,6 +315,54 @@ async def list_assist_items(
         user_id, meeting_id,
     )
     return {"items": [item_to_wire(r) for r in rows]}
+
+
+@router.post("/{meeting_id}/assist/ask")
+@limiter.limit("12/minute")
+async def ask_standalone_assist(
+    meeting_id: str,
+    body: AssistAskBody,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Answer a typed question in a manual assistant session.
+
+    Audio capture normally carries asks over its WebSocket. Manual sessions
+    deliberately have no socket, microphone, or tab share, so they use this
+    scoped REST transport instead.
+    """
+    user_id = current_user["id"]
+    if not await _assist_enabled(user_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    meeting = await db.query_one(
+        # has_context, not the column itself: live_context is the whole prefetched
+        # digest (kilobytes) and this only ever tests it for NULL.
+        "SELECT id, source, status, live_context IS NOT NULL AS has_context "
+        "FROM meetings WHERE id = $1 AND user_id = $2",
+        meeting_id, user_id,
+    )
+    if (
+        not meeting
+        or meeting.get("source") != MEETING_SOURCE_MANUAL
+        or meeting.get("status") != "recording"
+    ):
+        raise HTTPException(status_code=404, detail="assistant session not open")
+    if not meeting.get("has_context"):
+        await prefetch_context(user_id, meeting_id)
+
+    payload = await answer_standalone_question(
+        user_id=user_id,
+        meeting_id=meeting_id,
+        question=body.question,
+        request_id=body.request_id,
+        intent=body.intent,
+        parent_item_id=str(body.parent_item_id) if body.parent_item_id else None,
+        focus=body.focus,
+        user_email=current_user.get("email"),
+    )
+    if payload.get("type") == "assist_error":
+        raise HTTPException(status_code=400, detail=payload.get("message"))
+    return {"item": payload["item"]}
 
 
 @router.post("/{meeting_id}/assist/{item_id}/dismiss")

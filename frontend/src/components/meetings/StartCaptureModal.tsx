@@ -62,18 +62,20 @@ const USER_ROLES = [
 const SUMMARY_STYLES = TEMPLATES.filter((option) => option.value !== "interview");
 
 /**
- * Start-capture modal: template picker + title + a consent checkbox (UK GDPR —
- * the user confirms they'll inform participants). Audio is never stored; only
- * the transcript text is kept, which the consent copy states.
+ * Meeting-session modal: shared type/title choices for audio capture and the
+ * standalone manual-notes assistant. Capture adds the UK GDPR consent step;
+ * manual mode never requests or records audio.
  */
 export function StartCaptureModal({
   open,
   onClose,
   onStart,
+  mode = "capture",
 }: {
   open: boolean;
   onClose: () => void;
   onStart: (input: StartMeetingInput) => Promise<void>;
+  mode?: "capture" | "manual";
 }) {
   const [template, setTemplate] = useState<MeetingTemplate>("general");
   const [meetingType, setMeetingType] = useState<MeetingType>("general");
@@ -99,7 +101,7 @@ export function StartCaptureModal({
 
   async function handleStart() {
     if (
-      !consent ||
+      (mode === "capture" && !consent) ||
       starting ||
       (meetingType === "interview" && userRole === null)
     ) return;
@@ -111,6 +113,7 @@ export function StartCaptureModal({
         title: title.trim() || null,
         meeting_type: meetingType,
         user_role: meetingType === "interview" ? userRole : null,
+        ...(mode === "manual" ? { assistant_only: true } : {}),
       });
     } catch {
       // onClick discards the promise, so without this the modal just snaps back
@@ -127,10 +130,13 @@ export function StartCaptureModal({
       <div className="w-full max-w-lg rounded-xl border border-slate-700 bg-[#0d1526] p-6 shadow-xl">
         <div className="flex items-start justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-slate-100">Start capture</h2>
+            <h2 className="text-lg font-semibold text-slate-100">
+              {mode === "manual" ? "Open meeting assistant" : "Start capture"}
+            </h2>
             <p className="mt-1 text-sm text-slate-500">
-              Felix transcribes both sides of an in-browser meeting and writes you
-              an enhanced summary.
+              {mode === "manual"
+                ? "Take manual notes and ask Felix questions without recording audio."
+                : "Felix transcribes both sides of an in-browser meeting and writes you an enhanced summary."}
             </p>
           </div>
           <button
@@ -205,19 +211,21 @@ export function StartCaptureModal({
             />
           </div>
 
-          <label className="flex items-start gap-2 rounded-lg border border-slate-700/50 bg-slate-800/40 p-3 text-xs text-slate-400">
-            <input
-              type="checkbox"
-              checked={consent}
-              onChange={(e) => setConsent(e.target.checked)}
-              className="mt-0.5 h-4 w-4 shrink-0 accent-indigo-500"
-            />
-            <span>
-              I&apos;ll let participants know the meeting is being transcribed. Felix
-              transcribes live and <strong>discards the audio</strong> — only the
-              transcript text is kept.
-            </span>
-          </label>
+          {mode === "capture" && (
+            <label className="flex items-start gap-2 rounded-lg border border-slate-700/50 bg-slate-800/40 p-3 text-xs text-slate-400">
+              <input
+                type="checkbox"
+                checked={consent}
+                onChange={(e) => setConsent(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-indigo-500"
+              />
+              <span>
+                I&apos;ll let participants know the meeting is being transcribed. Felix
+                transcribes live and <strong>discards the audio</strong> — only the
+                transcript text is kept.
+              </span>
+            </label>
+          )}
         </div>
 
         {error && (
@@ -237,14 +245,18 @@ export function StartCaptureModal({
           <button
             onClick={handleStart}
             disabled={
-              !consent ||
+              (mode === "capture" && !consent) ||
               starting ||
               (meetingType === "interview" && userRole === null)
             }
             className="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
           >
             {starting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {starting ? "Starting…" : "Continue"}
+            {starting
+              ? "Starting…"
+              : mode === "manual"
+                ? "Open assistant"
+                : "Continue"}
           </button>
         </div>
       </div>

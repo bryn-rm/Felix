@@ -71,6 +71,7 @@ PROMPT_VERSIONS: dict[str, str] = {
     "live_assist_watch":  "v1",
     "live_assist_interview_watch": "v1",
     "live_assist_ask":    "v1",
+    "live_assist_standalone_ask": "v1",
     "live_assist_interview": "v1",
     "live_assist_expand": "v1",
 }

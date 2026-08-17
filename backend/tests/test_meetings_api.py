@@ -18,7 +18,7 @@ import time
 
 import jwt as pyjwt
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -81,6 +81,32 @@ def test_start_delegates_to_service_when_enabled(client, monkeypatch):
     assert start.await_args.kwargs["title"] == "Roadmap"
     assert start.await_args.kwargs["meeting_type"] == "general"
     assert start.await_args.kwargs["user_role"] is None
+    assert start.await_args.kwargs["source"] == "browser_capture"
+
+
+async def test_start_manual_assistant_uses_no_audio_source(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_capture_enabled", AsyncMock(return_value=True))
+    start = AsyncMock(return_value={"meeting_id": "m-manual"})
+    monkeypatch.setattr(meetings_api.meeting_service, "start_meeting", start)
+
+    result = await meetings_api.start_capture.__wrapped__(
+        meetings_api.StartMeetingBody(
+            meeting_type="interview",
+            user_role="candidate",
+            assistant_only=True,
+        ),
+        request=None,
+        current_user={"id": "user-cap-1", "email": "cap@example.com"},
+    )
+
+    assert result == {"meeting_id": "m-manual"}
+    assert start.await_args.kwargs["source"] == "manual_notes"
+    assert start.await_args.kwargs["meeting_type"] == "interview"
+    assert start.await_args.kwargs["user_role"] == "candidate"
 
 
 def test_start_rejects_interview_without_role():
@@ -351,6 +377,125 @@ def test_assist_dismiss_scopes_to_owner(client, monkeypatch):
 
     update.return_value = None
     assert client.post("/meetings/m-1/assist/i-2/dismiss").status_code == 404
+
+
+async def test_manual_assist_ask_is_scoped_and_returns_item(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(meetings_api.db, "query_one", AsyncMock(return_value={
+        "id": "m-1", "source": "manual_notes", "status": "recording",
+        "live_context": {"digest": {}},
+    }))
+    answer = AsyncMock(return_value={
+        "type": "assist", "item": {"id": "i-1", "body": "Last time..."},
+    })
+    monkeypatch.setattr(meetings_api, "answer_standalone_question", answer)
+
+    result = await meetings_api.ask_standalone_assist.__wrapped__(
+        "m-1",
+        meetings_api.AssistAskBody(
+            question="What happened last time?", request_id="req-1",
+        ),
+        request=None,
+        current_user={"id": "user-cap-1", "email": "cap@example.com"},
+    )
+
+    assert result["item"]["id"] == "i-1"
+    assert answer.await_args.kwargs["user_id"] == "user-cap-1"
+    assert answer.await_args.kwargs["meeting_id"] == "m-1"
+
+
+async def test_manual_assist_ask_rejects_capture_session(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(meetings_api.db, "query_one", AsyncMock(return_value={
+        "id": "m-1", "source": "browser_capture", "status": "recording",
+    }))
+
+    with pytest.raises(HTTPException) as exc:
+        await meetings_api.ask_standalone_assist.__wrapped__(
+            "m-1",
+            meetings_api.AssistAskBody(question="Hello?"),
+            request=None,
+            current_user={"id": "user-cap-1", "email": "cap@example.com"},
+        )
+
+    assert exc.value.status_code == 404
+
+
+def test_ask_body_rejects_a_non_uuid_parent_item_id():
+    """parent_item_id is compared against a uuid column. Unvalidated, an
+    arbitrary string reached asyncpg and surfaced as a bare 500."""
+    from pydantic import ValidationError
+
+    from app.api import meetings as meetings_api
+
+    with pytest.raises(ValidationError):
+        meetings_api.AssistAskBody(
+            question="Expand that", intent="expand", parent_item_id="not-a-uuid",
+        )
+
+    body = meetings_api.AssistAskBody(
+        question="Expand that", intent="expand",
+        parent_item_id="6f1c0f4e-3b7a-4a3a-9c2f-2f1c9a0d6b11",
+    )
+    assert str(body.parent_item_id) == "6f1c0f4e-3b7a-4a3a-9c2f-2f1c9a0d6b11"
+
+
+async def test_ask_reads_only_whether_context_exists(monkeypatch):
+    """live_context is the whole prefetched digest; the route only tests it for
+    NULL, so it must not pull kilobytes back on every ask."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    query_one = AsyncMock(return_value={
+        "id": "m-1", "source": "manual_notes", "status": "recording",
+        "has_context": True,
+    })
+    monkeypatch.setattr(meetings_api.db, "query_one", query_one)
+    prefetch = AsyncMock()
+    monkeypatch.setattr(meetings_api, "prefetch_context", prefetch)
+    monkeypatch.setattr(meetings_api, "answer_standalone_question", AsyncMock(
+        return_value={"type": "assist", "item": {"id": "i-1"}},
+    ))
+
+    await meetings_api.ask_standalone_assist.__wrapped__(
+        "m-1",
+        meetings_api.AssistAskBody(question="What did we agree?"),
+        request=None,
+        current_user={"id": "user-cap-1", "email": "cap@example.com"},
+    )
+
+    sql = query_one.await_args.args[0]
+    assert "live_context IS NOT NULL AS has_context" in sql
+    prefetch.assert_not_awaited()
+
+
+def test_notes_are_refused_once_the_meeting_is_no_longer_recording(client, monkeypatch):
+    """The summary is built from these notes. A late write would leave
+    meetings.user_notes silently disagreeing with the summary shown for it."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_capture_enabled", AsyncMock(return_value=True))
+    save = AsyncMock(return_value=False)   # guarded UPDATE matched no row
+    monkeypatch.setattr(meetings_api.meeting_service, "save_user_notes", save)
+
+    resp = client.post("/meetings/m-1/notes", json={"content": "late edit"})
+
+    assert resp.status_code == 409
+
+    save.return_value = True
+    assert client.post("/meetings/m-1/notes", json={"content": "ok"}).status_code == 200
 
 
 # ===========================================================================

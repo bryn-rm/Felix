@@ -48,11 +48,12 @@ function MeetingRow({
 }) {
   const [deleting, setDeleting] = useState(false);
   const meta = STATUS_META[m.status] ?? STATUS_META.idle;
+  const manualSession = m.source === "manual_notes";
 
   async function handleDelete(e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm("Delete this meeting and its transcript? This can't be undone.")) {
+    if (!confirm(`Delete this ${manualSession ? "assistant session" : "meeting and its transcript"}? This can't be undone.`)) {
       return;
     }
     setDeleting(true);
@@ -76,11 +77,11 @@ function MeetingRow({
           <span
             className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${meta.className}`}
           >
-            {meta.label}
+            {manualSession && m.status === "recording" ? "Open" : meta.label}
           </span>
         </div>
         <p className="mt-1 text-xs text-slate-500">
-          {templateLabel(m.template)}
+          {manualSession ? "Manual assistant" : templateLabel(m.template)}
           {whenLabel(m) && <> · {whenLabel(m)}</>}
         </p>
       </div>

@@ -6,6 +6,18 @@ from typing import Literal
 MeetingType = Literal["general", "interview"]
 MeetingUserRole = Literal["candidate", "interviewer"]
 
+# How the session was opened. 'browser_capture' records tab + mic audio over the
+# capture WebSocket; 'manual_notes' is the assistant-only session that has no
+# socket, microphone, or tab share at all. Enough behaviour branches on this —
+# WebSocket admission, the auto-end sweep's idle rule, the REST ask route, the
+# standalone ask prompt — that the literals belong here rather than being
+# hand-repeated at each site.
+MeetingSource = Literal["browser_capture", "manual_notes"]
+
+MEETING_SOURCE_CAPTURE: MeetingSource = "browser_capture"
+MEETING_SOURCE_MANUAL: MeetingSource = "manual_notes"
+MEETING_SOURCES = frozenset({MEETING_SOURCE_CAPTURE, MEETING_SOURCE_MANUAL})
+
 # How a meeting's stored configuration resolves into behaviour. "legacy_" marks
 # rows written before migration 020, which have no explicit meeting_type.
 AssistMeetingMode = Literal[
@@ -21,6 +33,19 @@ AssistMeetingMode = Literal[
 # interviewer's meeting is an interview too — but the candidate in it is someone
 # else, so neither applies.
 CANDIDATE_ASSIST_MODES = frozenset({"interview_candidate", "legacy_interview"})
+
+
+def validate_meeting_source(source: str) -> MeetingSource:
+    """Reject a source the rest of the stack has no branch for.
+
+    The column has no CHECK constraint, so an unrecognised value would be
+    written happily and then behave as neither kind: the WebSocket rejects it,
+    the auto-end sweep skips it, and the ask route 404s — with nothing failing
+    at write time. Fail at the boundary instead.
+    """
+    if source not in MEETING_SOURCES:
+        raise ValueError(f"Unknown meeting source: {source!r}")
+    return source  # type: ignore[return-value]
 
 
 def validate_meeting_mode(

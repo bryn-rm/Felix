@@ -25,10 +25,13 @@ from app import db
 from app.config import settings
 from app.middleware.auth import get_google_credentials
 from app.models.meeting import (
+    MEETING_SOURCE_CAPTURE,
+    MeetingSource,
     MeetingType,
     MeetingUserRole,
     uses_candidate_assist,
     validate_meeting_mode,
+    validate_meeting_source,
 )
 from app.services.ai_service import ai_service
 from app.services.calendar_service import CalendarService
@@ -53,8 +56,9 @@ class MeetingService:
         template: str = "general",
         meeting_type: MeetingType | None = "general",
         user_role: MeetingUserRole | None = None,
+        source: MeetingSource = MEETING_SOURCE_CAPTURE,
     ) -> dict:
-        """Create a `recording` meeting row and return its id.
+        """Create an open capture/manual-session row and return its id.
 
         Fail-closed: raises `PermissionError` when meeting capture is off for
         the user. When linked to a calendar event, pulls its title/attendees for
@@ -63,6 +67,7 @@ class MeetingService:
         if not await _capture_enabled(user_id):
             raise PermissionError("meeting capture is disabled")
         validate_meeting_mode(meeting_type, user_role)
+        source = validate_meeting_source(source)
 
         now = datetime.now(timezone.utc)
         resolved_title = title
@@ -85,28 +90,41 @@ class MeetingService:
                 "meeting_type":      meeting_type,
                 "user_role":         user_role,
                 "status":            "recording",
-                "source":            "browser_capture",
+                "source":            source,
                 "started_at":        now,
                 "updated_at":        now,
             },
         )
         meeting_id = str(row["id"])
 
-        # Live-assist context prefetch — best-effort, off the request path.
-        # prefetch_context checks the live_assist_mode gate itself and no-ops
-        # when the feature is off, so start never pays for it.
+        # Live-assist context prefetch — best-effort and OFF the request path for
+        # both sources, so start never pays for it. A manual session's history
+        # query sorts on COALESCE(started_at, date, created_at), which no index
+        # covers, so awaiting it here made "Starting…" scale with how many
+        # meetings the user owns. The ask route already re-runs the prefetch
+        # inline when live_context is still NULL, so the first typed question is
+        # covered either way — it just isn't charged to every start.
         from app.services.live_assist_service import prefetch_context
         spawn(prefetch_context(user_id, meeting_id), name="live_assist_prefetch")
 
         return {"meeting_id": meeting_id}
 
-    async def save_user_notes(self, user_id: str, meeting_id: str, content: str) -> None:
-        """Persist the user's live notes (debounced upsert from the frontend)."""
-        await db.execute(
+    async def save_user_notes(self, user_id: str, meeting_id: str, content: str) -> bool:
+        """Persist the user's live notes (debounced upsert from the frontend).
+
+        Guarded to `status='recording'`: once the meeting has been summarized,
+        `meeting_summaries` was built from these notes, so a late write would
+        leave the stored notes silently disagreeing with the summary on screen
+        (and make a re-summarize produce a different result). Returns False when
+        the meeting is no longer open, so the caller can say so.
+        """
+        row = await db.query_one(
             "UPDATE meetings SET user_notes = $3, updated_at = NOW() "
-            "WHERE id = $1 AND user_id = $2",
+            "WHERE id = $1 AND user_id = $2 AND status = 'recording' "
+            "RETURNING id",
             meeting_id, user_id, content,
         )
+        return row is not None
 
     async def end_meeting(self, user_id: str, meeting_id: str) -> dict | None:
         """Stop recording and kick off summarization in the background.
@@ -152,6 +170,23 @@ class MeetingService:
             )
             transcript = "\n".join(f"{s['speaker']}: {s['text']}" for s in segments)
             user_notes = meeting.get("user_notes") or ""
+
+            # Nothing to summarize — don't spend a Sonnet call on empty input.
+            # A manual session has no transcript by construction, so one opened
+            # and finished without notes would otherwise send two empty strings
+            # to the model, and any unparseable reply to that would strand the
+            # meeting in 'error' with a Retry button that re-runs the same empty
+            # call. 'done' with no summary row is the honest terminal state; the
+            # detail page already renders it as "No summary was produced".
+            if not transcript.strip() and not user_notes.strip():
+                await db.execute(
+                    "UPDATE meetings SET status = 'done', updated_at = NOW() "
+                    "WHERE id = $1 AND user_id = $2",
+                    meeting_id, user_id,
+                )
+                logger.info("meeting %s had no transcript or notes; skipped summary", meeting_id)
+                return None
+
             template = meeting.get("template") or "general"
             md = meeting.get("started_at") or meeting.get("date")
             meeting_date = md.isoformat() if hasattr(md, "isoformat") else (str(md) if md else None)

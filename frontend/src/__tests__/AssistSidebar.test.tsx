@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 
 import { AssistSidebar } from "@/components/meetings/AssistSidebar";
 import type { AssistItem } from "@/lib/types";
@@ -69,17 +69,19 @@ describe("AssistSidebar", () => {
     expect(props.onDismiss).toHaveBeenCalledWith("i-1");
   });
 
-  it("submits a trimmed question and clears the input", () => {
+  it("submits a trimmed question and clears the input", async () => {
     const props = setup();
     const input = screen.getByLabelText(/ask felix a question/i);
     fireEvent.change(input, { target: { value: "  Who is Sarah?  " } });
-    fireEvent.click(screen.getByLabelText(/send question/i));
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText(/send question/i));
+    });
 
     expect(props.onAsk).toHaveBeenCalledWith("  Who is Sarah?  ");
     expect((input as HTMLInputElement).value).toBe("");
   });
 
-  it("sends on Enter and keeps Shift+Enter as a newline", () => {
+  it("sends on Enter and keeps Shift+Enter as a newline", async () => {
     const props = setup();
     const input = screen.getByLabelText(/ask felix a question/i);
     fireEvent.change(input, { target: { value: "Who is Sarah?" } });
@@ -87,7 +89,9 @@ describe("AssistSidebar", () => {
     fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
     expect(props.onAsk).not.toHaveBeenCalled();
 
-    fireEvent.keyDown(input, { key: "Enter" });
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
     expect(props.onAsk).toHaveBeenCalledWith("Who is Sarah?");
     expect((input as HTMLTextAreaElement).value).toBe("");
   });
@@ -98,17 +102,72 @@ describe("AssistSidebar", () => {
     expect(screen.getByText("over budget")).toBeInTheDocument();
   });
 
-  it("keeps the typed question when the send fails (e.g. reconnecting)", () => {
+  it("keeps the typed question when the send fails (e.g. reconnecting)", async () => {
     const props = setup({ onAsk: jest.fn(() => false) });
     const input = screen.getByLabelText(/ask felix a question/i);
     fireEvent.change(input, { target: { value: "Who is Sarah?" } });
-    fireEvent.click(screen.getByLabelText(/send question/i));
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText(/send question/i));
+    });
 
     expect(props.onAsk).toHaveBeenCalled();
     expect((input as HTMLInputElement).value).toBe("Who is Sarah?");
   });
 
-  it("renders interview markdown and requests a linked expansion", () => {
+  it("keeps the typed question when an async send resolves false", async () => {
+    // The REST transport only learns the ask failed once the response lands, so
+    // the retry-without-retyping contract has to survive a promise, not just a
+    // synchronous false.
+    const props = setup({ onAsk: jest.fn(async () => false) });
+    const input = screen.getByLabelText(/ask felix a question/i);
+    fireEvent.change(input, { target: { value: "Who is Sarah?" } });
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText(/send question/i));
+    });
+
+    expect(props.onAsk).toHaveBeenCalled();
+    expect((input as HTMLTextAreaElement).value).toBe("Who is Sarah?");
+  });
+
+  it("flushes pending notes before the question goes out", async () => {
+    const order: string[] = [];
+    const props = setup({
+      onBeforeAsk: jest.fn(async () => {
+        order.push("flush");
+      }),
+      onAsk: jest.fn(() => {
+        order.push("ask");
+        return true;
+      }),
+    });
+    fireEvent.change(screen.getByLabelText(/ask felix a question/i), {
+      target: { value: "Did we agree on the price?" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText(/send question/i));
+    });
+
+    expect(props.onBeforeAsk).toHaveBeenCalled();
+    expect(order).toEqual(["flush", "ask"]);
+  });
+
+  it("still asks when the notes flush fails", async () => {
+    const props = setup({
+      onBeforeAsk: jest.fn(async () => {
+        throw new Error("offline");
+      }),
+    });
+    fireEvent.change(screen.getByLabelText(/ask felix a question/i), {
+      target: { value: "Did we agree on the price?" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText(/send question/i));
+    });
+
+    expect(props.onAsk).toHaveBeenCalledWith("Did we agree on the price?");
+  });
+
+  it("renders interview markdown and requests a linked expansion", async () => {
     const interviewItem: AssistItem = {
       ...items[1],
       id: "interview-1",
@@ -126,7 +185,9 @@ describe("AssistSidebar", () => {
       "maxlength",
       "6000",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Full solution" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Full solution" }));
+    });
     expect(props.onAsk).toHaveBeenCalledWith("Solve two sum", {
       intent: "expand",
       parentItemId: "interview-1",

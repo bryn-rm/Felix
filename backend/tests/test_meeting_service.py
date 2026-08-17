@@ -90,8 +90,12 @@ def _install_db(monkeypatch, fake: FakeDB):
 
 
 def _meeting(**over):
+    # Non-empty notes by default: summarize_meeting skips the model call
+    # entirely when there is no transcript AND no notes, so a meeting with
+    # something to summarize is what these tests mean by "a meeting".
     base = {"id": "m-1", "user_id": "u-1", "template": "general",
-            "user_notes": "", "attendees": [], "title": None, "status": "processing"}
+            "user_notes": "We discussed the roadmap.", "attendees": [],
+            "title": None, "status": "processing"}
     base.update(over)
     return base
 
@@ -357,6 +361,39 @@ async def test_summarize_sets_error_on_ai_failure(monkeypatch):
     assert fake.inserts("meeting_summaries") == []
 
 
+async def test_summarize_skips_the_model_when_there_is_nothing_to_summarize(monkeypatch):
+    """A manual session opened and finished with no notes has no transcript by
+    construction. Summarizing two empty strings costs a Sonnet call and can
+    strand the meeting in 'error' behind a Retry that re-runs the same call."""
+    fake = FakeDB(meeting=_meeting(user_notes=""))
+    _install_db(monkeypatch, fake)
+    summarize = AsyncMock()
+    monkeypatch.setattr(ai_service, "summarize_meeting", summarize)
+
+    result = await meeting_service.summarize_meeting("u-1", "m-1")
+
+    assert result is None
+    summarize.assert_not_awaited()
+    assert fake.status_updates() == ["done"]      # terminal, not 'error'
+    assert fake.inserts("meeting_summaries") == []
+
+
+async def test_summarize_still_runs_on_notes_alone(monkeypatch):
+    """Notes with no transcript is the ordinary manual-session case."""
+    fake = FakeDB(meeting=_meeting(user_notes="Agreed to ship on Friday."))
+    _install_db(monkeypatch, fake)
+    monkeypatch.setattr(ai_service, "summarize_meeting", AsyncMock(return_value={
+        "tldr": "Shipping Friday", "decisions": [], "action_items": [],
+        "enhanced_notes": [], "confidence": 0.8,
+    }))
+
+    result = await meeting_service.summarize_meeting("u-1", "m-1")
+
+    assert result["tldr"] == "Shipping Friday"
+    assert fake.status_updates() == ["done"]
+    assert fake.inserts("meeting_summaries")
+
+
 async def test_summarize_recovers_meeting_from_error(monkeypatch):
     """A meeting left in 'error' is re-summarized and lands 'done' (recovery)."""
     fake = FakeDB(meeting=_meeting(status="error"))
@@ -404,6 +441,38 @@ async def test_start_meeting_creates_recording_row(monkeypatch):
     assert row["user_role"] is None
     assert row["title"] == "Roadmap"
     assert row["started_at"] is not None
+
+
+async def test_start_manual_session_persists_source_and_prefetches_off_request_path(monkeypatch):
+    fake = FakeDB()
+    _install_db(monkeypatch, fake)
+    prefetch = AsyncMock()
+    monkeypatch.setattr("app.services.live_assist_service.prefetch_context", prefetch)
+    spawned = []
+    monkeypatch.setattr(
+        "app.services.meeting_service.spawn",
+        lambda coro, name=None: spawned.append(name) or coro.close(),
+    )
+
+    await meeting_service.start_meeting(
+        "u-1", title="In-person interview", source="manual_notes",
+    )
+
+    assert fake.inserts("meetings")[0]["source"] == "manual_notes"
+    # Spawned, never awaited: the history query sorts on an unindexed COALESCE,
+    # so awaiting it here made start latency scale with the user's meeting count.
+    prefetch.assert_not_awaited()
+    assert spawned == ["live_assist_prefetch"]
+
+
+async def test_start_meeting_rejects_unknown_source(monkeypatch):
+    fake = FakeDB()
+    _install_db(monkeypatch, fake)
+
+    with pytest.raises(ValueError):
+        await meeting_service.start_meeting("u-1", source="manual-notes")
+
+    assert fake.inserts("meetings") == []
 
 
 async def test_start_meeting_accepts_unclassified_legacy_interview(monkeypatch):
