@@ -1567,6 +1567,7 @@ class LiveAssistWatcher:
                 _ai.client.messages.create(
                     model=model,
                     max_tokens=max_tokens,
+                    **_ai.thinking_kwarg(model),
                     system=LIVE_ASSIST_SYSTEM,
                     messages=[{"role": "user", "content": prompt}],
                     timeout=CALL_TIMEOUT_S,

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # AI
     ANTHROPIC_API_KEY: str
-    ANTHROPIC_MODEL_SMART: str = "claude-sonnet-4-6"
+    ANTHROPIC_MODEL_SMART: str = "claude-sonnet-5"
     ANTHROPIC_MODEL_FAST: str = "claude-haiku-4-5-20251001"
 
     # ElevenLabs

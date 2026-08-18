@@ -911,7 +911,7 @@ async def _claude_json(
     """
     from anthropic import AsyncAnthropic
 
-    from app.services.ai_service import log_ai_call
+    from app.services.ai_service import FAST_THINKING, log_ai_call
 
     client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=120.0, max_retries=2)
     started = time.monotonic()
@@ -923,6 +923,7 @@ async def _claude_json(
         response = await client.messages.create(
             model=settings.ANTHROPIC_MODEL_FAST,
             max_tokens=max_tokens,
+            **FAST_THINKING,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.content[0].text

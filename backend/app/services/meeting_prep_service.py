@@ -28,7 +28,7 @@ from app.config import settings as _settings
 from app.middleware.auth import get_google_credentials
 from app.prompts.meeting_prep import MEETING_PREP_PROMPT
 from app.services import memory_service
-from app.services.ai_service import log_ai_call
+from app.services.ai_service import SMART_THINKING, log_ai_call
 from app.services.calendar_service import CalendarService
 from app.services.polish_service import (
     _html_to_text,
@@ -205,6 +205,7 @@ class MeetingPrepService:
             response = await _client.messages.create(
                 model=_settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=1200,
+                **SMART_THINKING,
                 system=system_prompt,
                 messages=[{
                     "role": "user",

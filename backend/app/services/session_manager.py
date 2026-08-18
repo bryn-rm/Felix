@@ -262,7 +262,7 @@ async def _summarise_conversation(user_id: str, conversation: str) -> dict:
     import time as _time
 
     from app.prompts.memory import SESSION_SUMMARY_PROMPT
-    from app.services.ai_service import log_ai_call
+    from app.services.ai_service import FAST_THINKING, log_ai_call
 
     _client = AsyncAnthropic(api_key=_settings.ANTHROPIC_API_KEY, timeout=30.0, max_retries=1)
 
@@ -275,6 +275,7 @@ async def _summarise_conversation(user_id: str, conversation: str) -> dict:
         response = await _client.messages.create(
             model=_settings.ANTHROPIC_MODEL_FAST,
             max_tokens=500,
+            **FAST_THINKING,
             messages=[{
                 "role": "user",
                 "content": SESSION_SUMMARY_PROMPT.format(conversation=conversation[:12000]),

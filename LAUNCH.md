@@ -46,7 +46,7 @@ GCP_REGION=europe-west2
 
 # ── Anthropic ─────────────────────────────────────────────────
 ANTHROPIC_API_KEY=sk-ant-xxxx
-ANTHROPIC_MODEL_SMART=claude-sonnet-4-6          # leave as-is
+ANTHROPIC_MODEL_SMART=claude-sonnet-5            # leave as-is
 ANTHROPIC_MODEL_FAST=claude-haiku-4-5-20251001   # leave as-is
 
 # ── ElevenLabs ────────────────────────────────────────────────

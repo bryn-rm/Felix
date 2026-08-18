@@ -14,7 +14,7 @@ from app import db
 from app.config import settings as _settings
 from app.prompts._helpers import wrap_untrusted
 from app.prompts.weekly_review import WEEKLY_REVIEW_PROMPT
-from app.services.ai_service import log_ai_call
+from app.services.ai_service import SMART_THINKING, log_ai_call
 from app.services import memory_service
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,7 @@ class PolishService:
             response = await _client.messages.create(
                 model=_settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=2000,
+                **SMART_THINKING,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_message}],
             )
@@ -362,6 +363,7 @@ class PolishService:
             response = await _client.messages.create(
                 model=_settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=2000,
+                **SMART_THINKING,
                 system=system_prompt,
                 messages=[{
                     "role": "user",

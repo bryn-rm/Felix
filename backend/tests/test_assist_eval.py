@@ -61,6 +61,8 @@ async def _watch_once(client, digest: dict, shown_titles: list[str],
     response = await client.messages.create(
         model=settings.ANTHROPIC_MODEL_FAST,
         max_tokens=350,
+        # Mirror the production watch call exactly, thinking policy included.
+        **las._ai.thinking_kwarg(settings.ANTHROPIC_MODEL_FAST),
         system=LIVE_ASSIST_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )

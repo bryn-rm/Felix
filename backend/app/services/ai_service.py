@@ -1,9 +1,11 @@
 """
 All Claude API calls live here.
 
-Models:
-  claude-sonnet-4-6        → drafts, style analysis, meeting notes, briefing
+Models (both configurable — see ANTHROPIC_MODEL_SMART / _FAST):
+  claude-sonnet-5           → drafts, style analysis, meeting notes, briefing
   claude-haiku-4-5-20251001 → triage, voice intent routing, follow-up detection
+
+Every call here disables thinking explicitly — see the thinking policy below.
 
 draft_reply() is an async generator — consume with:
   async for chunk in ai_service.draft_reply(...):
@@ -35,6 +37,40 @@ from app.prompts.voice_intent import VOICE_INTENT_PROMPT
 logger = logging.getLogger(__name__)
 
 client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=120.0, max_retries=2)
+
+
+# ---------------------------------------------------------------------------
+# Thinking policy
+#
+# Claude 5-series models run adaptive thinking when `thinking` is omitted
+# (Sonnet 4.6 and Haiku 4.5 ran without it), and max_tokens is one ceiling over
+# thinking + reply. Every call in this codebase sizes max_tokens for the reply
+# alone — several are tight JSON budgets on the live-meeting path — so thinking
+# is turned off explicitly instead of left to the model default. Models that
+# never think unless asked are sent no thinking parameter at all.
+#
+# To buy the reasoning back on one surface, drop its **SMART_THINKING line and
+# raise that call's max_tokens to cover the thinking as well as the reply.
+# ---------------------------------------------------------------------------
+
+_THINKS_BY_DEFAULT = (
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
+
+def thinking_kwarg(model: str) -> dict:
+    """`thinking` kwargs for a call whose max_tokens budgets the reply only."""
+    name = (model or "").lower()
+    if name.startswith(_THINKS_BY_DEFAULT):
+        return {"thinking": {"type": "disabled"}}
+    return {}
+
+
+SMART_THINKING = thinking_kwarg(settings.ANTHROPIC_MODEL_SMART)
+FAST_THINKING = thinking_kwarg(settings.ANTHROPIC_MODEL_FAST)
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +180,8 @@ def _estimate_billable_units(model: str, input_tokens: int, output_tokens: int) 
     surface against MONTHLY_AI_UNIT_LIMIT, not an actual billing figure.
     """
     name = (model or "").lower()
+    if "opus" in name:
+        return input_tokens * 5 + output_tokens * 25
     if "sonnet" in name:
         return input_tokens * 3 + output_tokens * 15
     if "haiku" in name:
@@ -241,6 +279,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_FAST,
                 max_tokens=500,
+                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -322,6 +361,7 @@ class AIService:
             async with client.messages.stream(
                 model=settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=1000,
+                **SMART_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -400,6 +440,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=1000,
+                **SMART_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -453,6 +494,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=2000,
+                **SMART_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -523,6 +565,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=4000,
+                **SMART_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -587,6 +630,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=400,
+                **SMART_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -631,6 +675,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_FAST,
                 max_tokens=200,
+                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -708,6 +753,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_FAST,
                 max_tokens=300,
+                **FAST_THINKING,
                 **_system_kwarg(memory_context, extra_system=voice_system),
                 messages=[{
                     "role": "user",
@@ -831,6 +877,7 @@ class AIService:
                 response = await client.messages.create(
                     model=settings.ANTHROPIC_MODEL_SMART,
                     max_tokens=1024,
+                    **SMART_THINKING,
                     tools=tools,
                     **_system_kwarg(memory_context, extra_system=chat_system),
                     messages=messages,
@@ -897,6 +944,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_FAST,
                 max_tokens=300,
+                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -963,6 +1011,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_FAST,
                 max_tokens=600,
+                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -1069,6 +1118,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_SMART,
                 max_tokens=400,
+                **SMART_THINKING,
                 **_system_kwarg(None),
                 messages=[{
                     "role": "user",
@@ -1153,6 +1203,7 @@ class AIService:
             response = await client.messages.create(
                 model=settings.ANTHROPIC_MODEL_FAST,
                 max_tokens=200,
+                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
