@@ -317,6 +317,55 @@ async def list_assist_items(
     return {"items": [item_to_wire(r) for r in rows]}
 
 
+@router.get("/{meeting_id}/live-view")
+@limiter.limit("60/minute")
+async def get_live_assist_view(
+    meeting_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Read-only snapshot for the Live Assist viewer (phone / second screen).
+
+    One poll returns everything a viewer needs: enough of the meeting row to
+    name it and tell whether it is still live, plus the assist cards persisted
+    so far. Deliberately NOT `GET /meetings/{id}` — that response carries the
+    whole transcript, which a 3-second poll would re-download for the length of
+    the meeting, and its consumers (the live + detail pages) would break if we
+    trimmed it.
+
+    This is a pure read: it issues SELECTs and nothing else. It never opens the
+    capture socket, starts STT, or starts a second assist watcher — those live
+    on the capture WebSocket, which the viewer never connects to — so opening
+    the meeting on a second device cannot take capture ownership away from the
+    laptop that started it.
+    """
+    user_id = current_user["id"]
+    if not await _assist_enabled(user_id):
+        raise HTTPException(status_code=404, detail="Not found")
+    meeting = await db.query_one(
+        # Named columns, not SELECT *: the viewer has no business receiving
+        # user_notes or the kilobyte live_context digest, and this row is
+        # re-sent on every poll.
+        "SELECT id, title, status, source, template, meeting_type, user_role, "
+        "started_at, ended_at "
+        "FROM meetings WHERE id = $1 AND user_id = $2",
+        meeting_id, user_id,
+    )
+    if not meeting:
+        raise HTTPException(status_code=404, detail="meeting not found")
+    rows = await db.query(
+        # Dismissed cards are filtered in SQL rather than client-side (as the
+        # capture page does): the viewer cannot dismiss, so a dismissed card is
+        # dead weight on every poll — and this is what makes the laptop's
+        # dismissals propagate to the phone.
+        "SELECT * FROM meeting_assist_items "
+        "WHERE user_id = $1 AND meeting_id = $2 AND dismissed = FALSE "
+        "ORDER BY created_at",
+        user_id, meeting_id,
+    )
+    return {"meeting": meeting, "items": [item_to_wire(r) for r in rows]}
+
+
 @router.post("/{meeting_id}/assist/ask")
 @limiter.limit("12/minute")
 async def ask_standalone_assist(

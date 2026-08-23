@@ -39,7 +39,8 @@ export function AssistCard({
   askPending = false,
 }: {
   item: AssistItem;
-  onDismiss: (id: string) => void;
+  /** Omitted by read-only surfaces (the Live Assist viewer): no dismiss control. */
+  onDismiss?: (id: string) => void;
   onExpand?: (question: string, options: AssistAskOptions) => boolean | Promise<boolean>;
   askPending?: boolean;
 }) {
@@ -56,13 +57,15 @@ export function AssistCard({
           </span>
           {ts && <span className="text-[10px] text-slate-500">{ts}</span>}
         </div>
-        <button
-          onClick={() => onDismiss(item.id)}
-          aria-label="Dismiss suggestion"
-          className="rounded p-0.5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
+        {onDismiss && (
+          <button
+            onClick={() => onDismiss(item.id)}
+            aria-label="Dismiss suggestion"
+            className="rounded p-0.5 text-slate-500 hover:bg-slate-700/50 hover:text-slate-300"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
       {item.question && (
         <p className="mt-2 text-xs italic text-slate-500">“{item.question}”</p>

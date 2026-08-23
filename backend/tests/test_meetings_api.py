@@ -498,6 +498,173 @@ def test_notes_are_refused_once_the_meeting_is_no_longer_recording(client, monke
     assert client.post("/meetings/m-1/notes", json={"content": "ok"}).status_code == 200
 
 
+# ---------------------------------------------------------------------------
+# Live Assist viewer (phone / second screen) — read-only snapshot
+# ---------------------------------------------------------------------------
+
+_VIEW_MEETING_ROW = {
+    "id": "m-1", "title": "Roadmap", "status": "recording",
+    "source": "browser_capture", "template": "general",
+    "meeting_type": "general", "user_role": None,
+    "started_at": None, "ended_at": None,
+}
+
+
+def test_live_view_404s_when_assist_disabled(client, monkeypatch):
+    """Fail closed on the same double-gate as the rest of the assist surface."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_capture_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=False))
+
+    assert client.get("/meetings/m-1/live-view").status_code == 404
+
+
+def test_live_view_returns_meeting_identity_and_undismissed_items(client, monkeypatch):
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        meetings_api.db, "query_one", AsyncMock(return_value=dict(_VIEW_MEETING_ROW)),
+    )
+    item_query = AsyncMock(return_value=[{
+        "id": "i-1", "kind": "fact", "source": "proactive", "question": None,
+        "title": "Renewal is Friday", "body": "Agreed by email last week.",
+        "transcript_ts": 12.5, "dismissed": False,
+        "usefulness_score": 0.9, "trigger_type": "question",
+        "prompt_version": "v1", "request_id": None, "metadata": {},
+        "model": "haiku", "created_at": datetime(2026, 8, 23, tzinfo=timezone.utc),
+    }])
+    monkeypatch.setattr(meetings_api.db, "query", item_query)
+
+    resp = client.get("/meetings/m-1/live-view")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["meeting"]["title"] == "Roadmap"
+    assert body["meeting"]["status"] == "recording"
+    assert body["items"][0]["id"] == "i-1"
+    # Same display-only wire item the capture page gets — no eval internals.
+    assert "usefulness_score" not in body["items"][0]
+    # Dismissed cards are excluded in SQL: the viewer cannot dismiss, so a
+    # dismissed card would be dead weight on every poll.
+    assert "dismissed = FALSE" in item_query.await_args.args[0]
+
+
+def test_live_view_does_not_expose_transcript_notes_or_context(client, monkeypatch):
+    """The viewer is an assist surface, not a second copy of the workspace.
+
+    A 3-second poll must not re-download the transcript, the user's notes, or
+    the kilobyte live_context digest.
+    """
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    meeting_query = AsyncMock(return_value=dict(_VIEW_MEETING_ROW))
+    monkeypatch.setattr(meetings_api.db, "query_one", meeting_query)
+    monkeypatch.setattr(meetings_api.db, "query", AsyncMock(return_value=[]))
+
+    body = client.get("/meetings/m-1/live-view").json()
+
+    assert set(body) == {"meeting", "items"}
+    for leaked in ("user_notes", "live_context", "segments", "transcript"):
+        assert leaked not in body["meeting"]
+        assert leaked not in meeting_query.await_args.args[0]
+
+
+def test_live_view_is_scoped_to_the_owner(client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    meeting_query = AsyncMock(return_value=None)   # someone else's meeting
+    monkeypatch.setattr(meetings_api.db, "query_one", meeting_query)
+
+    assert client.get("/meetings/m-1/live-view").status_code == 404
+    # id + user_id both in the WHERE — ownership enforced in SQL.
+    assert meeting_query.await_args.args[1:] == ("m-1", "user-cap-1")
+
+
+def test_live_view_is_a_pure_read_and_never_touches_capture(client, monkeypatch):
+    """The core viewer invariant: opening it changes nothing.
+
+    A second device reading the meeting must not take capture ownership, write
+    to the row, spawn background work, open an STT session, or start a second
+    live-assist watcher. Asserted structurally — every statement the route
+    issues is a SELECT, and the capture/assist entry points are never called.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.api import meetings as meetings_api
+    from app.services import live_assist_service, meeting_stt_service
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+
+    statements: list[str] = []
+
+    async def record_one(sql, *args):
+        statements.append(sql)
+        return dict(_VIEW_MEETING_ROW)
+
+    async def record_many(sql, *args):
+        statements.append(sql)
+        return []
+
+    monkeypatch.setattr(meetings_api.db, "query_one", record_one)
+    monkeypatch.setattr(meetings_api.db, "query", record_many)
+    monkeypatch.setattr(meetings_api.db, "execute", AsyncMock())
+    monkeypatch.setattr(meetings_api.db, "insert", AsyncMock())
+    monkeypatch.setattr(meetings_api.db, "update", AsyncMock())
+
+    spawn = MagicMock()
+    monkeypatch.setattr(meetings_api, "spawn", spawn)
+    start_watcher = AsyncMock()
+    monkeypatch.setattr(live_assist_service, "maybe_start_watcher", start_watcher)
+    stt_session = MagicMock()
+    monkeypatch.setattr(meeting_stt_service, "session", stt_session)
+    end_meeting = AsyncMock()
+    monkeypatch.setattr(meetings_api.meeting_service, "end_meeting", end_meeting)
+
+    assert client.get("/meetings/m-1/live-view").status_code == 200
+
+    assert statements, "the viewer should have read something"
+    for sql in statements:
+        assert sql.strip().upper().startswith("SELECT"), sql
+    meetings_api.db.execute.assert_not_awaited()
+    meetings_api.db.insert.assert_not_awaited()
+    meetings_api.db.update.assert_not_awaited()
+    spawn.assert_not_called()
+    start_watcher.assert_not_awaited()
+    stt_session.assert_not_called()
+    end_meeting.assert_not_awaited()
+
+
+def test_live_view_still_serves_an_ended_meeting(client, monkeypatch):
+    """Read-only after the end: the cards stay readable, the status says done."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(meetings_api.db, "query_one", AsyncMock(
+        return_value={**_VIEW_MEETING_ROW, "status": "done"},
+    ))
+    monkeypatch.setattr(meetings_api.db, "query", AsyncMock(return_value=[]))
+
+    resp = client.get("/meetings/m-1/live-view")
+
+    assert resp.status_code == 200
+    assert resp.json()["meeting"]["status"] == "done"
+
+
 # ===========================================================================
 # WebSocket
 # ===========================================================================

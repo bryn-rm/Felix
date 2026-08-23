@@ -323,6 +323,18 @@ export default function LiveMeetingPage({ params }: PageProps) {
               {connecting ? "Starting…" : "Finishing up…"}
             </div>
           )}
+          {/* This is the state a phone lands in when the laptop is already
+              capturing — the capture controls above are useless to it, so point
+              it at the read-only viewer. Fails closed with the assist flag: the
+              viewer endpoint 404s without it. */}
+          {assistEnabled && (
+            <Link
+              href={`/meetings/live/${id}/viewer`}
+              className="text-xs font-medium text-indigo-400 hover:text-indigo-300"
+            >
+              Following along on another device? Open the live assist view →
+            </Link>
+          )}
         </div>
       ) : (
         /* Live: transcript + notes side by side, with the assist panel as a

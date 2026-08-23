@@ -382,6 +382,29 @@ export interface MeetingDetail {
   summary: MeetingSummary | null;
 }
 
+/**
+ * The slice of the meeting row the Live Assist viewer receives. Narrower than
+ * `Meeting` on purpose — no notes, no transcript, nothing the read-only phone
+ * surface has no use for.
+ */
+export interface LiveAssistViewMeeting {
+  id: string;
+  title: string | null;
+  status: MeetingStatus;
+  source: string;
+  template: MeetingTemplate | string | null;
+  meeting_type: MeetingType | null;
+  user_role: MeetingUserRole | null;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+/** GET /meetings/{id}/live-view — read-only snapshot polled by the viewer. */
+export interface LiveAssistView {
+  meeting: LiveAssistViewMeeting;
+  items: AssistItem[];
+}
+
 export interface MeetingPrep {
   id?: string;
   subject: string;
