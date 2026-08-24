@@ -20,6 +20,7 @@ from app import db
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import check_monthly_ai_budget, limiter
 from app.models.meeting import (
+    CAPTURE_HEARTBEAT_STALE_S,
     MEETING_SOURCE_CAPTURE,
     MEETING_SOURCE_MANUAL,
     MeetingType,
@@ -28,7 +29,7 @@ from app.models.meeting import (
 )
 from app.services.live_assist_service import (
     _assist_enabled,
-    answer_standalone_question,
+    answer_typed_question,
     forget_meeting,
     item_to_wire,
     prefetch_context,
@@ -347,38 +348,59 @@ async def get_live_assist_view(
         # user_notes or the kilobyte live_context digest, and this row is
         # re-sent on every poll.
         "SELECT id, title, status, source, template, meeting_type, user_role, "
-        "started_at, ended_at "
+        "started_at, ended_at, "
+        "CASE WHEN source = $3 THEN "
+        "  status = 'recording' "
+        "  AND capture_connection_id IS NOT NULL "
+        # Interpolated, not a bound parameter: it is a module constant that
+        # must stay pinned to the writer's heartbeat interval, and keeping the
+        # query text constant preserves the prepared-statement cache.
+        f"  AND capture_heartbeat_at >= NOW() - INTERVAL '{CAPTURE_HEARTBEAT_STALE_S} seconds' "
+        "ELSE NULL END AS capture_attached "
         "FROM meetings WHERE id = $1 AND user_id = $2",
-        meeting_id, user_id,
+        meeting_id, user_id, MEETING_SOURCE_CAPTURE,
     )
     if not meeting:
         raise HTTPException(status_code=404, detail="meeting not found")
     rows = await db.query(
-        # Dismissed cards are filtered in SQL rather than client-side (as the
-        # capture page does): the viewer cannot dismiss, so a dismissed card is
-        # dead weight on every poll — and this is what makes the laptop's
-        # dismissals propagate to the phone.
+        # Include dismissed rows so this snapshot can explicitly override an
+        # answer a client appended from its REST response before polling caught
+        # up. The client filters the flag after server rows win ID dedupe.
         "SELECT * FROM meeting_assist_items "
-        "WHERE user_id = $1 AND meeting_id = $2 AND dismissed = FALSE "
-        "ORDER BY created_at",
+        "WHERE user_id = $1 AND meeting_id = $2 ORDER BY created_at",
         user_id, meeting_id,
     )
-    return {"meeting": meeting, "items": [item_to_wire(r) for r in rows]}
+    capture_attached = meeting.pop("capture_attached", None)
+    return {
+        "meeting": meeting,
+        "items": [item_to_wire(r) for r in rows],
+        # Capture-owned, database-backed heartbeat state. Unlike the old local
+        # watcher registry this remains accurate when the viewer poll reaches a
+        # different Cloud Run instance or assist watcher startup failed.
+        "capture_attached": capture_attached,
+    }
 
 
 @router.post("/{meeting_id}/assist/ask")
 @limiter.limit("12/minute")
-async def ask_standalone_assist(
+async def ask_assist(
     meeting_id: str,
     body: AssistAskBody,
     request: Request,
     current_user: dict = Depends(get_current_user),
 ):
-    """Answer a typed question in a manual assistant session.
+    """Answer a typed question in an open session — the socket-less ask transport.
 
-    Audio capture normally carries asks over its WebSocket. Manual sessions
-    deliberately have no socket, microphone, or tab share, so they use this
-    scoped REST transport instead.
+    Two clients use it, and the answer they get is identical because both run
+    the same `_handle_ask`: a manual assistant session (which deliberately has
+    no socket, microphone, or tab share) and the phone viewer, which asks about
+    a meeting the capturing device is recording over its own WebSocket. Serving
+    the phone here is what keeps it out of the capture socket entirely — it
+    starts no STT, takes no watcher ownership, and cannot become capture owner.
+
+    Open means `status='recording'`, whatever the source. The capture client is
+    not required to be connected: an ask needs the persisted context and
+    transcript, not the socket.
     """
     user_id = current_user["id"]
     if not await _assist_enabled(user_id):
@@ -390,16 +412,12 @@ async def ask_standalone_assist(
         "FROM meetings WHERE id = $1 AND user_id = $2",
         meeting_id, user_id,
     )
-    if (
-        not meeting
-        or meeting.get("source") != MEETING_SOURCE_MANUAL
-        or meeting.get("status") != "recording"
-    ):
+    if not meeting or meeting.get("status") != "recording":
         raise HTTPException(status_code=404, detail="assistant session not open")
     if not meeting.get("has_context"):
         await prefetch_context(user_id, meeting_id)
 
-    payload = await answer_standalone_question(
+    payload = await answer_typed_question(
         user_id=user_id,
         meeting_id=meeting_id,
         question=body.question,

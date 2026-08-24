@@ -36,13 +36,32 @@ Concurrency contract with ``meetings_ws``:
   • all awaits happen inside the watcher's own task; ``aclose`` cancels rather
     than drains a long AI call.
 
-Manual assistant sessions have no socket to enqueue onto, so
-``answer_standalone_question`` drives one ask directly on a short-lived watcher
-(``start(run_loop=False)``) and awaits it on the request. That path is the one
-exception to the enqueue contract above; the limits it would otherwise lose to a
-per-request instance are restored explicitly — the ask cooldown is seeded from
-the newest persisted ask, and concurrent asks for one meeting serialize through
-``_standalone_ask_slot`` so the MAX_ASKS check can't be raced.
+Asks are transport-neutral. ``_handle_ask`` is the single implementation of
+what an ask *is* — limits, cooldown, budget, expansion rules, model choice,
+context, persistence — and every transport reaches it:
+
+  • the capture WebSocket enqueues via ``submit_ask`` onto the live watcher;
+  • REST callers (a manual session's ask box, and the phone viewer on a
+    captured meeting) go through ``answer_typed_question``, which drives one
+    ask on a short-lived watcher (``start(run_loop=False)``) and awaits it on
+    the request.
+
+The REST path is the one exception to the enqueue contract above. The limits it
+would otherwise lose to a per-request instance are restored explicitly: while
+the meeting's ask slot is held, every persisted item is folded back in, so each
+transport spends the same MAX_ASKS budget and answers against the same
+conversation regardless of which device or instance wrote it.
+
+Exactly one ask runs per meeting at a time, across transports and Cloud Run
+instances: ``_handle_ask`` takes a process-local fast-fail slot plus a shared
+PostgreSQL advisory lock, and refuses rather than queues when another ask holds
+either one.
+
+A ``request_id`` correlates an answer with the ask that asked for it, and is
+kept on the row. If a client ever does retry under the same id after the first
+attempt persisted, that answer is replayed rather than paid for twice — but
+neither client retries today (both mint a fresh id per attempt), so treat this
+as the correlation key it is, not as an idempotency guarantee to rely on.
 
 Fail closed: everything is gated on ``settings.live_assist_mode`` AND
 ``settings.meeting_capture_mode`` (see ``_assist_enabled``).
@@ -649,6 +668,10 @@ class LiveAssistWatcher:
         # survive both a WebSocket reconnect and the manual REST transport's
         # fresh watcher per request. MAX_ASKS bounds user turns for the meeting.
         self._conversation: list[tuple[str, str, str, str]] = []
+        # Ids of persisted items already folded into the state above, so the
+        # pre-ask refresh can absorb another device's rows without re-adding
+        # this watcher's own (see _absorb_persisted_items).
+        self._seen_item_ids: set[str] = set()
         # Proactive interview solves dedupe on the question, not on the answer
         # title — the title isn't known until after the expensive call.
         self._solved_normalized: set[str] = set()
@@ -671,6 +694,9 @@ class LiveAssistWatcher:
         self._cards_shown = 0
         self._asks = 0
         self._stopped_for_budget = False
+        # Set when a persist was refused because the meeting had ended under a
+        # long model call, so the ask can say that rather than "try again".
+        self._meeting_closed = False
         self._last_call_truncated = False
         self._last_call_timed_out = False
         self._last_call_parse_error = False
@@ -706,21 +732,7 @@ class LiveAssistWatcher:
         """
         await self._load_context()
 
-        rows = await db.query(
-            "SELECT title, body, source, question, created_at FROM meeting_assist_items "
-            "WHERE user_id = $1 AND meeting_id = $2 ORDER BY created_at",
-            self.user_id, self.meeting_id,
-        )
-        for row in rows:
-            self._remember_title(row.get("title") or "")
-            self._remember_conversation_item(row)
-            if row.get("source") == "proactive":
-                self._remember_solved(row.get("question") or "")
-        # Per-source counters: a meeting full of ask answers must not silence
-        # the proactive pipeline, and reconnecting must not reset the ask cap.
-        self._cards_shown = sum(1 for r in rows if r.get("source") == "proactive")
-        self._asks = sum(1 for r in rows if r.get("source") == "ask")
-        self._seed_ask_cooldown(rows)
+        await self._absorb_persisted_items()
 
         # A standalone session has no transcript segments by construction, so
         # this query is guaranteed to come back empty — and the REST ask path
@@ -764,7 +776,9 @@ class LiveAssistWatcher:
             newest = newest.replace(tzinfo=timezone.utc)
         age = (datetime.now(timezone.utc) - newest).total_seconds()
         if 0 <= age < ASK_MIN_INTERVAL_S:
-            self._last_ask_at = time.monotonic() - age
+            # max, not assignment: re-seeding mid-meeting must not rewind a
+            # cooldown this watcher started for an ask that never persisted.
+            self._last_ask_at = max(self._last_ask_at, time.monotonic() - age)
 
     def on_final(self, speaker: str, text: str, ts_start: float) -> None:
         """Sync enqueue from the WS transcript path — must never block or raise."""
@@ -1155,6 +1169,9 @@ class LiveAssistWatcher:
 
     def _ask_failure_message(self) -> str:
         """Retrying a truncated or timed-out answer just repeats it — say so."""
+        if self._meeting_closed:
+            # Retrying is hopeless: the meeting is summarized and closed to writes.
+            return "This meeting has ended."
         if self._last_call_truncated:
             return "That answer ran too long to show — ask for one part of it."
         if self._last_call_timed_out:
@@ -1193,10 +1210,118 @@ class LiveAssistWatcher:
         parent_item_id: str | None = None,
         focus: str | None = None,
     ) -> None:
+        """Transport-neutral entry point for one ask, serialized per meeting.
+
+        Every transport lands here: the capture WebSocket via the run loop, and
+        REST (a manual session's ask box, the phone viewer on a captured
+        meeting) via ``answer_typed_question``. The meeting's local + database
+        ask slot stops a phone ask and a laptop ask — even on different Cloud
+        Run instances — from both reaching the model. Whoever gets there second
+        is refused rather than queued.
+        """
+        async with _ask_slot(self.meeting_id) as acquired:
+            if not acquired:
+                await self._send_json({
+                    "type": "assist_error",
+                    "request_id": request_id,
+                    "message": "One question at a time — try again in a few seconds.",
+                })
+                return
+            # A capture watcher may have lived for hours while another device
+            # or instance persisted asks. The shared lock prevents a concurrent
+            # writer; absorb their rows now, before the cap, the cooldown or
+            # the conversation this ask is answered against is consulted.
+            await self._absorb_persisted_items()
+            await self._run_ask(
+                question,
+                request_id,
+                intent=intent,
+                parent_item_id=parent_item_id,
+                focus=focus,
+            )
+
+    async def _absorb_persisted_items(self) -> None:
+        """Fold every persisted assist item for this meeting into local state.
+
+        Run at seed and again before each ask, because a meeting's assist items
+        no longer have one writer: the phone asks over REST — building its own
+        watcher, on any instance — while the laptop's capture watcher can live
+        for hours. Refreshing only the ask counters would leave that watcher
+        resolving "tell me more about that" against a conversation missing the
+        phone's turn, and re-surfacing proactively what the phone just answered.
+
+        Strictly additive, never a rebuild. The proactive pipeline runs on this
+        watcher's own task and claims a solve before its card persists;
+        recomputing from persisted rows would drop that in-flight claim and let
+        a duplicate solve through. Counters take the max for the same reason: an
+        ask that spent a model call but persisted nothing (timeout, unparseable
+        answer, a persist refused because the meeting closed) already counted
+        against MAX_ASKS and has to keep counting — otherwise a systematically
+        failing ask is unbounded on the WebSocket transport, which has no HTTP
+        rate limit of its own.
+
+        Rows absorbed here append to the conversation in ``created_at`` order,
+        after anything this watcher persisted itself. That is a coarser ordering
+        than a merge would give, and deliberately so: the conversation is
+        context for the model, not a transcript the user reads.
+        """
+        rows = await db.query(
+            "SELECT id, title, body, source, question, created_at "
+            "FROM meeting_assist_items "
+            "WHERE user_id = $1 AND meeting_id = $2 ORDER BY created_at",
+            self.user_id, self.meeting_id,
+        )
+        for row in rows:
+            if str(row.get("id") or "") in self._seen_item_ids:
+                continue
+            self._remember_title(row.get("title") or "")
+            self._remember_conversation_item(row)
+            if row.get("source") == "proactive":
+                self._remember_solved(row.get("question") or "")
+        # Per-source counters: a meeting full of ask answers must not silence
+        # the proactive pipeline, and reconnecting must not reset the ask cap.
+        self._cards_shown = max(
+            self._cards_shown,
+            sum(1 for r in rows if r.get("source") == "proactive"),
+        )
+        self._asks = max(
+            self._asks,
+            sum(1 for r in rows if r.get("source") == "ask"),
+        )
+        self._seed_ask_cooldown(rows)
+
+    async def _run_ask(
+        self,
+        question: str,
+        request_id: str | None,
+        *,
+        intent: str = "answer",
+        parent_item_id: str | None = None,
+        focus: str | None = None,
+    ) -> None:
         async def fail(message: str) -> None:
             await self._send_json(
                 {"type": "assist_error", "request_id": request_id, "message": message}
             )
+
+        # Replay a request_id that already has an answer, BEFORE any limit is
+        # consulted: the first attempt may have persisted and started the
+        # cooldown a retry would now be rejected by. No client reuses an id
+        # today — both mint a fresh one per attempt — so this is insurance for
+        # a client that starts retrying, not a live path. Note the scope: this
+        # runs inside the ask slot, so it cannot answer a retry that arrives
+        # while the first attempt is still in the model; that one is refused as
+        # a concurrent ask, which is the correct answer for it anyway.
+        if request_id:
+            prior = await db.query_one(
+                "SELECT * FROM meeting_assist_items "
+                "WHERE user_id = $1 AND meeting_id = $2 AND request_id = $3 "
+                "ORDER BY created_at DESC LIMIT 1",
+                self.user_id, self.meeting_id, request_id,
+            )
+            if prior:
+                await self._send_json({"type": "assist", "item": item_to_wire(prior)})
+                return
 
         question = (question or "").strip()
         if not question or len(question) > ASK_MAX_CHARS:
@@ -1340,7 +1465,7 @@ class LiveAssistWatcher:
             ),
         )
         if item is None:
-            await fail("Couldn't answer that just now — try again.")
+            await fail(self._ask_failure_message())
             return
         self._remember_title(item["title"])
         await self._send_json({"type": "assist", "item": item})
@@ -1507,7 +1632,7 @@ class LiveAssistWatcher:
         )
         if item is None:
             if fail is not None:
-                await fail("Couldn't answer that just now — try again.")
+                await fail(self._ask_failure_message())
             return "error"
         self._remember_title(item["title"])
         if source == "proactive":
@@ -1656,30 +1781,71 @@ class LiveAssistWatcher:
         )
 
     async def _persist_item(self, **fields) -> dict | None:
-        """Insert a meeting_assist_items row; return the wire-format item dict."""
+        """Insert a meeting_assist_items row; return the wire-format item dict.
+
+        Refuses to write once the meeting has left ``recording``. The model call
+        that produced this item can run for up to CALL_TIMEOUT_S, which is ample
+        time for the capturing device to press Stop: the summary is built at that
+        moment, so a card landing afterwards would appear in a finished meeting
+        that was never summarized with it — and, for an ask, alongside a client
+        that has already navigated to the summary.
+        """
+        # Built inside the guard below, not before it: every caller passes
+        # these by keyword, so a missing one is a KeyError — and outside the
+        # try it would escape _persist_item entirely, past the callers' "could
+        # not answer" handling and (on the proactive path, which has none) out
+        # through _guarded as a watcher error. Degraded card, not dead watcher.
         try:
-            row = await db.insert(
-                "meeting_assist_items",
-                {
-                    "user_id":          self.user_id,
-                    "meeting_id":       self.meeting_id,
-                    "kind":             fields["kind"],
-                    "source":           fields["source"],
-                    "question":         fields["question"],
-                    "title":            fields["title"],
-                    "body":             fields["body"],
-                    "transcript_ts":    fields["transcript_ts"],
-                    "usefulness_score": fields["usefulness_score"],
-                    "trigger_type":     fields["trigger_type"],
-                    "prompt_version":   _ai.PROMPT_VERSIONS.get(
-                        fields.get("prompt_feature")
-                        or ("live_assist_watch" if fields["source"] == "proactive" else "live_assist_ask"),
-                        "v1",
-                    ),
-                    "request_id":       fields["request_id"],
-                    "metadata":         fields["metadata"] or {},
-                    "model":            fields["model"],
-                },
+            data = {
+                "user_id":          self.user_id,
+                "meeting_id":       self.meeting_id,
+                "kind":             fields["kind"],
+                "source":           fields["source"],
+                "question":         fields["question"],
+                "title":            fields["title"],
+                "body":             fields["body"],
+                "transcript_ts":    fields["transcript_ts"],
+                "usefulness_score": fields["usefulness_score"],
+                "trigger_type":     fields["trigger_type"],
+                "prompt_version":   _ai.PROMPT_VERSIONS.get(
+                    fields.get("prompt_feature")
+                    or ("live_assist_watch" if fields["source"] == "proactive" else "live_assist_ask"),
+                    "v1",
+                ),
+                "request_id":       fields["request_id"],
+                "metadata":         fields["metadata"] or {},
+                "model":            fields["model"],
+            }
+            # The row lock makes this serialize with /end's UPDATE. If /end
+            # wins, PostgreSQL re-checks the status predicate after waiting and
+            # inserts nothing; if this wins, the answer commits before /end.
+            row = await db.query_one(
+                "WITH open_meeting AS ("
+                "SELECT id FROM meetings "
+                "WHERE id = $1 AND user_id = $2 AND status = 'recording' "
+                "FOR UPDATE"
+                ") "
+                "INSERT INTO meeting_assist_items ("
+                "user_id, meeting_id, kind, source, question, title, body, "
+                "transcript_ts, usefulness_score, trigger_type, prompt_version, "
+                "request_id, metadata, model"
+                ") "
+                "SELECT $2, open_meeting.id, $3, $4, $5, $6, $7, $8, $9, "
+                "$10, $11, $12, $13, $14 FROM open_meeting RETURNING *",
+                self.meeting_id,
+                data["user_id"],
+                data["kind"],
+                data["source"],
+                data["question"],
+                data["title"],
+                data["body"],
+                data["transcript_ts"],
+                data["usefulness_score"],
+                data["trigger_type"],
+                data["prompt_version"],
+                data["request_id"],
+                data["metadata"],
+                data["model"],
             )
         except Exception:
             logger.warning(
@@ -1688,6 +1854,11 @@ class LiveAssistWatcher:
             )
             return None
         if not row:
+            self._meeting_closed = True
+            logger.info(
+                "live assist item dropped: meeting %s is no longer recording",
+                self.meeting_id,
+            )
             return None
         self._remember_conversation_item(row)
         return item_to_wire(row)
@@ -1707,6 +1878,12 @@ class LiveAssistWatcher:
         front of the user too. Rows without a body are legacy/incomplete and
         cannot contribute useful context.
         """
+        # Recorded before the body guard: an id that is skipped here must
+        # still be skipped by the next _absorb_persisted_items, or a bodyless
+        # row would re-run _remember_title/_remember_solved on every ask.
+        item_id = str(row.get("id") or "")
+        if item_id:
+            self._seen_item_ids.add(item_id)
         body = str(row.get("body") or "").strip()
         if not body:
             return
@@ -1833,7 +2010,7 @@ def forget_meeting(meeting_id: str) -> None:
 
 
 class _AskSlot:
-    """One meeting's REST-ask mutex, plus the count of holders/waiters on it."""
+    """One meeting's ask mutex, plus the count of holders/waiters on it."""
 
     __slots__ = ("lock", "users")
 
@@ -1842,33 +2019,89 @@ class _AskSlot:
         self.users = 0
 
 
-# Serializes standalone asks per meeting. Each REST ask rebuilds a watcher from
-# the persisted rows, so two concurrent requests would both read the same
-# `_asks` count, both pass the MAX_ASKS check, and both spend a Sonnet call —
-# the route's 12/minute allowance is not itself a concurrency bound. Entries are
-# dropped once nobody holds or waits on them, so this cannot grow unbounded.
-_standalone_ask_slots: dict[str, _AskSlot] = {}
+# One in-flight ask per meeting within this process. Without this a REST ask
+# (phone) and a WebSocket ask (laptop) run on different watcher instances that
+# each read `_asks` from the persisted rows before either writes, so both pass
+# the MAX_ASKS check and both spend a Sonnet call — and the route's 12/minute
+# allowance is not itself a concurrency bound.
+#
+# The PostgreSQL advisory lock below supplies the corresponding cross-instance
+# exclusion. Both are required because the shared lock connection treats a
+# repeated acquire in one process as successful.
+#
+# Entries are dropped once nobody holds or waits on them, so this cannot grow
+# unbounded.
+_ask_slots: dict[str, _AskSlot] = {}
 
 
 @asynccontextmanager
-async def _standalone_ask_slot(meeting_id: str):
-    slot = _standalone_ask_slots.get(meeting_id)
+async def _ask_slot(meeting_id: str):
+    """Yield True holding this meeting's local and database ask slots.
+
+    Refusing beats queueing: the caller's transport has a deadline
+    (ASK_TIMEOUT_MS in the browser), the answer would be generated against a
+    conversation that has since moved on, and the user has already been told
+    "one question at a time" by the cooldown that guards the same contract.
+    """
+    slot = _ask_slots.get(meeting_id)
     if slot is None:
         slot = _AskSlot()
-        _standalone_ask_slots[meeting_id] = slot
+        _ask_slots[meeting_id] = slot
     # Incremented before the first await, so a concurrent caller always sees a
     # nonzero count and never removes the slot out from under this one.
     slot.users += 1
     try:
-        async with slot.lock:
-            yield
+        # No await between the test and the acquire, so this cannot interleave.
+        if slot.lock.locked():
+            yield False
+        else:
+            async with slot.lock:
+                lock_key = f"felix_live_assist_ask:{meeting_id}"
+                try:
+                    owns_shared_lock = await db.try_advisory_lock(lock_key)
+                except Exception:
+                    logger.warning(
+                        "live assist ask lock failed for meeting %s",
+                        meeting_id,
+                        exc_info=True,
+                    )
+                    yield False
+                    return
+                if not owns_shared_lock:
+                    yield False
+                    return
+                try:
+                    yield True
+                finally:
+                    # Shielded: the caller is a request handler FastAPI
+                    # cancels when the browser aborts (its ASK_TIMEOUT_MS, or a
+                    # phone navigating away) while the model call is still
+                    # running. A bare `await` here would take the
+                    # CancelledError instead of issuing pg_advisory_unlock —
+                    # and db.py holds every advisory lock on one process-wide
+                    # session, so the lock would outlive the request and every
+                    # OTHER instance would be refused asks for this meeting
+                    # until the process restarted. Invisible on this instance,
+                    # where a same-session re-acquire succeeds.
+                    try:
+                        await asyncio.shield(db.advisory_unlock(lock_key))
+                    except asyncio.CancelledError:
+                        # The shielded unlock still runs to completion; let the
+                        # cancellation the caller asked for propagate.
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "live assist ask unlock failed for meeting %s",
+                            meeting_id,
+                            exc_info=True,
+                        )
     finally:
         slot.users -= 1
-        if slot.users == 0 and _standalone_ask_slots.get(meeting_id) is slot:
-            del _standalone_ask_slots[meeting_id]
+        if slot.users == 0 and _ask_slots.get(meeting_id) is slot:
+            del _ask_slots[meeting_id]
 
 
-async def answer_standalone_question(
+async def answer_typed_question(
     *,
     user_id: str,
     meeting_id: str,
@@ -1879,10 +2112,15 @@ async def answer_standalone_question(
     focus: str | None = None,
     user_email: str | None = None,
 ) -> dict:
-    """Run one typed ask without opening an audio/WebSocket session.
+    """Run one typed ask over REST, without opening an audio/WebSocket session.
 
-    The watcher is reused so manual asks keep the same limits, persistence,
-    interview-answer format, and expansion behaviour as captured meetings.
+    Serves every socket-less client: a manual assistant session's ask box, and
+    the phone viewer asking about a meeting the laptop is capturing. A watcher
+    is built and driven directly (``start(run_loop=False)``) so the ask keeps
+    the same limits, model, context, persistence, interview-answer format and
+    expansion behaviour as one typed on the capture client — transport decides
+    nothing. ``_handle_ask`` serializes it against any concurrent ask for the
+    same meeting, whichever transport that one arrived on.
 
     Always resolves to an ``assist`` or ``assist_error`` payload. The WS path
     runs ``_handle_ask`` inside ``_guarded``; without an equivalent here an
@@ -1894,30 +2132,27 @@ async def answer_standalone_question(
     async def collect(payload: dict) -> None:
         emitted.append(payload)
 
-    async with _standalone_ask_slot(meeting_id):
-        watcher = LiveAssistWatcher(
-            user_id=user_id,
-            meeting_id=meeting_id,
-            send_json=collect,
-            user_email=user_email,
+    watcher = LiveAssistWatcher(
+        user_id=user_id,
+        meeting_id=meeting_id,
+        send_json=collect,
+        user_email=user_email,
+    )
+    try:
+        await watcher.start(run_loop=False)
+        await watcher._handle_ask(
+            question,
+            request_id,
+            intent=intent,
+            parent_item_id=parent_item_id,
+            focus=focus,
         )
-        try:
-            await watcher.start(run_loop=False)
-            await watcher._handle_ask(
-                question,
-                request_id,
-                intent=intent,
-                parent_item_id=parent_item_id,
-                focus=focus,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning(
-                "standalone ask failed for meeting %s", meeting_id, exc_info=True
-            )
-        finally:
-            await watcher.aclose()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("typed ask failed for meeting %s", meeting_id, exc_info=True)
+    finally:
+        await watcher.aclose()
 
     for payload in reversed(emitted):
         if payload.get("type") in {"assist", "assist_error"}:

@@ -106,3 +106,16 @@ def uses_candidate_assist(
     return resolve_assist_meeting_mode(
         meeting_type, user_role, template
     ) in CANDIDATE_ASSIST_MODES
+
+
+# Capture-socket liveness, shared because the writer and the reader live in
+# different modules: app/api/meetings_ws.py writes the heartbeat, and the
+# viewer's /live-view query in app/api/meetings.py decides from it whether the
+# capturing device is still attached. Three numbers are coupled and must stay
+# ordered — the client's ping (PING_INTERVAL_MS, 20s, in useMeetingCapture.ts),
+# the write throttle below, and the staleness window. The window has to exceed
+# ping + throttle, or a healthy capture reads as disconnected; 45s tolerates one
+# missed ping plus one failed write while still turning a genuinely dropped
+# socket into shared state well inside the viewer's 3-second poll.
+CAPTURE_HEARTBEAT_INTERVAL_S = 10.0
+CAPTURE_HEARTBEAT_STALE_S = 45.0

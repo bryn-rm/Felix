@@ -5,23 +5,25 @@ import LiveMeetingPage from "@/app/(app)/meetings/live/[id]/page";
 import { ApiError } from "@/lib/api";
 import { useMeetingCapture } from "@/hooks/useMeetingCapture";
 import { useMeeting, useMeetings } from "@/hooks/useMeetings";
-import { useManualAssist } from "@/hooks/useManualAssist";
+import { useAssistAsk } from "@/hooks/useAssistAsk";
 
 const push = jest.fn();
 jest.mock("next/navigation", () => ({
   useRouter: () => ({ push }),
 }));
 
-jest.mock("@/hooks/useMeetingCapture", () => ({
+jest.mock("@/lib/capture-support", () => ({
   isMeetingCaptureSupported: () => true,
+}));
+jest.mock("@/hooks/useMeetingCapture", () => ({
   useMeetingCapture: jest.fn(),
 }));
 jest.mock("@/hooks/useMeetings", () => ({
   useMeeting: jest.fn(),
   useMeetings: jest.fn(),
 }));
-jest.mock("@/hooks/useManualAssist", () => ({
-  useManualAssist: jest.fn(),
+jest.mock("@/hooks/useAssistAsk", () => ({
+  useAssistAsk: jest.fn(),
 }));
 // The page reads the live_assist_mode flag via useSWR("/settings"); mock swr so
 // tests control the flag without touching the network. useAssistItems shares
@@ -32,7 +34,7 @@ import useSWR from "swr";
 const mockUseMeetingCapture = useMeetingCapture as jest.Mock;
 const mockUseMeeting = useMeeting as jest.Mock;
 const mockUseMeetings = useMeetings as jest.Mock;
-const mockUseManualAssist = useManualAssist as jest.Mock;
+const mockUseManualAssist = useAssistAsk as jest.Mock;
 const mockUseSWR = useSWR as unknown as jest.Mock;
 
 let failCapture: jest.Mock;

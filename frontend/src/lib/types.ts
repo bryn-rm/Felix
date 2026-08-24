@@ -155,6 +155,24 @@ export interface AssistItem {
   created_at: string;
 }
 
+/**
+ * Options on one ask. Lives here rather than in a transport hook: the same
+ * shape is used by the capture WebSocket, the REST ask, and the cards that
+ * offer expansions — none of which should have to import capture machinery for
+ * a type.
+ */
+export interface AssistAskOptions {
+  intent?: "answer" | "expand";
+  parentItemId?: string;
+  focus?: AssistExpansionFocus;
+}
+
+/** Sends one ask. Returns false when it couldn't be sent or answered. */
+export type AssistAskFn = (
+  question: string,
+  options?: AssistAskOptions,
+) => boolean | Promise<boolean>;
+
 export type TemplateCategory = "reply" | "outreach" | "follow_up" | "other";
 
 export interface Template {
@@ -399,10 +417,16 @@ export interface LiveAssistViewMeeting {
   ended_at: string | null;
 }
 
-/** GET /meetings/{id}/live-view — read-only snapshot polled by the viewer. */
+/** GET /meetings/{id}/live-view — the snapshot the viewer polls. */
 export interface LiveAssistView {
   meeting: LiveAssistViewMeeting;
   items: AssistItem[];
+  /**
+   * Is the capturing device's WebSocket still attached? `status` can't say —
+   * a dropped socket leaves the meeting 'recording'. null for a manual
+   * session, which has no socket to lose.
+   */
+  capture_attached: boolean | null;
 }
 
 export interface MeetingPrep {

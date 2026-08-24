@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 
 import LiveAssistViewerPage from "@/app/(app)/meetings/live/[id]/viewer/page";
@@ -30,7 +30,7 @@ const card = {
   transcript_ts: 12.5,
   dismissed: false,
   request_id: null,
-  expansion_options: ["code"],
+  expansion_options: [],
   created_at: "2026-08-23T10:00:00Z",
 };
 
@@ -46,6 +46,15 @@ const liveMeeting = {
   ended_at: null,
 };
 
+function snapshot(overrides: Record<string, unknown> = {}) {
+  return {
+    meeting: liveMeeting,
+    items: [card],
+    capture_attached: true,
+    ...overrides,
+  };
+}
+
 let openedSockets: string[];
 let getUserMedia: jest.Mock;
 let getDisplayMedia: jest.Mock;
@@ -58,6 +67,17 @@ function renderViewer() {
       <LiveAssistViewerPage params={{ id: "m-1" }} />
     </SWRConfig>,
   );
+}
+
+async function typeAndSend(question: string) {
+  fireEvent.change(screen.getByLabelText(/ask felix a question/i), {
+    target: { value: question },
+  });
+  // The send settles asynchronously; flushing inside act keeps the resulting
+  // state updates out of React's "not wrapped in act" warning.
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /send question/i }));
+  });
 }
 
 beforeEach(() => {
@@ -89,34 +109,48 @@ afterEach(() => {
 
 describe("LiveAssistViewerPage — capture isolation", () => {
   it("never opens a capture socket or asks for microphone / screen access", async () => {
-    mockGet.mockResolvedValue({ meeting: liveMeeting, items: [card] });
+    mockGet.mockResolvedValue(snapshot());
     renderViewer();
     await screen.findByText("Renewal is Friday");
 
-    // The whole point of the phone surface: it is a reader. Nothing it does
-    // can initialise recording or STT, or take capture ownership from the
-    // device that started the meeting.
+    // The invariant that survives the phone becoming interactive: it can ask
+    // questions, but it can never initialise recording or STT, and it cannot
+    // take capture ownership from the device that started the meeting.
     expect(openedSockets).toEqual([]);
     expect(getUserMedia).not.toHaveBeenCalled();
     expect(getDisplayMedia).not.toHaveBeenCalled();
   });
 
-  it("issues one read and no writes", async () => {
-    mockGet.mockResolvedValue({ meeting: liveMeeting, items: [card] });
+  it("asking goes over REST and still opens no socket", async () => {
+    mockGet.mockResolvedValue(snapshot());
+    mockPost.mockResolvedValue({ item: { ...card, id: "i-2", title: "Answer" } });
+    renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    await typeAndSend("What did they agree?");
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    expect(mockPost.mock.calls[0][0]).toBe("/meetings/m-1/assist/ask");
+    expect(openedSockets).toEqual([]);
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(getDisplayMedia).not.toHaveBeenCalled();
+  });
+
+  it("loads with one read and writes nothing until the user acts", async () => {
+    mockGet.mockResolvedValue(snapshot());
     renderViewer();
     await screen.findByText("Renewal is Friday");
 
     expect(mockGet).toHaveBeenCalledTimes(1);
     expect(mockGet).toHaveBeenCalledWith("/meetings/m-1/live-view");
-    // No dismiss, no ask, no lifecycle — the viewer cannot mutate the session.
     expect(mockPost).not.toHaveBeenCalled();
     expect(mockPut).not.toHaveBeenCalled();
     expect(mockDel).not.toHaveBeenCalled();
   });
 
-  it("exposes no recording, notes or ask controls", async () => {
-    mockGet.mockResolvedValue({ meeting: liveMeeting, items: [card] });
-    const { container } = renderViewer();
+  it("exposes no recording or notes controls", async () => {
+    mockGet.mockResolvedValue(snapshot());
+    renderViewer();
     await screen.findByText("Renewal is Friday");
 
     expect(
@@ -125,24 +159,94 @@ describe("LiveAssistViewerPage — capture isolation", () => {
     expect(
       screen.queryByRole("button", { name: /stop & summarize/i }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /dismiss suggestion/i }),
-    ).not.toBeInTheDocument();
-    // The ask box (a textarea) and the notes editor both write to the session.
-    expect(container.querySelector("textarea")).toBeNull();
-    // Expansion buttons cost an AI call, so they belong to the capture client.
-    expect(
-      screen.queryByRole("button", { name: /full solution/i }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/notes/i)).not.toBeInTheDocument();
   });
 });
 
-describe("LiveAssistViewerPage — rendering", () => {
-  it("shows meeting identity, live status and the persisted cards", async () => {
-    mockGet.mockResolvedValue({
-      meeting: { ...liveMeeting, meeting_type: "interview", user_role: "candidate" },
-      items: [card],
+describe("LiveAssistViewerPage — asking", () => {
+  it("sends the question and shows the answer without waiting for the next poll", async () => {
+    mockGet.mockResolvedValue(snapshot());
+    mockPost.mockResolvedValue({
+      item: { ...card, id: "i-2", source: "ask", title: "They agreed £40" },
     });
+    renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    await typeAndSend("What did they agree?");
+
+    expect(await screen.findByText("They agreed £40")).toBeInTheDocument();
+    expect(mockPost.mock.calls[0][1]).toMatchObject({
+      question: "What did they agree?",
+      intent: "answer",
+    });
+    // A request_id makes the ask idempotent server-side, so a retry replays the
+    // first answer instead of paying for a second.
+    expect(mockPost.mock.calls[0][1].request_id).toBeTruthy();
+  });
+
+  it("keeps the typed question when the ask fails, and clears pending", async () => {
+    mockGet.mockResolvedValue(snapshot());
+    mockPost.mockRejectedValue(new Error("network down"));
+    renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    await typeAndSend("What did they agree?");
+
+    const box = await screen.findByLabelText(/ask felix a question/i);
+    // Nothing typed mid-meeting should ever be lost to a failed send.
+    await waitFor(() => expect(box).toHaveValue("What did they agree?"));
+    // Pending must clear or the box stays disabled until a full reload.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /send question/i })).toBeEnabled(),
+    );
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("offers no ask box once the meeting has ended", async () => {
+    // The server refuses an ask on a closed session, so offering one here would
+    // only produce a rejection.
+    mockGet.mockResolvedValue(
+      snapshot({ meeting: { ...liveMeeting, status: "done" } }),
+    );
+    renderViewer();
+    await screen.findByText(/meeting ended/i);
+
+    expect(
+      screen.queryByLabelText(/ask felix a question/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/no new cards will appear/i)).toBeInTheDocument();
+  });
+
+  it("dismisses a card against the shared persisted state", async () => {
+    mockGet.mockResolvedValue(snapshot());
+    mockPost.mockResolvedValue({ dismissed: true });
+    renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /dismiss suggestion/i }));
+    });
+
+    await waitFor(() =>
+      expect(mockPost).toHaveBeenCalledWith(
+        "/meetings/m-1/assist/i-1/dismiss",
+        {},
+      ),
+    );
+    // Optimistic hide, then the server row is what both devices read back.
+    await waitFor(() =>
+      expect(screen.queryByText("Renewal is Friday")).not.toBeInTheDocument(),
+    );
+  });
+});
+
+describe("LiveAssistViewerPage — status", () => {
+  it("shows meeting identity, live status and the persisted cards", async () => {
+    mockGet.mockResolvedValue(
+      snapshot({
+        meeting: { ...liveMeeting, meeting_type: "interview", user_role: "candidate" },
+      }),
+    );
     renderViewer();
 
     expect(await screen.findByText("Roadmap")).toBeInTheDocument();
@@ -151,15 +255,45 @@ describe("LiveAssistViewerPage — rendering", () => {
     expect(screen.getByText("Renewal is Friday")).toBeInTheDocument();
   });
 
+  it("reports a dropped capture socket from server state, not from its own UI", async () => {
+    // meetings.status is still 'recording' here — only capture_attached says
+    // the capturing device is gone.
+    mockGet.mockResolvedValue(snapshot({ capture_attached: false }));
+    renderViewer();
+
+    expect(
+      await screen.findByText(/recording device isn’t connected/i),
+    ).toBeInTheDocument();
+    // Asks don't use that socket, so they stay available and say so.
+    expect(screen.getByText(/still ask questions/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/ask felix a question/i)).toBeInTheDocument();
+  });
+
+  it("reports nothing about liveness for a manual session", async () => {
+    mockGet.mockResolvedValue(
+      snapshot({
+        meeting: { ...liveMeeting, source: "manual_notes" },
+        capture_attached: null,
+      }),
+    );
+    renderViewer();
+
+    await screen.findByText("Renewal is Friday");
+    expect(
+      screen.queryByText(/recording device isn’t connected/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/recording on another device/i)).toBeInTheDocument();
+  });
+
   it("becomes an ended, read-only view once the meeting is over", async () => {
-    mockGet.mockResolvedValue({
-      meeting: { ...liveMeeting, status: "done", ended_at: "2026-08-23T10:30:00Z" },
-      items: [card],
-    });
+    mockGet.mockResolvedValue(
+      snapshot({
+        meeting: { ...liveMeeting, status: "done", ended_at: "2026-08-23T10:30:00Z" },
+      }),
+    );
     renderViewer();
 
     expect(await screen.findByText(/meeting ended/i)).toBeInTheDocument();
-    expect(screen.getByText(/no new cards will appear/i)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /view the summary/i })).toHaveAttribute(
       "href",
       "/meetings/m-1",

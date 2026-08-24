@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Trash2 } from "lucide-react";
 
+import { isMeetingCaptureSupported } from "@/lib/capture-support";
 import type { Meeting } from "@/lib/types";
 import { STATUS_META, templateLabel } from "@/components/meetings/constants";
 
@@ -18,9 +19,35 @@ function whenLabel(m: Meeting): string {
   });
 }
 
-/** Where a row links: live page while recording, detail otherwise. */
-function hrefFor(m: Meeting): string {
-  return m.status === "recording" ? `/meetings/live/${m.id}` : `/meetings/${m.id}`;
+/**
+ * Where a row links: the live surface while recording, detail otherwise.
+ *
+ * Which live surface depends on what the client can do, not on what it is. A
+ * capture-capable browser gets the capture page (unchanged — this is the
+ * laptop's normal path, including resuming after a refresh). A client that
+ * cannot capture would land there on a disabled Start button and have to click
+ * through, so it goes straight to the viewer, which is the only live surface it
+ * can actually use. A manual session has no capture step for anyone.
+ */
+function hrefFor(m: Meeting, canCapture: boolean): string {
+  if (m.status !== "recording") return `/meetings/${m.id}`;
+  if (canCapture || m.source === "manual_notes") return `/meetings/live/${m.id}`;
+  return `/meetings/live/${m.id}/viewer`;
+}
+
+/**
+ * Capability probe, resolved after mount.
+ *
+ * Starts true so the server render and the first client render agree (no
+ * hydration mismatch) and the laptop's link is right from the first paint; the
+ * effect then corrects it on a client that cannot capture. Deliberately a
+ * capability check rather than a user-agent test — a desktop browser without
+ * tab-audio sharing is an observer too.
+ */
+function useCanCapture(): boolean {
+  const [canCapture, setCanCapture] = useState(true);
+  useEffect(() => setCanCapture(isMeetingCaptureSupported()), []);
+  return canCapture;
 }
 
 export function MeetingList({
@@ -30,10 +57,11 @@ export function MeetingList({
   meetings: Meeting[];
   onDelete: (id: string) => Promise<void>;
 }) {
+  const canCapture = useCanCapture();
   return (
     <div className="space-y-3 pb-6">
       {meetings.map((m) => (
-        <MeetingRow key={m.id} m={m} onDelete={onDelete} />
+        <MeetingRow key={m.id} m={m} onDelete={onDelete} canCapture={canCapture} />
       ))}
     </div>
   );
@@ -42,9 +70,11 @@ export function MeetingList({
 function MeetingRow({
   m,
   onDelete,
+  canCapture,
 }: {
   m: Meeting;
   onDelete: (id: string) => Promise<void>;
+  canCapture: boolean;
 }) {
   const [deleting, setDeleting] = useState(false);
   const meta = STATUS_META[m.status] ?? STATUS_META.idle;
@@ -66,7 +96,7 @@ function MeetingRow({
 
   return (
     <Link
-      href={hrefFor(m)}
+      href={hrefFor(m, canCapture)}
       className="flex items-center justify-between gap-3 rounded-lg border border-slate-700/50 bg-slate-800/40 p-4 transition-colors hover:border-slate-600"
     >
       <div className="min-w-0 flex-1">

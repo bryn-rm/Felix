@@ -1,8 +1,7 @@
 "use client";
 
 import { X } from "lucide-react";
-import type { AssistItem, AssistKind } from "@/lib/types";
-import type { AssistAskOptions } from "@/hooks/useMeetingCapture";
+import type { AssistAskOptions, AssistItem, AssistKind } from "@/lib/types";
 import { AssistMarkdown } from "./AssistMarkdown";
 
 const KIND_STYLE: Record<AssistKind, { label: string; className: string }> = {

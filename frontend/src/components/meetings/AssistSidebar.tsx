@@ -1,10 +1,10 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
-import { Loader2, SendHorizonal, Sparkles, X } from "lucide-react";
-import type { AssistItem } from "@/lib/types";
-import type { AssistAskOptions } from "@/hooks/useMeetingCapture";
+import { useEffect, useRef } from "react";
+import { Sparkles, X } from "lucide-react";
+import type { AssistAskFn, AssistItem } from "@/lib/types";
 import { AssistCard } from "./AssistCard";
+import { AssistComposer } from "./AssistComposer";
 
 interface AssistSidebarProps {
   items: AssistItem[];
@@ -15,7 +15,7 @@ interface AssistSidebarProps {
    * the REST transport only knows once the response lands, so this may also be
    * a promise — either way the typed question survives a failure.
    */
-  onAsk: (question: string, options?: AssistAskOptions) => boolean | Promise<boolean>;
+  onAsk: AssistAskFn;
   askPending: boolean;
   askError: string | null;
   onClose: () => void;
@@ -45,61 +45,13 @@ export function AssistSidebar({
   standaloneMode = false,
   onBeforeAsk,
 }: AssistSidebarProps) {
-  const [question, setQuestion] = useState("");
-  const [submitting, setSubmitting] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
-  // askPending only goes true once onAsk runs, which is after an await here —
-  // this closes the window where two fast Enters would both get through.
-  const sendingRef = useRef(false);
-  const busy = submitting || askPending;
 
   // Keep the newest card in view as they arrive.
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [items.length]);
-
-  async function send() {
-    if (busy || sendingRef.current || !question.trim()) return;
-    const submittedQuestion = question;
-    sendingRef.current = true;
-    setSubmitting(true);
-    // Give immediate feedback. If the transport ultimately fails, restore the
-    // question below so retry is still one keypress and no text is lost.
-    setQuestion("");
-    try {
-      try {
-        await onBeforeAsk?.();
-      } catch {
-        // A failed notes flush is not a reason to refuse the question — it just
-        // means the answer sees slightly older notes.
-      }
-      // Keep the typed question if the send failed (e.g. socket reconnecting,
-      // or the request errored) so the user can retry instead of retyping it.
-      if (!(await onAsk(submittedQuestion))) {
-        // Do not overwrite a next question the user started drafting while the
-        // previous one was in flight.
-        setQuestion((current) => current || submittedQuestion);
-      }
-    } finally {
-      sendingRef.current = false;
-      setSubmitting(false);
-    }
-  }
-
-  function submit(e: FormEvent) {
-    e.preventDefault();
-    void send();
-  }
-
-  // A textarea has no implicit form submit, and mid-meeting the user reaches
-  // for Enter, not the send button. Shift+Enter keeps the newline so a pasted
-  // multi-line interview prompt is still editable.
-  function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
-    e.preventDefault();
-    void send();
-  }
 
   return (
     <div className="flex h-full min-h-0 flex-col rounded-lg border border-white/[0.04] bg-[#0d1526]/60">
@@ -139,48 +91,14 @@ export function AssistSidebar({
         )}
       </div>
 
-      <form onSubmit={submit} className="border-t border-white/[0.04] p-3">
-        {askError && !submitting && (
-          <p className="mb-2 text-xs text-red-400">{askError}</p>
-        )}
-        {busy && (
-          <p role="status" className="mb-2 flex items-center gap-1.5 text-xs text-indigo-300">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Asking Felix…
-          </p>
-        )}
-        <div className="flex items-center gap-2">
-          <textarea
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={onKeyDown}
-            maxLength={6000}
-            rows={interviewMode ? 3 : 2}
-            placeholder={
-              interviewMode
-                ? "Ask Felix or paste an interview prompt…"
-                : standaloneMode
-                  ? "Ask about a previous meeting or anything else…"
-                  : "Ask Felix…"
-            }
-            aria-label="Ask Felix a question"
-            aria-busy={busy}
-            className="min-w-0 flex-1 resize-none rounded-lg border border-slate-700/60 bg-slate-800/40 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={busy || !question.trim()}
-            aria-label="Send question"
-            className="rounded-lg bg-indigo-600 p-2 text-white transition-colors hover:bg-indigo-500 disabled:opacity-40"
-          >
-            {busy ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <SendHorizonal className="h-4 w-4" />
-            )}
-          </button>
-        </div>
-      </form>
+      <AssistComposer
+        onAsk={onAsk}
+        askPending={askPending}
+        askError={askError}
+        interviewMode={interviewMode}
+        standaloneMode={standaloneMode}
+        onBeforeAsk={onBeforeAsk}
+      />
     </div>
   );
 }

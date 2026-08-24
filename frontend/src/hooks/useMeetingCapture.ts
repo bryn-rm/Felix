@@ -22,13 +22,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getFreshAccessToken } from "@/lib/auth-session";
-import type { AssistExpansionFocus, AssistItem } from "@/lib/types";
-
-export interface AssistAskOptions {
-  intent?: "answer" | "expand";
-  parentItemId?: string;
-  focus?: AssistExpansionFocus;
-}
+import { isMeetingCaptureSupported } from "@/lib/capture-support";
+import type { AssistAskOptions, AssistItem } from "@/lib/types";
 
 export type CaptureStatus =
   | "idle"
@@ -109,17 +104,6 @@ function buildWsBase(): string {
     return window.location.origin.replace(/^http/, "ws");
   }
   return "ws://localhost:8000";
-}
-
-/** Chrome-first capability gate: needs AudioWorklet + getDisplayMedia + getUserMedia. */
-export function isMeetingCaptureSupported(): boolean {
-  if (typeof window === "undefined") return false;
-  return (
-    typeof window.AudioWorklet !== "undefined" &&
-    typeof navigator !== "undefined" &&
-    !!navigator.mediaDevices?.getDisplayMedia &&
-    !!navigator.mediaDevices?.getUserMedia
-  );
 }
 
 interface CaptureOptions {

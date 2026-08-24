@@ -1,10 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, CheckCircle2, Loader2, Radio, Sparkles } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Loader2, PlugZap, Radio, Sparkles } from "lucide-react";
 
 import { AssistCard } from "@/components/meetings/AssistCard";
-import { assistModeLabel } from "@/components/meetings/constants";
+import { AssistComposer } from "@/components/meetings/AssistComposer";
+import {
+  assistModeLabel,
+  usesCandidateInterviewAssist,
+} from "@/components/meetings/constants";
 import { useLiveAssistViewer } from "@/hooks/useLiveAssistViewer";
 
 interface PageProps {
@@ -12,22 +16,33 @@ interface PageProps {
 }
 
 /**
- * Live Assist viewer — the phone / second-screen surface.
+ * Live Assist on a second device — the phone surface.
  *
- * Read-only by construction, not by hidden controls. This route imports none of
- * the capture machinery: no `useMeetingCapture`, no meeting WebSocket, no notes
- * editor, no ask box. There is therefore nothing here that could request the
- * microphone or a tab share, open the capture socket, or start a second assist
- * generation loop — the device that started the meeting stays its only owner.
- *
- * All this page does is poll persisted assist state (`GET
- * /meetings/{id}/live-view`) and render it, stopping the moment the meeting
- * leaves `recording`.
+ * Interactive but never a capture client: this route imports no capture
+ * machinery (`useMeetingCapture`, the meeting WebSocket, the notes editor), so
+ * there is nothing here that could request the microphone or a tab share, open
+ * the capture socket, start STT, or take watcher ownership. Asking goes over
+ * REST to the same server-side ask implementation the capturing device uses,
+ * which is what makes the two devices share one set of limits.
  */
 export default function LiveAssistViewerPage({ params }: PageProps) {
   const { id } = params;
-  const { meeting, items, live, isLoading, error } = useLiveAssistViewer(id);
+  const {
+    meeting,
+    items,
+    live,
+    captureAttached,
+    isLoading,
+    error,
+    sendAsk,
+    askPending,
+    askError,
+    dismiss,
+  } = useLiveAssistViewer(id);
   const modeLabel = assistModeLabel(meeting);
+  // Only ever false for a capture meeting whose socket has gone (null means the
+  // question doesn't apply), so this can't fire on a manual session.
+  const captureDropped = live && captureAttached === false;
 
   return (
     <div className="flex h-full flex-col gap-4 p-4 sm:p-6">
@@ -50,18 +65,27 @@ export default function LiveAssistViewerPage({ params }: PageProps) {
             {meeting && (
               <span
                 className={`flex items-center gap-1 text-xs ${
-                  live ? "text-red-300" : "text-slate-400"
+                  !live
+                    ? "text-slate-400"
+                    : captureDropped
+                      ? "text-amber-300"
+                      : "text-red-300"
                 }`}
               >
-                {live ? (
-                  <>
-                    <Radio className="h-3.5 w-3.5 animate-pulse" />
-                    Live · recording on another device
-                  </>
-                ) : (
+                {!live ? (
                   <>
                     <CheckCircle2 className="h-3.5 w-3.5" />
                     Meeting ended
+                  </>
+                ) : captureDropped ? (
+                  <>
+                    <PlugZap className="h-3.5 w-3.5" />
+                    Recording device disconnected
+                  </>
+                ) : (
+                  <>
+                    <Radio className="h-3.5 w-3.5 animate-pulse" />
+                    Live · recording on another device
                   </>
                 )}
               </span>
@@ -75,11 +99,11 @@ export default function LiveAssistViewerPage({ params }: PageProps) {
         </div>
       </div>
 
-      {/* Say plainly that this device is a viewer, so nobody waits here for a
-          Stop button that lives on the capturing device. */}
+      {/* Say plainly what this device is, so nobody waits here for a Stop
+          button that lives on the capturing device. */}
       <p className="rounded-lg border border-white/[0.04] bg-[#0d1526]/60 px-3 py-2 text-xs text-slate-400">
-        Viewing only. Recording, notes and questions stay on the device that
-        started this meeting.
+        Second screen. You can ask Felix questions here; recording and notes stay
+        on the device that started this meeting.
       </p>
 
       {error && (
@@ -100,34 +124,68 @@ export default function LiveAssistViewerPage({ params }: PageProps) {
           )}
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pb-6">
-          <div className="flex items-center gap-2">
+        <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-white/[0.04] bg-[#0d1526]/60">
+          <div className="flex items-center gap-2 border-b border-white/[0.04] p-3">
             <Sparkles className="h-4 w-4 text-indigo-400" />
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
               Live assist
             </p>
           </div>
 
-          {meeting && !live && (
-            <p className="rounded-lg border border-white/[0.04] bg-[#0d1526] p-3 text-xs text-slate-400">
-              This meeting has ended, so no new cards will appear.{" "}
-              <Link
-                href={`/meetings/${id}`}
-                className="font-medium text-indigo-400 hover:text-indigo-300"
-              >
-                View the summary →
-              </Link>
-            </p>
-          )}
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+            {meeting && !live && (
+              <p className="rounded-lg border border-white/[0.04] bg-[#0d1526] p-3 text-xs text-slate-400">
+                This meeting has ended, so no new cards will appear.{" "}
+                <Link
+                  href={`/meetings/${id}`}
+                  className="font-medium text-indigo-400 hover:text-indigo-300"
+                >
+                  View the summary →
+                </Link>
+              </p>
+            )}
 
-          {items.length === 0 ? (
-            <p className="pt-6 text-center text-xs leading-relaxed text-slate-600">
-              {live
-                ? "Felix is listening on the other device. Cards appear here as they’re written."
-                : "No assist cards were kept for this meeting."}
-            </p>
-          ) : (
-            items.map((item) => <AssistCard key={item.id} item={item} />)
+            {captureDropped && (
+              // Honest about what is and isn't affected: the socket carries
+              // transcript, so proactive cards stop — asks go over REST and
+              // keep working.
+              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                The recording device isn’t connected right now, so no new cards
+                will appear until it reconnects. You can still ask questions.
+              </p>
+            )}
+
+            {items.length === 0 ? (
+              <p className="pt-6 text-center text-xs leading-relaxed text-slate-600">
+                {live
+                  ? "Felix is listening on the other device. Ask a question, or wait for a card to appear."
+                  : "No assist cards were kept for this meeting."}
+              </p>
+            ) : (
+              items.map((item) => (
+                <AssistCard
+                  key={item.id}
+                  item={item}
+                  onDismiss={dismiss}
+                  // Expansions are asks like any other, so they work here for
+                  // the same reason typed questions do — while the meeting is
+                  // open. On an ended one the server would refuse them.
+                  onExpand={live ? sendAsk : undefined}
+                  askPending={askPending}
+                />
+              ))
+            )}
+          </div>
+
+          {/* No ask box once the meeting is over: the session is closed to
+              writes, so offering one would only produce a rejection. */}
+          {live && (
+            <AssistComposer
+              onAsk={sendAsk}
+              askPending={askPending}
+              askError={askError}
+              interviewMode={usesCandidateInterviewAssist(meeting)}
+            />
           )}
         </div>
       )}

@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom";
 import { act, renderHook } from "@testing-library/react";
 
-import { useManualAssist } from "@/hooks/useManualAssist";
+import { useAssistAsk } from "@/hooks/useAssistAsk";
 import { ApiError } from "@/lib/api";
 
 jest.mock("@/lib/api", () => {
@@ -28,10 +28,10 @@ beforeEach(() => {
   mockPost.mockReset();
 });
 
-describe("useManualAssist", () => {
+describe("useAssistAsk", () => {
   it("appends the answered item and reports success", async () => {
     mockPost.mockResolvedValue({ item });
-    const { result } = renderHook(() => useManualAssist("m-1", true));
+    const { result } = renderHook(() => useAssistAsk("m-1", true));
 
     let ok: boolean | undefined;
     await act(async () => {
@@ -49,7 +49,7 @@ describe("useManualAssist", () => {
     // before the POST settled meant a 429 wiped a question the user may have
     // spent a while typing (up to 6000 characters).
     mockPost.mockRejectedValue(new ApiError(429, "Monthly AI usage limit reached"));
-    const { result } = renderHook(() => useManualAssist("m-1", true));
+    const { result } = renderHook(() => useAssistAsk("m-1", true));
 
     let ok: boolean | undefined;
     await act(async () => {
@@ -76,7 +76,7 @@ describe("useManualAssist", () => {
           });
         }),
     );
-    const { result } = renderHook(() => useManualAssist("m-1", true));
+    const { result } = renderHook(() => useAssistAsk("m-1", true));
 
     let settled: Promise<boolean>;
     act(() => {
@@ -98,7 +98,7 @@ describe("useManualAssist", () => {
   it("refuses a second ask while one is in flight", async () => {
     let release: (value: unknown) => void = () => {};
     mockPost.mockImplementation(() => new Promise((resolve) => (release = resolve)));
-    const { result } = renderHook(() => useManualAssist("m-1", true));
+    const { result } = renderHook(() => useAssistAsk("m-1", true));
 
     let second: boolean | undefined;
     await act(async () => {
@@ -115,7 +115,7 @@ describe("useManualAssist", () => {
   });
 
   it("does nothing when live assist is off", async () => {
-    const { result } = renderHook(() => useManualAssist("m-1", false));
+    const { result } = renderHook(() => useAssistAsk("m-1", false));
 
     let ok: boolean | undefined;
     await act(async () => {

@@ -3,8 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, ApiError } from "@/lib/api";
-import type { AssistItem } from "@/lib/types";
-import type { AssistAskOptions } from "@/hooks/useMeetingCapture";
+import type { AssistAskOptions, AssistItem } from "@/lib/types";
 
 /**
  * Deadline on one REST ask, mirroring useMeetingCapture.ASK_TIMEOUT_MS. `fetch`
@@ -15,8 +14,15 @@ import type { AssistAskOptions } from "@/hooks/useMeetingCapture";
  */
 const ASK_TIMEOUT_MS = 75_000;
 
-/** Typed assist transport for a manual session, where no capture WebSocket exists. */
-export function useManualAssist(meetingId: string, enabled: boolean) {
+/**
+ * The REST ask transport — for every client without a capture WebSocket.
+ *
+ * Two use it: a manual assistant session (which never has a socket) and the
+ * phone viewer (which must not open one). Both post to the same endpoint and
+ * get the same answer, because the server runs one shared ask implementation —
+ * this hook carries no ask policy of its own beyond the request deadline.
+ */
+export function useAssistAsk(meetingId: string, enabled: boolean) {
   const [items, setItems] = useState<AssistItem[]>([]);
   const [askPending, setAskPending] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);

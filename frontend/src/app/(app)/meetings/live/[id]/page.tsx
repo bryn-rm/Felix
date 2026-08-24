@@ -9,11 +9,9 @@ import { ArrowLeft, Check, FileText, Loader2, Radio, Sparkles, Square } from "lu
 import { api, ApiError } from "@/lib/api";
 import type { Settings as UserSettings } from "@/lib/types";
 import { useAssistItems } from "@/hooks/useAssistItems";
-import { useManualAssist } from "@/hooks/useManualAssist";
-import {
-  isMeetingCaptureSupported,
-  useMeetingCapture,
-} from "@/hooks/useMeetingCapture";
+import { useAssistAsk } from "@/hooks/useAssistAsk";
+import { isMeetingCaptureSupported } from "@/lib/capture-support";
+import { useMeetingCapture } from "@/hooks/useMeetingCapture";
 import { useMeeting, useMeetings } from "@/hooks/useMeetings";
 import { AssistSidebar } from "@/components/meetings/AssistSidebar";
 import { LiveTranscript } from "@/components/meetings/LiveTranscript";
@@ -68,7 +66,7 @@ export default function LiveMeetingPage({ params }: PageProps) {
   // mode may render until `loaded` — see the loading guard below.
   const loaded = meeting !== undefined;
   const manualMode = meeting?.source === "manual_notes";
-  const manualAssist = useManualAssist(id, manualMode && assistEnabled);
+  const manualAssist = useAssistAsk(id, manualMode && assistEnabled);
   const [assistOpen, setAssistOpen] = useState(false);
   const [assistSeen, setAssistSeen] = useState(0);
   const incomingAssistItems = manualMode ? manualAssist.items : assistItems;

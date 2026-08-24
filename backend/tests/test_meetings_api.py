@@ -392,9 +392,9 @@ async def test_manual_assist_ask_is_scoped_and_returns_item(monkeypatch):
     answer = AsyncMock(return_value={
         "type": "assist", "item": {"id": "i-1", "body": "Last time..."},
     })
-    monkeypatch.setattr(meetings_api, "answer_standalone_question", answer)
+    monkeypatch.setattr(meetings_api, "answer_typed_question", answer)
 
-    result = await meetings_api.ask_standalone_assist.__wrapped__(
+    result = await meetings_api.ask_assist.__wrapped__(
         "m-1",
         meetings_api.AssistAskBody(
             question="What happened last time?", request_id="req-1",
@@ -408,7 +408,10 @@ async def test_manual_assist_ask_is_scoped_and_returns_item(monkeypatch):
     assert answer.await_args.kwargs["meeting_id"] == "m-1"
 
 
-async def test_manual_assist_ask_rejects_capture_session(monkeypatch):
+async def test_ask_accepts_a_captured_meeting_over_rest(monkeypatch):
+    """The phone viewer's ask: a REST question about a meeting the laptop is
+    capturing. Phase 1 rejected these to keep the phone read-only; the whole
+    point of this phase is that the transport no longer decides."""
     from unittest.mock import AsyncMock
 
     from app.api import meetings as meetings_api
@@ -416,10 +419,42 @@ async def test_manual_assist_ask_rejects_capture_session(monkeypatch):
     monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(meetings_api.db, "query_one", AsyncMock(return_value={
         "id": "m-1", "source": "browser_capture", "status": "recording",
+        "has_context": True,
     }))
+    answer = AsyncMock(return_value={
+        "type": "assist", "item": {"id": "i-1", "body": "They agreed £40."},
+    })
+    monkeypatch.setattr(meetings_api, "answer_typed_question", answer)
+
+    result = await meetings_api.ask_assist.__wrapped__(
+        "m-1",
+        meetings_api.AssistAskBody(question="What did they agree?", request_id="req-1"),
+        request=None,
+        current_user={"id": "user-cap-1", "email": "cap@example.com"},
+    )
+
+    assert result["item"]["id"] == "i-1"
+    # Same shared entry point the manual session uses — nothing branches on source.
+    assert answer.await_args.kwargs["meeting_id"] == "m-1"
+    assert answer.await_args.kwargs["request_id"] == "req-1"
+
+
+async def test_ask_rejects_a_meeting_that_is_no_longer_recording(monkeypatch):
+    """Ended meeting → asking is unavailable, whichever client is asking."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(meetings_api.db, "query_one", AsyncMock(return_value={
+        "id": "m-1", "source": "browser_capture", "status": "done",
+        "has_context": True,
+    }))
+    answer = AsyncMock()
+    monkeypatch.setattr(meetings_api, "answer_typed_question", answer)
 
     with pytest.raises(HTTPException) as exc:
-        await meetings_api.ask_standalone_assist.__wrapped__(
+        await meetings_api.ask_assist.__wrapped__(
             "m-1",
             meetings_api.AssistAskBody(question="Hello?"),
             request=None,
@@ -427,6 +462,7 @@ async def test_manual_assist_ask_rejects_capture_session(monkeypatch):
         )
 
     assert exc.value.status_code == 404
+    answer.assert_not_awaited()   # no model call for a closed session
 
 
 def test_ask_body_rejects_a_non_uuid_parent_item_id():
@@ -463,11 +499,11 @@ async def test_ask_reads_only_whether_context_exists(monkeypatch):
     monkeypatch.setattr(meetings_api.db, "query_one", query_one)
     prefetch = AsyncMock()
     monkeypatch.setattr(meetings_api, "prefetch_context", prefetch)
-    monkeypatch.setattr(meetings_api, "answer_standalone_question", AsyncMock(
+    monkeypatch.setattr(meetings_api, "answer_typed_question", AsyncMock(
         return_value={"type": "assist", "item": {"id": "i-1"}},
     ))
 
-    await meetings_api.ask_standalone_assist.__wrapped__(
+    await meetings_api.ask_assist.__wrapped__(
         "m-1",
         meetings_api.AssistAskBody(question="What did we agree?"),
         request=None,
@@ -507,6 +543,7 @@ _VIEW_MEETING_ROW = {
     "source": "browser_capture", "template": "general",
     "meeting_type": "general", "user_role": None,
     "started_at": None, "ended_at": None,
+    "capture_attached": True,
 }
 
 
@@ -522,7 +559,7 @@ def test_live_view_404s_when_assist_disabled(client, monkeypatch):
     assert client.get("/meetings/m-1/live-view").status_code == 404
 
 
-def test_live_view_returns_meeting_identity_and_undismissed_items(client, monkeypatch):
+def test_live_view_returns_meeting_identity_and_dismissal_state(client, monkeypatch):
     from datetime import datetime, timezone
     from unittest.mock import AsyncMock
 
@@ -539,6 +576,13 @@ def test_live_view_returns_meeting_identity_and_undismissed_items(client, monkey
         "usefulness_score": 0.9, "trigger_type": "question",
         "prompt_version": "v1", "request_id": None, "metadata": {},
         "model": "haiku", "created_at": datetime(2026, 8, 23, tzinfo=timezone.utc),
+    }, {
+        "id": "i-2", "kind": "answer", "source": "ask", "question": "More?",
+        "title": "Dismissed answer", "body": "Hidden everywhere.",
+        "transcript_ts": 13.0, "dismissed": True,
+        "usefulness_score": None, "trigger_type": None,
+        "prompt_version": "v1", "request_id": "r-2", "metadata": {},
+        "model": "sonnet", "created_at": datetime(2026, 8, 23, tzinfo=timezone.utc),
     }])
     monkeypatch.setattr(meetings_api.db, "query", item_query)
 
@@ -551,9 +595,9 @@ def test_live_view_returns_meeting_identity_and_undismissed_items(client, monkey
     assert body["items"][0]["id"] == "i-1"
     # Same display-only wire item the capture page gets — no eval internals.
     assert "usefulness_score" not in body["items"][0]
-    # Dismissed cards are excluded in SQL: the viewer cannot dismiss, so a
-    # dismissed card would be dead weight on every poll.
-    assert "dismissed = FALSE" in item_query.await_args.args[0]
+    # The explicit flag lets the server override a locally appended answer.
+    assert body["items"][1]["dismissed"] is True
+    assert "dismissed = FALSE" not in item_query.await_args.args[0]
 
 
 def test_live_view_does_not_expose_transcript_notes_or_context(client, monkeypatch):
@@ -573,7 +617,7 @@ def test_live_view_does_not_expose_transcript_notes_or_context(client, monkeypat
 
     body = client.get("/meetings/m-1/live-view").json()
 
-    assert set(body) == {"meeting", "items"}
+    assert set(body) == {"meeting", "items", "capture_attached"}
     for leaked in ("user_notes", "live_context", "segments", "transcript"):
         assert leaked not in body["meeting"]
         assert leaked not in meeting_query.await_args.args[0]
@@ -590,7 +634,9 @@ def test_live_view_is_scoped_to_the_owner(client, monkeypatch):
 
     assert client.get("/meetings/m-1/live-view").status_code == 404
     # id + user_id both in the WHERE — ownership enforced in SQL.
-    assert meeting_query.await_args.args[1:] == ("m-1", "user-cap-1")
+    assert meeting_query.await_args.args[1:] == (
+        "m-1", "user-cap-1", "browser_capture",
+    )
 
 
 def test_live_view_is_a_pure_read_and_never_touches_capture(client, monkeypatch):
@@ -645,6 +691,80 @@ def test_live_view_is_a_pure_read_and_never_touches_capture(client, monkeypatch)
     start_watcher.assert_not_awaited()
     stt_session.assert_not_called()
     end_meeting.assert_not_awaited()
+
+
+def test_live_view_reports_whether_the_capturing_device_is_attached(client, monkeypatch):
+    """`status` can't answer this: a dropped socket leaves the row 'recording'.
+    The signal comes from the capture-owned database heartbeat, so it is shared
+    across Cloud Run instances and independent of assist watcher startup."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    meeting_query = AsyncMock(return_value=dict(_VIEW_MEETING_ROW))
+    monkeypatch.setattr(meetings_api.db, "query_one", meeting_query)
+    monkeypatch.setattr(meetings_api.db, "query", AsyncMock(return_value=[]))
+
+    assert client.get("/meetings/m-1/live-view").json()["capture_attached"] is True
+    assert "capture_heartbeat_at" in meeting_query.await_args.args[0]
+    assert "capture_connection_id" in meeting_query.await_args.args[0]
+
+    meeting_query.return_value = {**_VIEW_MEETING_ROW, "capture_attached": False}
+    assert client.get("/meetings/m-1/live-view").json()["capture_attached"] is False
+
+
+async def test_live_view_reads_capture_liveness_from_shared_state(monkeypatch):
+    """Direct route check (independent of TestClient): the SQL computes the
+    heartbeat on PostgreSQL and the route returns that value unchanged."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    meeting_query = AsyncMock(return_value={
+        **_VIEW_MEETING_ROW,
+        "capture_attached": False,
+    })
+    monkeypatch.setattr(meetings_api.db, "query_one", meeting_query)
+    item_query = AsyncMock(return_value=[{
+        "id": "i-dismissed", "kind": "answer", "source": "ask",
+        "question": "More?", "title": "Old answer", "body": "Hidden.",
+        "transcript_ts": None, "dismissed": True, "request_id": "r-1",
+        "metadata": {}, "created_at": datetime.now(timezone.utc),
+    }])
+    monkeypatch.setattr(meetings_api.db, "query", item_query)
+
+    result = await meetings_api.get_live_assist_view.__wrapped__(
+        "m-1",
+        request=None,
+        current_user={"id": "user-cap-1", "email": "cap@example.com"},
+    )
+
+    assert result["capture_attached"] is False
+    assert "capture_attached" not in result["meeting"]
+    assert result["items"][0]["dismissed"] is True
+    assert "dismissed = FALSE" not in item_query.await_args.args[0]
+    sql = meeting_query.await_args.args[0]
+    assert "capture_heartbeat_at" in sql
+    assert "capture_connection_id" in sql
+
+
+def test_live_view_reports_no_liveness_for_a_manual_session(client, monkeypatch):
+    """A manual session never has a socket, so 'disconnected' is not a state it
+    can be in — reporting False would invent a problem."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings as meetings_api
+
+    monkeypatch.setattr(meetings_api, "_assist_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(meetings_api.db, "query_one", AsyncMock(
+        return_value={**_VIEW_MEETING_ROW, "source": "manual_notes", "capture_attached": None},
+    ))
+    monkeypatch.setattr(meetings_api.db, "query", AsyncMock(return_value=[]))
+
+    assert client.get("/meetings/m-1/live-view").json()["capture_attached"] is None
 
 
 def test_live_view_still_serves_an_ended_meeting(client, monkeypatch):
@@ -776,6 +896,121 @@ async def test_ws_rejects_when_not_owner(monkeypatch):
     assert ws.closed_code == 4404
 
 
+async def test_capture_heartbeat_is_shared_and_connection_scoped(monkeypatch):
+    """Attach/beat/detach all persist through the database, and cleanup carries
+    the same token so an old socket cannot clear a newer connection."""
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings_ws
+
+    execute = AsyncMock(return_value="UPDATE 1")
+    monkeypatch.setattr(meetings_ws.db, "execute", execute)
+    heartbeat = meetings_ws._CaptureHeartbeat("u-1", "m-1")
+
+    await heartbeat.attach()
+    heartbeat._last_write = float("-inf")
+    await heartbeat.beat()
+    await heartbeat.detach()
+
+    assert execute.await_count == 3
+    attach_args = execute.await_args_list[0].args
+    beat_args = execute.await_args_list[1].args
+    detach_args = execute.await_args_list[2].args
+    token = attach_args[1]
+    assert beat_args[-1] == token
+    assert detach_args[-1] == token
+    assert "capture_connection_id = $3" in detach_args[0]
+    assert all("user_id" in call.args[0] for call in execute.await_args_list)
+
+
+async def test_capture_heartbeat_does_not_retry_a_failed_write_per_frame(monkeypatch):
+    """A database failure must not turn the heartbeat into a write storm.
+
+    beat() is awaited for every received message, and the worklet posts 20ms
+    frames on two channels — ~100 a second. If the throttle only advanced on
+    success, one Postgres hiccup would put a pooled round-trip in front of every
+    audio frame, starving STT and draining the pool for the whole process. A
+    stale heartbeat is the cheap failure here; a write storm is not.
+    """
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings_ws
+
+    execute = AsyncMock(side_effect=RuntimeError("pool exhausted"))
+    monkeypatch.setattr(meetings_ws.db, "execute", execute)
+    heartbeat = meetings_ws._CaptureHeartbeat("u-1", "m-1")
+
+    await heartbeat.attach()
+    for _ in range(50):  # half a second of audio frames
+        await heartbeat.beat()
+
+    assert execute.await_count == 1
+
+
+@pytest.mark.parametrize("attach_result", [
+    RuntimeError("transient"),  # attach raised
+    "UPDATE 0",                 # attach matched no row (status race with /end)
+])
+async def test_capture_heartbeat_reclaims_when_attach_did_not_land(
+    monkeypatch, attach_result,
+):
+    """An attach that never landed must not disable the heartbeat for good.
+
+    beat() filters on this connection's token, so if the row never got it the
+    update matches nothing — forever. The viewer would then show the amber
+    "recording device isn't connected" banner for a meeting that is in fact
+    recording, with no recovery short of reconnecting the socket.
+    """
+    from unittest.mock import AsyncMock
+
+    from app.api import meetings_ws
+
+    monkeypatch.setattr(meetings_ws, "CAPTURE_HEARTBEAT_INTERVAL_S", 0.0)
+    execute = AsyncMock(side_effect=[attach_result, "UPDATE 1", "UPDATE 1"])
+    monkeypatch.setattr(meetings_ws.db, "execute", execute)
+    heartbeat = meetings_ws._CaptureHeartbeat("u-1", "m-1")
+
+    await heartbeat.attach()
+    await heartbeat.beat()  # must re-claim, not beat against a token nobody has
+    await heartbeat.beat()  # attached now — a plain heartbeat is enough
+
+    reclaim_sql = execute.await_args_list[1].args[0]
+    assert "SET capture_connection_id = $1" in reclaim_sql
+    plain_sql = execute.await_args_list[2].args[0]
+    assert "SET capture_connection_id" not in plain_sql
+    assert "SET capture_heartbeat_at = NOW()" in plain_sql
+
+
+def test_capture_heartbeat_window_outlives_a_missed_client_ping():
+    """Pin the three coupled numbers that decide "is the laptop still there?".
+
+    The write throttle and the staleness window live in app/models/meeting.py;
+    the client's ping interval lives in the frontend. The window has to exceed
+    one missed ping plus one skipped write, or every viewer reports a healthy
+    capture as disconnected — and nothing else in the build would catch it, so
+    the frontend constant is read here rather than copied.
+    """
+    import re
+    from pathlib import Path
+
+    from app.models.meeting import (
+        CAPTURE_HEARTBEAT_INTERVAL_S,
+        CAPTURE_HEARTBEAT_STALE_S,
+    )
+
+    capture_hook = (
+        Path(__file__).resolve().parents[2]
+        / "frontend/src/hooks/useMeetingCapture.ts"
+    )
+    match = re.search(
+        r"const PING_INTERVAL_MS = ([\d_]+);", capture_hook.read_text()
+    )
+    assert match, f"PING_INTERVAL_MS not found in {capture_hook} — re-point this test"
+    ping_s = int(match.group(1).replace("_", "")) / 1000
+
+    assert CAPTURE_HEARTBEAT_STALE_S > ping_s + CAPTURE_HEARTBEAT_INTERVAL_S
+
+
 async def test_ws_demux_routes_channel_bytes_and_strips_prefix(monkeypatch):
     """Binary frames are demuxed by their leading channel byte; the byte is
     stripped before the PCM reaches the STT session (the new Phase 6 wiring)."""
@@ -800,6 +1035,7 @@ async def test_ws_demux_routes_channel_bytes_and_strips_prefix(monkeypatch):
     monkeypatch.setattr(meetings_ws, "_capture_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr("app.db.query_one",
                         AsyncMock(return_value={"id": "m-1", "status": "recording"}))
+    monkeypatch.setattr("app.db.execute", AsyncMock(return_value="UPDATE 1"))
     monkeypatch.setattr(meetings_ws.meeting_stt_service, "session", lambda *a, **k: fake_session)
 
     ws = FakeWebSocket(
@@ -861,6 +1097,7 @@ async def test_ws_stream_persists_me_and_them_finals(monkeypatch):
     monkeypatch.setattr(meetings_ws, "_capture_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr("app.db.query_one",
                         AsyncMock(return_value={"id": "m-1", "status": "recording"}))
+    monkeypatch.setattr("app.db.execute", AsyncMock(return_value="UPDATE 1"))
 
     ws = FakeWebSocket(
         origin=_allow_origin(),

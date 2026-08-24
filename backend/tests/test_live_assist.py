@@ -95,7 +95,7 @@ def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
                 seed_titles=(), seed_items=(), seed_segments=(),
                 template="general", meeting_type=None, user_role=None,
                 parent_item=None, stop_reason="end_turn", source=None,
-                user_notes=None):
+                user_notes=None, meeting_open=True, replay_item=None):
     """Stub the DB, Anthropic client, logging, and budget for a watcher test.
     Returns (fake_messages, inserted_rows, emitted_payloads, send_json).
     seed_titles seeds prior PROACTIVE cards; seed_items takes full row dicts."""
@@ -103,6 +103,26 @@ def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
     emitted: list[dict] = []
 
     async def query_one(sql, *args):
+        if "INSERT INTO meeting_assist_items" in sql:
+            if not meeting_open:
+                return None
+            keys = (
+                "user_id", "kind", "source", "question", "title", "body",
+                "transcript_ts", "usefulness_score", "trigger_type",
+                "prompt_version", "request_id", "metadata", "model",
+            )
+            row = dict(zip(keys, args[1:]))
+            row["meeting_id"] = args[0]
+            row["id"] = f"item-{len(inserted) + 1}"
+            row["created_at"] = datetime.now(timezone.utc)
+            row["dismissed"] = False
+            inserted.append(row)
+            return row
+        # Ordered before the generic meeting_assist_items branch: the idempotent
+        # replay lookup also selects from that table, and answering it with the
+        # expansion parent would replay instead of generating.
+        if "request_id = $3" in sql:
+            return replay_item
         if "live_context" in sql:
             return {"live_context": live_context, "title": "Budget sync",
                     "template": template, "meeting_type": meeting_type,
@@ -114,25 +134,25 @@ def _wire_fakes(monkeypatch, *, responses=(), live_context=None,
 
     async def query(sql, *args):
         if "meeting_assist_items" in sql:
-            return [
-                {"title": t, "source": "proactive"} for t in seed_titles
-            ] + list(seed_items)
+            # Every persisted row carries an id (uuid PK), and the watcher
+            # dedupes its refresh on it — a fake without ids would let seeds be
+            # absorbed twice and hide that. Read seed_items live rather than
+            # copying at wire time, so a test can model another device writing
+            # mid-meeting by appending to the list it passed in.
+            seeded = [
+                {"id": f"seed-title-{i}", "title": t, "source": "proactive"}
+                for i, t in enumerate(seed_titles)
+            ] + [
+                {"id": f"seed-item-{i}", **r}
+                for i, r in enumerate(seed_items)
+            ]
+            return seeded + list(inserted)
         if "meeting_transcript_segments" in sql:
             return list(seed_segments)
         return []
 
-    async def insert(table, data):
-        assert table == "meeting_assist_items"
-        row = dict(data)
-        row["id"] = f"item-{len(inserted) + 1}"
-        row["created_at"] = datetime.now(timezone.utc)
-        row["dismissed"] = False
-        inserted.append(row)
-        return row
-
     monkeypatch.setattr(las.db, "query_one", query_one)
     monkeypatch.setattr(las.db, "query", query)
-    monkeypatch.setattr(las.db, "insert", insert)
     monkeypatch.setattr(las.db, "try_advisory_lock", AsyncMock(return_value=True))
     monkeypatch.setattr(las.db, "advisory_unlock", AsyncMock())
     monkeypatch.setattr(las, "log_ai_call", AsyncMock())
@@ -1738,6 +1758,153 @@ async def test_ask_cap_survives_reconnect(monkeypatch):
     assert fake.calls == []
 
 
+async def test_ask_cap_counts_an_ask_that_never_persisted(monkeypatch):
+    """A model call that produced no row still spent the budget.
+
+    The pre-ask refresh reads persisted rows, but they are a floor, not the
+    truth: an ask whose answer was unparseable (or timed out, or was refused
+    because the meeting closed) wrote nothing while charging a Sonnet call.
+    Re-deriving the count from rows alone would uncap the WebSocket transport,
+    which has no HTTP rate limit behind it.
+    """
+    _fast_constants(monkeypatch)
+    fake, _, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=["not json at all"],
+        seed_items=[{"title": f"Q{i}", "source": "ask"}
+                    for i in range(las.MAX_ASKS - 1)],
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("the one that fails?", "req-doomed")
+        await _wait_until(lambda: len(emitted) == 1)
+        # Counted as a delta, not an absolute: an unparseable answer is retried
+        # inside the call helper, so the first ask is worth more than one call.
+        calls_after_failed_ask = len(fake.calls)
+        watcher.submit_ask("one past the cap?", "req-over")
+        await _wait_until(lambda: len(emitted) == 2)
+    finally:
+        await watcher.aclose()
+
+    assert emitted[0]["type"] == "assist_error"
+    assert emitted[1]["type"] == "assist_error"
+    assert emitted[1]["request_id"] == "req-over"
+    # The decisive assertion: the capped ask never reached the model at all.
+    assert len(fake.calls) == calls_after_failed_ask
+
+
+async def test_ask_absorbs_an_item_written_by_another_device(monkeypatch):
+    """The laptop's long-lived watcher must see the phone's REST ask.
+
+    Both transports write to the same meeting, but each has its own watcher —
+    the phone's is built per request, on any instance. Without the pre-ask
+    refresh folding those rows in, a follow-up typed on the laptop resolves
+    against a conversation that is missing the phone's turn entirely.
+    """
+    _fast_constants(monkeypatch)
+    written_elsewhere: list[dict] = []
+    fake, _, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[json.dumps({"title": "t", "body": "forty thousand"})],
+        seed_items=written_elsewhere,
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        # The phone asks, and its own watcher persists the answer.
+        written_elsewhere.append({
+            "source": "ask",
+            "question": "What budget did they mention?",
+            "title": "Budget",
+            "body": "They said £40k for the first year.",
+            "created_at": datetime.now(timezone.utc),
+        })
+        watcher.submit_ask("tell me more about that", "req-followup")
+        await _wait_until(lambda: emitted)
+    finally:
+        await watcher.aclose()
+
+    assert emitted[0]["type"] == "assist"
+    prompt = str(fake.calls[0])
+    assert "£40k for the first year" in prompt
+    assert "What budget did they mention?" in prompt
+
+
+async def test_refresh_does_not_double_count_this_watchers_own_items(monkeypatch):
+    """The refresh is additive, so it must dedupe on the persisted row id.
+
+    Re-absorbing this watcher's own rows would inflate the ask count toward
+    MAX_ASKS on every ask and append each answer to the conversation twice.
+    """
+    _fast_constants(monkeypatch)
+    _, inserted, emitted, send_json = _wire_fakes(
+        monkeypatch,
+        responses=[json.dumps({"title": "t", "body": "one"}),
+                   json.dumps({"title": "t2", "body": "two"})],
+    )
+    watcher = await _start_watcher(send_json)
+    try:
+        watcher.submit_ask("first?", "req-a")
+        await _wait_until(lambda: len(emitted) == 1)
+        watcher.submit_ask("second?", "req-b")
+        await _wait_until(lambda: len(emitted) == 2)
+        assert watcher._asks == 2
+        assert len(watcher._conversation) == 2
+    finally:
+        await watcher.aclose()
+
+    assert len(inserted) == 2
+
+
+async def test_ask_slot_releases_the_shared_lock_when_cancelled(monkeypatch):
+    """A cancelled ask must still issue pg_advisory_unlock.
+
+    FastAPI cancels the handler when the browser aborts (ASK_TIMEOUT_MS, or a
+    phone navigating away), and the cancellation can land on the unlock await
+    itself. db.py holds every advisory lock on one process-wide session, so a
+    missed unlock outlives the request: every OTHER instance is then refused
+    asks for this meeting until the process restarts, while this one keeps
+    working because a same-session re-acquire succeeds.
+    """
+    monkeypatch.setattr(las.db, "try_advisory_lock", AsyncMock(return_value=True))
+    entered_unlock = asyncio.Event()
+    release_unlock = asyncio.Event()
+    unlocked: list[str] = []
+
+    async def blocking_unlock(key):
+        entered_unlock.set()
+        await release_unlock.wait()
+        unlocked.append(key)
+
+    monkeypatch.setattr(las.db, "advisory_unlock", blocking_unlock)
+
+    holding = asyncio.Event()
+
+    async def holder():
+        async with las._ask_slot("m-cancel") as acquired:
+            assert acquired
+            holding.set()
+            await asyncio.sleep(3600)  # stands in for the model call
+
+    task = asyncio.create_task(holder())
+    await holding.wait()
+
+    # First cancel unwinds the model call into the slot's finally, where the
+    # unlock is now in flight.
+    task.cancel()
+    await entered_unlock.wait()
+    # Second cancel lands ON the unlock await — the case a bare `await` loses.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release_unlock.set()
+    for _ in range(5):  # let the shielded unlock finish on its own task
+        await asyncio.sleep(0)
+
+    assert unlocked == ["felix_live_assist_ask:m-cancel"]
+    assert "m-cancel" not in las._ask_slots
+
+
 # ---------------------------------------------------------------------------
 # Registry + cross-instance ownership — one watcher per meeting
 # ---------------------------------------------------------------------------
@@ -1886,6 +2053,7 @@ async def test_ws_taps_finals_and_routes_ask(monkeypatch):
     monkeypatch.setattr(meetings_ws, "_capture_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr("app.db.query_one",
                         AsyncMock(return_value={"id": "m-1", "status": "recording"}))
+    monkeypatch.setattr("app.db.execute", AsyncMock(return_value="UPDATE 1"))
 
     class FakeSession:
         """Captures the send_json closure and pushes one final + one interim
@@ -1944,6 +2112,7 @@ async def test_ws_capture_survives_assist_startup_failure(monkeypatch):
     monkeypatch.setattr(meetings_ws, "_capture_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr("app.db.query_one",
                         AsyncMock(return_value={"id": "m-1", "status": "recording"}))
+    monkeypatch.setattr("app.db.execute", AsyncMock(return_value="UPDATE 1"))
 
     fed = []
 
@@ -1984,6 +2153,7 @@ async def test_ws_ask_without_assist_returns_error(monkeypatch):
     monkeypatch.setattr(meetings_ws, "_capture_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr("app.db.query_one",
                         AsyncMock(return_value={"id": "m-1", "status": "recording"}))
+    monkeypatch.setattr("app.db.execute", AsyncMock(return_value="UPDATE 1"))
 
     class FakeSession:
         def start(self): pass
@@ -2013,7 +2183,8 @@ async def test_ws_ask_without_assist_returns_error(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _standalone_fakes(monkeypatch, *, responses=(), asks=(), ai_delay=0.0):
+def _standalone_fakes(monkeypatch, *, responses=(), asks=(), ai_delay=0.0,
+                      meeting_open=True, replay_item=None):
     """DB + Anthropic fakes where the assist-items query reflects inserts, so a
     second ask sees what the first persisted (which is what the caps read)."""
     rows: list[dict] = [dict(a) for a in asks]
@@ -2021,6 +2192,30 @@ def _standalone_fakes(monkeypatch, *, responses=(), asks=(), ai_delay=0.0):
 
     async def query_one(sql, *args):
         seen_sql.append(sql)
+        if "INSERT INTO meeting_assist_items" in sql:
+            if not meeting_open:
+                return None
+            keys = (
+                "user_id", "kind", "source", "question", "title", "body",
+                "transcript_ts", "usefulness_score", "trigger_type",
+                "prompt_version", "request_id", "metadata", "model",
+            )
+            row = dict(zip(keys, args[1:]))
+            row["meeting_id"] = args[0]
+            row["id"] = f"item-{len(rows) + 1}"
+            row["created_at"] = datetime.now(timezone.utc)
+            row["dismissed"] = False
+            rows.append(row)
+            return row
+        if "COUNT(*) AS ask_count" in sql:
+            asks_now = [r for r in rows if r.get("source") == "ask"]
+            stamps = [r.get("created_at") for r in asks_now if r.get("created_at")]
+            return {
+                "ask_count": len(asks_now),
+                "last_ask_at": max(stamps) if stamps else None,
+            }
+        if "request_id = $3" in sql:
+            return replay_item
         if "live_context" in sql:
             return {"live_context": None, "title": "Client catch-up",
                     "template": "general", "meeting_type": None,
@@ -2034,14 +2229,6 @@ def _standalone_fakes(monkeypatch, *, responses=(), asks=(), ai_delay=0.0):
             return [dict(r) for r in rows]
         return []
 
-    async def insert(table, data):
-        row = dict(data)
-        row["id"] = f"item-{len(rows) + 1}"
-        row["created_at"] = datetime.now(timezone.utc)
-        row["dismissed"] = False
-        rows.append(row)
-        return row
-
     class SlowMessages(FakeAnthropicMessages):
         async def create(self, **kwargs):
             if ai_delay:
@@ -2050,7 +2237,7 @@ def _standalone_fakes(monkeypatch, *, responses=(), asks=(), ai_delay=0.0):
 
     monkeypatch.setattr(las.db, "query_one", query_one)
     monkeypatch.setattr(las.db, "query", query)
-    monkeypatch.setattr(las.db, "insert", insert)
+    monkeypatch.setattr(las.db, "try_advisory_lock", AsyncMock(return_value=True))
     monkeypatch.setattr(las.db, "advisory_unlock", AsyncMock())
     monkeypatch.setattr(las, "log_ai_call", AsyncMock())
     monkeypatch.setattr("app.middleware.rate_limit.check_monthly_ai_budget", AsyncMock())
@@ -2082,7 +2269,7 @@ async def test_standalone_ask_answers_and_persists(monkeypatch):
     _fast_constants(monkeypatch)
     _, rows, seen_sql = _standalone_fakes(monkeypatch, responses=[_answer()])
 
-    payload = await las.answer_standalone_question(
+    payload = await las.answer_typed_question(
         user_id="u-1", meeting_id="m-1",
         question="What did we agree on pricing?", request_id="req-1",
     )
@@ -2105,11 +2292,11 @@ async def test_standalone_follow_up_hydrates_earlier_exchange(monkeypatch):
         ],
     )
 
-    first = await las.answer_standalone_question(
+    first = await las.answer_typed_question(
         user_id="u-1", meeting_id="m-1",
         question="What pricing approach should we use?", request_id="req-1",
     )
-    second = await las.answer_standalone_question(
+    second = await las.answer_typed_question(
         user_id="u-1", meeting_id="m-1",
         question="Tell me more about that topic.", request_id="req-2",
     )
@@ -2131,7 +2318,7 @@ async def test_standalone_ask_cooldown_survives_the_per_request_watcher(monkeypa
         "created_at": datetime.now(timezone.utc),
     }])
 
-    payload = await las.answer_standalone_question(
+    payload = await las.answer_typed_question(
         user_id="u-1", meeting_id="m-1", question="And the delivery date?",
         request_id="req-2",
     )
@@ -2151,9 +2338,9 @@ async def test_concurrent_standalone_asks_cannot_race_past_the_cap(monkeypatch):
     )
 
     first, second = await asyncio.gather(
-        las.answer_standalone_question(
+        las.answer_typed_question(
             user_id="u-1", meeting_id="m-1", question="First?", request_id="r-1"),
-        las.answer_standalone_question(
+        las.answer_typed_question(
             user_id="u-1", meeting_id="m-1", question="Second?", request_id="r-2"),
     )
 
@@ -2162,7 +2349,7 @@ async def test_concurrent_standalone_asks_cannot_race_past_the_cap(monkeypatch):
     assert len(rows) == 1
     assert len(fake.calls) == 1          # the blocked ask spent nothing
     # The slot is released either way, so it cannot leak per meeting.
-    assert "m-1" not in las._standalone_ask_slots
+    assert "m-1" not in las._ask_slots
 
 
 async def test_standalone_ask_reports_an_unexpected_failure_as_assist_error(monkeypatch):
@@ -2173,14 +2360,14 @@ async def test_standalone_ask_reports_an_unexpected_failure_as_assist_error(monk
     _standalone_fakes(monkeypatch, responses=[_answer()])
     monkeypatch.setattr(las.db, "query", AsyncMock(side_effect=RuntimeError("db down")))
 
-    payload = await las.answer_standalone_question(
+    payload = await las.answer_typed_question(
         user_id="u-1", meeting_id="m-1", question="What did we agree?",
         request_id="req-3",
     )
 
     assert payload["type"] == "assist_error"
     assert payload["request_id"] == "req-3"
-    assert "m-1" not in las._standalone_ask_slots
+    assert "m-1" not in las._ask_slots
 
 
 async def test_standalone_prompt_keeps_the_newest_manual_notes(monkeypatch):
@@ -2200,7 +2387,7 @@ async def test_standalone_prompt_keeps_the_newest_manual_notes(monkeypatch):
 
     monkeypatch.setattr(las.db, "query_one", query_one)
 
-    await las.answer_standalone_question(
+    await las.answer_typed_question(
         user_id="u-1", meeting_id="m-1", question="What did they just say?",
         request_id="req-4",
     )
@@ -2208,3 +2395,271 @@ async def test_standalone_prompt_keeps_the_newest_manual_notes(monkeypatch):
     prompt = fake.calls[0]["messages"][0]["content"]
     assert "NEWEST-LINE" in prompt
     assert "OLD-OPENING" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Transport-neutral asks — the phone viewer asking about a captured meeting
+# ---------------------------------------------------------------------------
+
+
+def _capture_fakes(monkeypatch, **kw):
+    """`_standalone_fakes` for a browser_capture meeting rather than a manual one."""
+    fake, rows, seen_sql = _standalone_fakes(monkeypatch, **kw)
+    base_query_one = las.db.query_one
+
+    async def query_one(sql, *args):
+        row = await base_query_one(sql, *args)
+        if row and "live_context" in sql:
+            row = {**row, "source": "browser_capture", "title": "Budget sync"}
+        return row
+
+    monkeypatch.setattr(las.db, "query_one", query_one)
+    return fake, rows, seen_sql
+
+
+async def test_rest_ask_on_a_captured_meeting_never_takes_watcher_ownership(monkeypatch):
+    """The phone's ask must not become the meeting's assist owner.
+
+    It runs the same `_handle_ask` on a throwaway watcher: no run loop, no
+    watcher-ownership lock, no entry in the `_watchers` registry, and nothing
+    that could make the phone the capture owner or start STT. It does take the
+    separate shared ask lock.
+    """
+    _fast_constants(monkeypatch)
+    _, rows, seen_sql = _capture_fakes(monkeypatch, responses=[_answer()])
+    lock = AsyncMock(return_value=True)
+    monkeypatch.setattr(las.db, "try_advisory_lock", lock)
+
+    payload = await las.answer_typed_question(
+        user_id="u-1", meeting_id="m-1",
+        question="What did they just agree?", request_id="req-phone-1",
+    )
+
+    assert payload["type"] == "assist"
+    assert rows[0]["source"] == "ask"
+    # Ownership is untouched: the laptop's watcher (if any) keeps the meeting.
+    assert "m-1" not in las._watchers
+    lock.assert_awaited_once_with("felix_live_assist_ask:m-1")
+    # It reads persisted transcript context but never writes STT segments.
+    assert not any(
+        "INSERT INTO meeting_transcript_segments" in s for s in seen_sql
+    )
+
+
+async def test_rest_ask_uses_the_capture_prompt_not_the_standalone_one(monkeypatch):
+    """Transport doesn't pick the prompt — the session does. A phone ask about a
+    captured meeting must see the transcript, exactly as the laptop's ask does."""
+    _fast_constants(monkeypatch)
+    fake, _, _ = _capture_fakes(monkeypatch, responses=[_answer()])
+
+    await las.answer_typed_question(
+        user_id="u-1", meeting_id="m-1", question="What did they say?",
+        request_id="req-phone-2",
+    )
+
+    prompt = fake.calls[0]["messages"][0]["content"]
+    assert "Budget sync" in prompt
+
+
+async def test_phone_and_laptop_asks_share_one_meeting_ask_cap(monkeypatch):
+    """MAX_ASKS is per meeting, not per transport. The laptop's persisted asks
+    are what a phone ask counts against, because the count is re-derived from
+    meeting_assist_items rather than held per connection."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_ASKS", 2)
+    _, rows, _ = _capture_fakes(
+        monkeypatch,
+        responses=[_answer()],
+        asks=[
+            {"title": "a", "source": "ask", "question": "laptop one",
+             "created_at": datetime.now(timezone.utc)},
+            {"title": "b", "source": "ask", "question": "laptop two",
+             "created_at": datetime.now(timezone.utc)},
+        ],
+    )
+
+    payload = await las.answer_typed_question(
+        user_id="u-1", meeting_id="m-1", question="One more?",
+        request_id="req-phone-3",
+    )
+
+    assert payload["type"] == "assist_error"
+    assert "ask limit" in payload["message"].lower()
+    assert len(rows) == 2   # nothing new persisted
+
+
+async def test_long_lived_watcher_refreshes_ask_cap_inside_the_slot(monkeypatch):
+    """A laptop watcher seeded before phone asks must reload their persisted
+    spend after it acquires the shared slot, not trust connection-start state."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_ASKS", 2)
+    fake, rows, _ = _capture_fakes(monkeypatch, responses=[_answer()])
+    emitted: list[dict] = []
+
+    async def send_json(payload):
+        emitted.append(payload)
+
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=send_json)
+    await watcher.start(run_loop=False)
+    # Two phone answers land after the WebSocket watcher's initial seed.
+    rows.extend([
+        {"source": "ask", "created_at": datetime.now(timezone.utc)},
+        {"source": "ask", "created_at": datetime.now(timezone.utc)},
+    ])
+    try:
+        await watcher._handle_ask("Laptop asks later?", "r-late-ws")
+    finally:
+        await watcher.aclose()
+
+    assert emitted[-1]["type"] == "assist_error"
+    assert "ask limit" in emitted[-1]["message"].lower()
+    assert fake.calls == []
+
+
+async def test_long_lived_watcher_refreshes_cross_device_cooldown(monkeypatch):
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_ASKS", 20)
+    monkeypatch.setattr(las, "ASK_MIN_INTERVAL_S", 600.0)
+    fake, rows, _ = _capture_fakes(monkeypatch, responses=[_answer()])
+    emitted: list[dict] = []
+
+    async def send_json(payload):
+        emitted.append(payload)
+
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=send_json)
+    await watcher.start(run_loop=False)
+    rows.append({"source": "ask", "created_at": datetime.now(timezone.utc)})
+    try:
+        await watcher._handle_ask("Too soon from laptop?", "r-cooldown-ws")
+    finally:
+        await watcher.aclose()
+
+    assert emitted[-1]["type"] == "assist_error"
+    assert "one question at a time" in emitted[-1]["message"].lower()
+    assert fake.calls == []
+
+
+async def test_two_phone_asks_do_not_both_reach_the_model(monkeypatch):
+    """Phone A + phone B. The ask slot — not the cap — is what serializes them,
+    so this holds with ask budget to spare."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_ASKS", 20)
+    fake, rows, _ = _capture_fakes(
+        monkeypatch,
+        responses=[_answer(), _answer("Second", "Also £40.")],
+        ai_delay=0.05,
+    )
+
+    first, second = await asyncio.gather(
+        las.answer_typed_question(
+            user_id="u-1", meeting_id="m-1", question="A?", request_id="r-a"),
+        las.answer_typed_question(
+            user_id="u-1", meeting_id="m-1", question="B?", request_id="r-b"),
+    )
+
+    assert sorted([first["type"], second["type"]]) == ["assist", "assist_error"]
+    assert len(fake.calls) == 1
+    assert len(rows) == 1
+    assert "m-1" not in las._ask_slots
+
+
+async def test_a_phone_ask_and_a_laptop_ask_do_not_both_reach_the_model(monkeypatch):
+    """The cross-transport case: the laptop's socket ask runs on the live
+    watcher, the phone's on a per-request one. They share the meeting's ask slot,
+    so only one expensive generation happens."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_ASKS", 20)
+    fake, rows, _ = _capture_fakes(
+        monkeypatch,
+        responses=[_answer(), _answer("Second", "Also £40.")],
+        ai_delay=0.05,
+    )
+    emitted: list[dict] = []
+
+    async def send_json(payload):
+        emitted.append(payload)
+
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=send_json)
+    await watcher.start(run_loop=False)
+    try:
+        laptop, phone = await asyncio.gather(
+            watcher._handle_ask("Laptop question?", "r-ws"),
+            las.answer_typed_question(
+                user_id="u-1", meeting_id="m-1",
+                question="Phone question?", request_id="r-rest"),
+        )
+    finally:
+        await watcher.aclose()
+
+    kinds = sorted([p["type"] for p in emitted] + [phone["type"]])
+    assert kinds == ["assist", "assist_error"]
+    assert len(fake.calls) == 1
+    assert len(rows) == 1
+
+
+async def test_repeating_a_request_id_replays_without_a_second_model_call(monkeypatch):
+    """A phone retry after a flaky response must not pay for a second answer or
+    write a duplicate card — and must not be rejected by the cooldown its own
+    first attempt started."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "ASK_MIN_INTERVAL_S", 600.0)
+    prior = {
+        "id": "item-earlier", "kind": "answer", "source": "ask",
+        "question": "What did they agree?", "title": "Pricing",
+        "body": "You agreed £40 last time.", "transcript_ts": 3.0,
+        "dismissed": False, "request_id": "req-retry", "metadata": {},
+        "created_at": datetime.now(timezone.utc),
+    }
+    fake, rows, _ = _capture_fakes(
+        monkeypatch, responses=[_answer()], replay_item=prior,
+    )
+
+    payload = await las.answer_typed_question(
+        user_id="u-1", meeting_id="m-1",
+        question="What did they agree?", request_id="req-retry",
+    )
+
+    assert payload["type"] == "assist"
+    assert payload["item"]["id"] == "item-earlier"
+    assert fake.calls == []     # no second generation
+    assert rows == []           # no duplicate row
+
+
+async def test_an_answer_is_not_persisted_into_a_meeting_that_ended(monkeypatch):
+    """The laptop pressed Stop while the model was still writing. The summary was
+    built at that moment, so the late answer must not land in the finished
+    meeting — and the user is told the meeting ended, not to retry."""
+    _fast_constants(monkeypatch)
+    fake, rows, seen_sql = _capture_fakes(
+        monkeypatch, responses=[_answer()], meeting_open=False,
+    )
+
+    payload = await las.answer_typed_question(
+        user_id="u-1", meeting_id="m-1", question="What did they agree?",
+        request_id="req-late",
+    )
+
+    assert payload["type"] == "assist_error"
+    assert "ended" in payload["message"].lower()
+    assert rows == []           # nothing written into the closed meeting
+    assert len(fake.calls) == 1  # the generation had already happened
+    guarded = [s for s in seen_sql if "INSERT INTO meeting_assist_items" in s]
+    assert len(guarded) == 1
+    assert "status = 'recording'" in guarded[0]
+    assert "FOR UPDATE" in guarded[0]
+
+
+async def test_shared_ask_lock_refuses_another_instance_before_model_call(monkeypatch):
+    """False from PostgreSQL means another Cloud Run instance owns the ask."""
+    _fast_constants(monkeypatch)
+    fake, _, emitted, send_json = _wire_fakes(monkeypatch, responses=[_answer()])
+    monkeypatch.setattr(las.db, "try_advisory_lock", AsyncMock(return_value=False))
+    unlock = AsyncMock()
+    monkeypatch.setattr(las.db, "advisory_unlock", unlock)
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=send_json)
+
+    await watcher._handle_ask("Can this run?", "r-remote")
+
+    assert emitted[-1]["type"] == "assist_error"
+    assert fake.calls == []
+    unlock.assert_not_awaited()

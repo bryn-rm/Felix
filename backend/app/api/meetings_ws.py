@@ -33,6 +33,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -40,7 +42,10 @@ from app import db
 from app.api.voice import _authenticate_ws
 from app.config import settings
 from app.middleware.rate_limit import check_monthly_ai_budget
-from app.models.meeting import MEETING_SOURCE_CAPTURE
+from app.models.meeting import (
+    CAPTURE_HEARTBEAT_INTERVAL_S,
+    MEETING_SOURCE_CAPTURE,
+)
 from app.services import live_assist_service, meeting_stt_service
 from app.services.meeting_service import _capture_enabled
 
@@ -51,6 +56,7 @@ router = APIRouter()
 _CLOSE_BAD_ORIGIN = 4003   # Origin mismatch (CSWSH)
 _CLOSE_BUDGET = 4029       # monthly AI budget exhausted
 _CLOSE_FORBIDDEN = 4404    # capture off / not owner / not recording
+
 
 
 def _origin_allowed(websocket: WebSocket) -> bool:
@@ -139,6 +145,95 @@ class _SocketWriter:
             self._task = None
 
 
+class _CaptureHeartbeat:
+    """Persist capture-socket liveness so any Cloud Run instance can read it.
+
+    A connection token makes takeover safe: an older socket's late heartbeat or
+    cleanup cannot overwrite/clear the newer connection's state.
+    """
+
+    def __init__(self, user_id: str, meeting_id: str) -> None:
+        self._user_id = user_id
+        self._meeting_id = meeting_id
+        self._token: UUID = uuid4()
+        self._last_write = float("-inf")
+        # Whether this connection's token is actually on the row. Only a write
+        # that matched a row proves it; until then a plain heartbeat would
+        # update nothing, because it filters on that same token.
+        self._attached = False
+
+    async def attach(self) -> None:
+        self._last_write = time.monotonic()
+        await self._write(claim=True)
+
+    async def beat(self) -> None:
+        now = time.monotonic()
+        if now - self._last_write < CAPTURE_HEARTBEAT_INTERVAL_S:
+            return
+        # Advance the throttle BEFORE the write, not after a successful one.
+        # beat() runs on the receive path — ~100 audio frames a second — so
+        # retrying a failed write on the next frame would put a pooled database
+        # round-trip in front of every frame for as long as the database is
+        # unhappy, starving STT and draining the pool for the whole process.
+        # Liveness that is one interval stale is the cheap failure; a write
+        # storm on the capture hot path is not.
+        self._last_write = now
+        # Re-claim when the row does not carry this token: attach may have hit
+        # a transient error, or lost the status race with /end + reconnect.
+        # Beating with an unclaimed token matches no row forever, which would
+        # leave the viewer calling a live capture disconnected for the life of
+        # the socket.
+        await self._write(claim=not self._attached)
+
+    async def _write(self, *, claim: bool) -> None:
+        """Run one heartbeat UPDATE and record whether it matched the row."""
+        if claim:
+            sql = (
+                "UPDATE meetings SET capture_connection_id = $1, "
+                "capture_heartbeat_at = NOW() "
+                "WHERE id = $2 AND user_id = $3 AND status = 'recording'"
+            )
+            args: tuple = (self._token, self._meeting_id, self._user_id)
+        else:
+            sql = (
+                "UPDATE meetings SET capture_heartbeat_at = NOW() "
+                "WHERE id = $1 AND user_id = $2 "
+                "AND capture_connection_id = $3 AND status = 'recording'"
+            )
+            args = (self._meeting_id, self._user_id, self._token)
+        try:
+            status = await db.execute(sql, *args)
+        except Exception:
+            self._attached = False
+            logger.warning(
+                "capture heartbeat write failed (meeting=%s, claim=%s)",
+                self._meeting_id, claim,
+                exc_info=True,
+            )
+            return
+        # asyncpg returns the command tag ("UPDATE 1"); zero rows means the
+        # predicate missed — another connection owns the row, or the meeting is
+        # no longer recording. Either way this token is not attached.
+        self._attached = str(status).rsplit(" ", 1)[-1] not in {"0", ""}
+
+    async def detach(self) -> None:
+        try:
+            await db.execute(
+                "UPDATE meetings SET capture_connection_id = NULL, "
+                "capture_heartbeat_at = NULL "
+                "WHERE id = $1 AND user_id = $2 AND capture_connection_id = $3",
+                self._meeting_id,
+                self._user_id,
+                self._token,
+            )
+        except Exception:
+            logger.warning(
+                "capture heartbeat detach failed (meeting=%s)",
+                self._meeting_id,
+                exc_info=True,
+            )
+
+
 @router.websocket("/ws/meetings/{meeting_id}")
 async def meeting_capture_stream(websocket: WebSocket, meeting_id: str) -> None:
     # 1. Origin check — reject before accepting the upgrade.
@@ -201,6 +296,12 @@ async def _run_capture(
     writer = _SocketWriter(websocket)
     writer.start()
 
+    # This belongs to the capture socket rather than Live Assist: liveness must
+    # remain accurate when the assist flag is off, watcher startup fails, or a
+    # viewer poll lands on another Cloud Run instance.
+    heartbeat = _CaptureHeartbeat(user_id, meeting_id)
+    await heartbeat.attach()
+
     # Live assist (fails closed — None when the flag is off). The watcher only
     # ever receives writer.send, preserving the single-writer invariant, and a
     # new connection takes over any previous watcher for this meeting.
@@ -249,6 +350,7 @@ async def _run_capture(
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 break
+            await heartbeat.beat()
 
             data = message.get("bytes")
             if data is not None:
@@ -308,4 +410,5 @@ async def _run_capture(
         await stt.stop()
         if assist is not None:
             await assist.aclose()
+        await heartbeat.detach()
         await writer.aclose()
