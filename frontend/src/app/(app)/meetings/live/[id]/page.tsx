@@ -15,6 +15,7 @@ import { useMeetingCapture } from "@/hooks/useMeetingCapture";
 import { useMeeting, useMeetings } from "@/hooks/useMeetings";
 import { AssistSidebar } from "@/components/meetings/AssistSidebar";
 import { LiveTranscript } from "@/components/meetings/LiveTranscript";
+import { PhoneHandoff } from "@/components/meetings/PhoneHandoff";
 import {
   NotesEditor,
   type NotesEditorHandle,
@@ -22,6 +23,7 @@ import {
 import { RecordingIndicator } from "@/components/meetings/RecordingIndicator";
 import {
   assistModeLabel,
+  liveAssistViewerPath,
   usesCandidateInterviewAssist,
 } from "@/components/meetings/constants";
 
@@ -70,8 +72,14 @@ export default function LiveMeetingPage({ params }: PageProps) {
   const [assistOpen, setAssistOpen] = useState(false);
   const [assistSeen, setAssistSeen] = useState(0);
   const incomingAssistItems = manualMode ? manualAssist.items : assistItems;
+  // The persisted row, not this device's socket state: what decides whether
+  // there is anything left to reconcile is whether the meeting is still open to
+  // assist writes — which is exactly when the phone can still answer or dismiss
+  // — and that stays true through a dropped capture socket.
+  const assistLive = meeting?.status === "recording";
   const { items: cards, dismiss } = useAssistItems(id, incomingAssistItems, {
     enabled: assistEnabled,
+    live: assistLive,
   });
   // The badge only exists on the capture branch (manual mode shows the sidebar
   // permanently, with no toggle to carry a count), so this tracking is scoped
@@ -179,6 +187,12 @@ export default function LiveMeetingPage({ params }: PageProps) {
 
         {loaded && sessionOpen && (
           <div className="flex items-center gap-2">
+            {/* Fails closed with the assist flag, like every other assist
+                affordance: the viewer's endpoints 404 without it, so offering
+                the handoff would send the phone to a dead page. */}
+            {assistEnabled && (
+              <PhoneHandoff meetingId={id} manualNotes={manualMode} />
+            )}
             {badgeActive && (
               <button
                 onClick={() => setAssistOpen((open) => !open)}
@@ -327,7 +341,7 @@ export default function LiveMeetingPage({ params }: PageProps) {
               viewer endpoint 404s without it. */}
           {assistEnabled && (
             <Link
-              href={`/meetings/live/${id}/viewer`}
+              href={liveAssistViewerPath(id)}
               className="text-xs font-medium text-indigo-400 hover:text-indigo-300"
             >
               Following along on another device? Open the live assist view →

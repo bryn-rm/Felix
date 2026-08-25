@@ -10,14 +10,15 @@ Flow:
   2. Backend returns a Google OAuth URL
   3. User approves → Google redirects to GET /auth/google/callback
   4. Backend exchanges code for tokens, encrypts + stores in google_connections
-  5. Redirects to /dashboard
+  5. Redirects to the validated requested page, or /dashboard by default
 """
 
+import base64
 import logging
 import secrets
 import traceback
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -64,9 +65,61 @@ def _frontend_redirect_url(path: str, query_params: dict[str, str] | None = None
     return f"{base_url}{normalized_path}"
 
 
-def _oauth_error_redirect(error_code: str) -> RedirectResponse:
+def _safe_return_path(raw: str | None) -> str | None:
+    """Return a bounded same-origin frontend path, never an absolute URL."""
+    if not raw or len(raw) > 2048 or not raw.startswith("/"):
+        return None
+    if raw.startswith("//") or raw.startswith("/\\"):
+        return None
+    if any(ord(char) < 32 or ord(char) == 127 for char in raw):
+        return None
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc:
+        return None
+    return urlunsplit(("", "", parsed.path, parsed.query, ""))
+
+
+def _oauth_state(user_id: str, nonce: str, return_to: str | None) -> str:
+    """Carry an optional return path with the nonce sent through Google."""
+    safe_path = _safe_return_path(return_to)
+    if not safe_path:
+        return f"{user_id}.{nonce}"
+    encoded = base64.urlsafe_b64encode(safe_path.encode()).decode().rstrip("=")
+    return f"{user_id}.{nonce}.{encoded}"
+
+
+def _parse_oauth_state(state: str) -> tuple[str, str, str | None]:
+    """Decode current and legacy OAuth states, re-validating the destination."""
+    parts = state.split(".", 2)
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError("invalid OAuth state format")
+    return_to = None
+    if len(parts) == 3 and parts[2]:
+        padding = "=" * (-len(parts[2]) % 4)
+        try:
+            decoded = base64.b64decode(
+                parts[2] + padding, altchars=b"-_", validate=True,
+            ).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("invalid OAuth return path") from exc
+        return_to = _safe_return_path(decoded)
+        if return_to is None:
+            raise ValueError("invalid OAuth return path")
+    return parts[0], parts[1], return_to
+
+
+def _oauth_error_redirect(
+    error_code: str, return_to: str | None = None,
+) -> RedirectResponse:
+    params = {"error": error_code}
+    safe_path = _safe_return_path(return_to)
+    if safe_path:
+        params["next"] = safe_path
     return RedirectResponse(
-        url=_frontend_redirect_url("/connect", {"error": error_code})
+        url=_frontend_redirect_url("/connect", params)
     )
 
 
@@ -75,12 +128,15 @@ def _oauth_error_redirect(error_code: str) -> RedirectResponse:
 # ---------------------------------------------------------------------------
 
 @router.get("/google/connect")
-async def connect_google(current_user: dict = Depends(get_current_user)):
+async def connect_google(
+    next: str | None = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
     """
     Return the Google OAuth consent URL for the signed-in Felix user.
     The frontend should redirect the user to this URL.
 
-    State parameter format: "<user_id>.<nonce>"
+    State parameter format: "<user_id>.<nonce>[.<encoded-return-path>]"
     The nonce is stored in oauth_nonces table with a 10-minute TTL and
     verified on callback to prevent CSRF attacks.
     """
@@ -112,7 +168,7 @@ async def connect_google(current_user: dict = Depends(get_current_user)):
         logger.error("[connect] step 3 FAILED — could not insert nonce into oauth_nonces: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to store OAuth nonce. Check server logs.")
 
-    state = f"{user_id}.{nonce}"
+    state = _oauth_state(user_id, nonce, next)
 
     params = {
         "client_id": settings.GOOGLE_CLIENT_ID,
@@ -144,20 +200,30 @@ async def google_callback(
     Google redirects here after the user approves (or denies) access.
     Exchanges the code for tokens and stores them encrypted in google_connections.
 
-    State format: "<user_id>.<nonce>" — nonce is verified against oauth_nonces
-    to prevent CSRF attacks, then deleted (one-time use).
+    State format: "<user_id>.<nonce>[.<encoded-return-path>]" — nonce is
+    verified against oauth_nonces to prevent CSRF attacks, then deleted
+    (one-time use). The optional path is validated before every redirect.
     """
+    return_to: str | None = None
     if error:
-        return _oauth_error_redirect("google_denied")
+        try:
+            _, _, return_to = _parse_oauth_state(state)
+        except ValueError:
+            pass
+        return _oauth_error_redirect("google_denied", return_to)
 
     if not code:
         logger.warning("[callback] missing authorization code in Google callback")
-        return _oauth_error_redirect("missing_code")
+        try:
+            _, _, return_to = _parse_oauth_state(state)
+        except ValueError:
+            pass
+        return _oauth_error_redirect("missing_code", return_to)
 
     try:
         # Parse state: "<user_id>.<nonce>"
         try:
-            user_id, nonce = state.split(".", 1)
+            user_id, nonce, return_to = _parse_oauth_state(state)
         except ValueError:
             logger.warning("[callback] invalid OAuth state format: state=%s", state)
             raise HTTPException(status_code=400, detail="Invalid OAuth state parameter.")
@@ -309,8 +375,9 @@ async def google_callback(
             conflict_columns=["user_id"],
         )
 
-        logger.info("[callback] success — redirecting user_id=%s to /dashboard", user_id)
-        return RedirectResponse(url=_frontend_redirect_url("/dashboard"))
+        destination = return_to or "/dashboard"
+        logger.info("[callback] success — redirecting user_id=%s to %s", user_id, destination)
+        return RedirectResponse(url=_frontend_redirect_url(destination))
 
     except HTTPException as exc:
         logger.warning("[callback] handled HTTPException status=%s detail=%s", exc.status_code, exc.detail)
@@ -318,9 +385,9 @@ async def google_callback(
         # exception detail in the redirect URL.
         detail_lower = str(exc.detail).lower()
         if "expired" in detail_lower:
-            return _oauth_error_redirect("oauth_expired")
+            return _oauth_error_redirect("oauth_expired", return_to)
         elif "state" in detail_lower or "nonce" in detail_lower or "csrf" in detail_lower:
-            return _oauth_error_redirect("oauth_invalid_state")
+            return _oauth_error_redirect("oauth_invalid_state", return_to)
         elif "refresh" in detail_lower:
             reason_code = "missing_refresh_token"
         elif "token" in detail_lower or "exchange" in detail_lower:
@@ -329,7 +396,7 @@ async def google_callback(
             reason_code = "userinfo_failed"
         else:
             reason_code = "unknown_error"
-        return _oauth_error_redirect(reason_code)
+        return _oauth_error_redirect(reason_code, return_to)
     except Exception as exc:
         logger.error("[callback] unexpected error: %s\n%s", exc, traceback.format_exc())
         raise

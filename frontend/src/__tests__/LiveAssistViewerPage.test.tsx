@@ -13,7 +13,7 @@ jest.mock("@/lib/api", () => {
     api: { get: jest.fn(), post: jest.fn(), put: jest.fn(), del: jest.fn() },
   };
 });
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 
 const mockGet = api.get as jest.Mock;
 const mockPost = api.post as jest.Mock;
@@ -59,6 +59,7 @@ let openedSockets: string[];
 let getUserMedia: jest.Mock;
 let getDisplayMedia: jest.Mock;
 let realWebSocket: typeof WebSocket;
+let scrollIntoViewDescriptor: PropertyDescriptor | undefined;
 
 function renderViewer() {
   return render(
@@ -67,6 +68,15 @@ function renderViewer() {
       <LiveAssistViewerPage params={{ id: "m-1" }} />
     </SWRConfig>,
   );
+}
+
+/** The one element on the page that scrolls: the card stream. */
+function cardStream(): HTMLElement {
+  const list = screen
+    .getByText("Renewal is Friday")
+    .closest("div[class*='overflow-y-auto']");
+  if (!list) throw new Error("card stream not found");
+  return list as HTMLElement;
 }
 
 async function typeAndSend(question: string) {
@@ -88,6 +98,10 @@ beforeEach(() => {
 
   openedSockets = [];
   realWebSocket = global.WebSocket;
+  scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
+    window.HTMLElement.prototype,
+    "scrollIntoView",
+  );
   // Any attempt to open the capture socket is recorded rather than performed.
   global.WebSocket = class {
     constructor(url: string) {
@@ -105,6 +119,15 @@ beforeEach(() => {
 
 afterEach(() => {
   global.WebSocket = realWebSocket;
+  if (scrollIntoViewDescriptor) {
+    Object.defineProperty(
+      window.HTMLElement.prototype,
+      "scrollIntoView",
+      scrollIntoViewDescriptor,
+    );
+  } else {
+    Reflect.deleteProperty(window.HTMLElement.prototype, "scrollIntoView");
+  }
 });
 
 describe("LiveAssistViewerPage — capture isolation", () => {
@@ -269,7 +292,7 @@ describe("LiveAssistViewerPage — status", () => {
     expect(screen.getByLabelText(/ask felix a question/i)).toBeInTheDocument();
   });
 
-  it("reports nothing about liveness for a manual session", async () => {
+  it("reports a live manual session without claiming it is recording", async () => {
     mockGet.mockResolvedValue(
       snapshot({
         meeting: { ...liveMeeting, source: "manual_notes" },
@@ -282,7 +305,8 @@ describe("LiveAssistViewerPage — status", () => {
     expect(
       screen.queryByText(/recording device isn’t connected/i),
     ).not.toBeInTheDocument();
-    expect(screen.getByText(/recording on another device/i)).toBeInTheDocument();
+    expect(screen.getByText(/manual notes · no recording/i)).toBeInTheDocument();
+    expect(screen.queryByText(/recording on another device/i)).not.toBeInTheDocument();
   });
 
   it("becomes an ended, read-only view once the meeting is over", async () => {
@@ -310,5 +334,194 @@ describe("LiveAssistViewerPage — status", () => {
       await screen.findByText(/live assist isn’t available for this meeting/i),
     ).toBeInTheDocument();
     expect(openedSockets).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: the phone as something someone actually holds through a meeting
+// ---------------------------------------------------------------------------
+
+describe("LiveAssistViewerPage — mobile use", () => {
+  it("shows the question is being worked on where the answer will appear", async () => {
+    // The composer's own pending line is the first thing the mobile keyboard
+    // covers, so the stream has to say it too.
+    mockGet.mockResolvedValue(snapshot());
+    let settle: (value: unknown) => void = () => {};
+    mockPost.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    const { container } = renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    await typeAndSend("What did they agree?");
+
+    expect(await screen.findByText(/felix is working on your question/i)).toBeInTheDocument();
+    expect(screen.queryByText(/asking felix/i)).not.toBeInTheDocument();
+    expect(container.querySelectorAll(".animate-spin")).toHaveLength(1);
+
+    await act(async () => {
+      settle({ item: { ...card, id: "i-2", source: "ask", title: "They agreed £40" } });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText(/felix is working on your question/i)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("They agreed £40")).toBeInTheDocument();
+  });
+
+  it("reveals an explicit ask and keeps following after its own scroll event", async () => {
+    mockGet.mockResolvedValue(snapshot());
+    let settle: (value: unknown) => void = () => {};
+    mockPost.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+
+    const offsetTopDescriptor = Object.getOwnPropertyDescriptor(
+      window.HTMLElement.prototype,
+      "offsetTop",
+    );
+    Object.defineProperty(window.HTMLElement.prototype, "offsetTop", {
+      configurable: true,
+      get() {
+        const element = this as HTMLElement;
+        const text = element.textContent ?? "";
+        if (element.className.includes("border-indigo-500/20")) return 900;
+        if (
+          element.parentElement?.className.includes("overflow-y-auto") &&
+          text.includes("They agreed £40")
+        ) {
+          return 1200;
+        }
+        return 0;
+      },
+    });
+
+    try {
+      renderViewer();
+      await screen.findByText("Renewal is Friday");
+      const list = cardStream();
+      Object.defineProperty(list, "scrollHeight", { value: 2400, configurable: true });
+      Object.defineProperty(list, "clientHeight", { value: 400, configurable: true });
+
+      // The reader was looking at an older card before asking explicitly.
+      list.scrollTop = 300;
+      fireEvent.scroll(list);
+
+      await typeAndSend("What did they agree?");
+      expect(await screen.findByText(/felix is working on your question/i)).toBeInTheDocument();
+      expect(list.scrollTop).toBe(900);
+
+      // Browsers dispatch this for the assignment above. It must not be read as
+      // the user abandoning follow mode just because the target is tall.
+      fireEvent.scroll(list);
+
+      await act(async () => {
+        settle({ item: { ...card, id: "i-2", source: "ask", title: "They agreed £40" } });
+      });
+      await screen.findByText("They agreed £40");
+      expect(list.scrollTop).toBe(1200);
+    } finally {
+      if (offsetTopDescriptor) {
+        Object.defineProperty(
+          window.HTMLElement.prototype,
+          "offsetTop",
+          offsetTopDescriptor,
+        );
+      } else {
+        Reflect.deleteProperty(window.HTMLElement.prototype, "offsetTop");
+      }
+    }
+  });
+
+  it("does not drag the page when a card arrives — only the card stream moves", async () => {
+    // scrollIntoView on a phone scrolls the app shell around the viewer, not
+    // just the stream. The stream scrolls itself instead.
+    const scrollIntoView = jest.fn();
+    window.HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    mockGet.mockResolvedValue(snapshot());
+    mockPost.mockResolvedValue({
+      item: { ...card, id: "i-2", source: "ask", title: "They agreed £40" },
+    });
+    renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    await typeAndSend("What did they agree?");
+    await screen.findByText("They agreed £40");
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it("leaves the scroll position alone while an older card is being read", async () => {
+    // Cards arrive unasked-for mid-meeting. Following the newest one is right
+    // at the live edge and wrong halfway up the stream.
+    mockGet.mockResolvedValue(snapshot());
+    mockPost.mockResolvedValue({
+      item: { ...card, id: "i-2", source: "ask", title: "They agreed £40" },
+    });
+    renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    const list = cardStream();
+    Object.defineProperty(list, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(list, "clientHeight", { value: 400, configurable: true });
+    list.scrollTop = 500; // 1100px from the bottom — reading, not following
+    fireEvent.scroll(list);
+
+    await typeAndSend("What did they agree?");
+    await screen.findByText("They agreed £40");
+
+    expect(list.scrollTop).toBe(500);
+  });
+
+  it("keeps the meeting's identity and state pinned outside the scrolling stream", async () => {
+    mockGet.mockResolvedValue(
+      snapshot({
+        meeting: { ...liveMeeting, meeting_type: "interview", user_role: "candidate" },
+      }),
+    );
+    renderViewer();
+
+    const title = await screen.findByRole("heading", { name: "Roadmap" });
+    expect(cardStream().contains(title)).toBe(false);
+    expect(screen.getByText("Interview · Candidate")).toBeInTheDocument();
+    expect(screen.getByText(/recording on another device/i)).toBeInTheDocument();
+  });
+
+  it("always says which device owns recording and notes once cards arrive", async () => {
+    mockGet.mockResolvedValue(snapshot());
+    renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    expect(screen.getByText(/second screen/i)).toBeInTheDocument();
+    expect(screen.getByText(/recording and notes stay on the device/i)).toBeInTheDocument();
+    // And no capture controls have crept in with the polish.
+    expect(screen.queryByRole("button", { name: /start recording/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /stop & summarize/i })).not.toBeInTheDocument();
+    expect(openedSockets).toEqual([]);
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(getDisplayMedia).not.toHaveBeenCalled();
+  });
+});
+
+describe("LiveAssistViewerPage — the other device is already asking", () => {
+  it("surfaces the server's reason rather than a generic failure", async () => {
+    // One typed answer runs per meeting at a time. When the laptop holds that
+    // slot the phone has no other way to know why nothing happened.
+    mockGet.mockResolvedValue(snapshot());
+    mockPost.mockRejectedValue(
+      new ApiError(
+        400,
+        "Felix is already answering another question for this meeting — try again once it finishes.",
+      ),
+    );
+    renderViewer();
+    await screen.findByText("Renewal is Friday");
+
+    await typeAndSend("What did they agree?");
+
+    expect(
+      await screen.findByText(/already answering another question/i),
+    ).toBeInTheDocument();
+    // And the question survives, so retrying is one tap.
+    await waitFor(() =>
+      expect(screen.getByLabelText(/ask felix a question/i)).toHaveValue(
+        "What did they agree?",
+      ),
+    );
   });
 });

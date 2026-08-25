@@ -21,6 +21,19 @@ export function templateLabel(template: string | null | undefined): string {
   return TEMPLATES.find((t) => t.value === template)?.label ?? "General";
 }
 
+/**
+ * The Live Assist viewer route for a meeting — an ordinary authenticated app
+ * path, and deliberately nothing more. It is what the phone handoff QR encodes,
+ * so it carries no token and confers no access: whoever opens it signs in as
+ * themselves and the server's ownership checks decide the rest.
+ *
+ * One definition so the link the laptop shows and the link it encodes cannot
+ * drift apart.
+ */
+export function liveAssistViewerPath(meetingId: string): string {
+  return `/meetings/live/${meetingId}/viewer`;
+}
+
 export type AssistMeetingMode =
   | "general"
   | "interview_candidate"

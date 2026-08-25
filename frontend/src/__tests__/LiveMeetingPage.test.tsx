@@ -6,6 +6,7 @@ import { ApiError } from "@/lib/api";
 import { useMeetingCapture } from "@/hooks/useMeetingCapture";
 import { useMeeting, useMeetings } from "@/hooks/useMeetings";
 import { useAssistAsk } from "@/hooks/useAssistAsk";
+import { ASSIST_RECONCILE_MS } from "@/hooks/useAssistItems";
 
 const push = jest.fn();
 jest.mock("next/navigation", () => ({
@@ -47,11 +48,17 @@ interface SetupOptions {
   assistFlag?: boolean;
   assistItems?: unknown[];
   meeting?: Record<string, unknown>;
+  captureStatus?: string;
 }
 
 function setup(
   endMeetingImpl: () => Promise<unknown>,
-  { assistFlag = false, assistItems = [], meeting = {} }: SetupOptions = {},
+  {
+    assistFlag = false,
+    assistItems = [],
+    meeting = {},
+    captureStatus = "recording", // so the "Stop & summarize" button renders
+  }: SetupOptions = {},
 ) {
   failCapture = jest.fn();
   stop = jest.fn().mockResolvedValue(undefined);
@@ -71,7 +78,7 @@ function setup(
       : { data: undefined, mutate: jest.fn() },
   );
   mockUseMeetingCapture.mockReturnValue({
-    status: "recording", // so the "Stop & summarize" button renders
+    status: captureStatus,
     error: null,
     liveTranscript: [],
     interim: { me: "", them: "" },
@@ -100,6 +107,9 @@ async function clickStop() {
 
 beforeEach(() => {
   push.mockReset();
+  // Calls accumulate across tests otherwise, and the assist-list assertions
+  // below read the config off the call this render made.
+  mockUseSWR.mockClear();
   // jsdom doesn't implement scrollIntoView (LiveTranscript auto-scrolls).
   window.HTMLElement.prototype.scrollIntoView = jest.fn();
 });
@@ -169,6 +179,12 @@ describe("LiveMeetingPage live assist", () => {
     expect(screen.queryByRole("button", { name: /start recording/i })).not.toBeInTheDocument();
     expect(screen.getAllByText(/ask about previous meetings/i).length).toBeGreaterThan(0);
 
+    fireEvent.click(screen.getByRole("button", { name: /view on phone/i }));
+    expect(
+      screen.getByText(/manual-notes meeting isn’t being recorded/i),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+
     fireEvent.change(screen.getByLabelText(/ask felix a question/i), {
       target: { value: "What did we decide last time?" },
     });
@@ -227,6 +243,95 @@ describe("LiveMeetingPage live assist", () => {
       fireEvent.click(screen.getAllByLabelText(/send question/i)[0]);
     });
     expect(sendAsk).toHaveBeenCalledWith("Who is Sarah?");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: getting the meeting onto a phone, and agreeing with it afterwards
+// ---------------------------------------------------------------------------
+
+/** The SWR config the page handed the assist-list key, if it asked for one. */
+function assistListConfig(): { refreshInterval?: number } | null {
+  const call = mockUseSWR.mock.calls.find(
+    ([key]) => key === "/meetings/m-1/assist",
+  );
+  return call ? (call[2] ?? {}) : null;
+}
+
+describe("LiveMeetingPage phone handoff", () => {
+  it("offers the handoff while the session is open", () => {
+    setup(() => Promise.resolve({}), {
+      assistFlag: true,
+      meeting: { status: "recording" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /view on phone/i }));
+
+    const dialog = screen.getByRole("dialog", {
+      name: /view live assist on phone/i,
+    });
+    // The ordinary authenticated viewer route for this meeting, nothing more.
+    expect(
+      screen.getByDisplayValue("http://localhost/meetings/live/m-1/viewer"),
+    ).toBeInTheDocument();
+    expect(dialog).toBeInTheDocument();
+  });
+
+  it("hides the handoff when live assist is off", () => {
+    // Fail closed with every other assist affordance: without the flag the
+    // viewer's endpoints 404, so the QR would lead to a dead page.
+    setup(() => Promise.resolve({}), {
+      assistFlag: false,
+      meeting: { status: "recording" },
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /view on phone/i }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("LiveMeetingPage cross-device reconciliation", () => {
+  it("revalidates persisted assist state while the meeting is open", () => {
+    setup(() => Promise.resolve({}), {
+      assistFlag: true,
+      meeting: { status: "recording" },
+    });
+
+    // The socket still delivers everything this device causes; this only closes
+    // the gap for what the phone did, which is never on this socket.
+    expect(assistListConfig()?.refreshInterval).toBe(ASSIST_RECONCILE_MS);
+  });
+
+  it("stops revalidating once the meeting is no longer open to assist writes", () => {
+    setup(() => Promise.resolve({}), {
+      assistFlag: true,
+      meeting: { status: "processing" },
+    });
+
+    expect(assistListConfig()?.refreshInterval).toBe(0);
+  });
+
+  it("keeps revalidating through a dropped capture socket", () => {
+    // The phone can still ask and dismiss while this device's socket is down —
+    // the meeting row, not the socket, decides whether there is anything left
+    // to reconcile.
+    setup(() => Promise.resolve({}), {
+      assistFlag: true,
+      meeting: { status: "recording" },
+      captureStatus: "reconnecting",
+    });
+
+    expect(assistListConfig()?.refreshInterval).toBe(ASSIST_RECONCILE_MS);
+  });
+
+  it("asks for nothing to reconcile when live assist is off", () => {
+    setup(() => Promise.resolve({}), {
+      assistFlag: false,
+      meeting: { status: "recording" },
+    });
+
+    expect(assistListConfig()).toBeNull();
   });
 });
 

@@ -4,6 +4,7 @@ import {
   markGoogleDisconnected,
 } from "@/lib/google-connection-status";
 import { inboxDebug } from "@/lib/inbox-debug";
+import { loginUrlFor } from "@/lib/return-to";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -15,12 +16,19 @@ let _redirecting = false;
  * via a global "Google disconnected" signal instead, so the user can see
  * and act on the reconnect prompt without being yanked off the current
  * page (especially /settings, where disconnect/reconnect lives).
+ *
+ * The page being left is carried as ?next= so signing in lands back on it —
+ * the same return path the server-side auth guard uses. It matters most on a
+ * phone, where a Live Assist viewer left open through a long meeting can come
+ * back from the background to an expired token.
  */
 export function redirectForAuthStatus(status: number): void {
   if (typeof window === "undefined" || _redirecting) return;
   if (status !== 401) return;
   _redirecting = true;
-  window.location.href = "/login";
+  window.location.href = loginUrlFor(
+    `${window.location.pathname}${window.location.search}`,
+  );
 }
 
 // ---------------------------------------------------------------------------

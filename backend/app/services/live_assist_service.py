@@ -159,6 +159,7 @@ ASK_MAX_CHARS = 6000
 # follow-ups when the previous answer returned quickly.
 ASK_MIN_INTERVAL_S = 1.0
 MAX_ASKS = 20
+ASK_UNAVAILABLE_MESSAGE = "Couldn't answer that just now — try again."
 
 # Budget
 BUDGET_RECHECK_EVERY = 20     # watch calls between check_monthly_ai_budget runs
@@ -1176,7 +1177,7 @@ class LiveAssistWatcher:
             return "That answer ran too long to show — ask for one part of it."
         if self._last_call_timed_out:
             return "That took too long to answer — ask for a smaller piece of it."
-        return "Couldn't answer that just now — try again."
+        return ASK_UNAVAILABLE_MESSAGE
 
     def _accept(self, card: dict) -> tuple[bool, str]:
         """Server-side acceptance gate — never trust the model's own judgment alone."""
@@ -1219,12 +1220,24 @@ class LiveAssistWatcher:
         Run instances — from both reaching the model. Whoever gets there second
         is refused rather than queued.
         """
-        async with _ask_slot(self.meeting_id) as acquired:
-            if not acquired:
+        async with _ask_slot(self.meeting_id) as slot_status:
+            if slot_status != "acquired":
+                if slot_status == "busy":
+                    # Name what is actually happening. With two devices on one
+                    # meeting this is nearly always the other one's question
+                    # still running, and waiting is the fix.
+                    message = (
+                        "Felix is already answering another question for this "
+                        "meeting — try again once it finishes."
+                    )
+                else:
+                    # Includes "unavailable" and any future/invalid status: an
+                    # ask slot must be explicitly acquired before model work.
+                    message = ASK_UNAVAILABLE_MESSAGE
                 await self._send_json({
                     "type": "assist_error",
                     "request_id": request_id,
-                    "message": "One question at a time — try again in a few seconds.",
+                    "message": message,
                 })
                 return
             # A capture watcher may have lived for hours while another device
@@ -2036,7 +2049,7 @@ _ask_slots: dict[str, _AskSlot] = {}
 
 @asynccontextmanager
 async def _ask_slot(meeting_id: str):
-    """Yield True holding this meeting's local and database ask slots.
+    """Yield ``acquired``, ``busy``, or ``unavailable`` for an ask attempt.
 
     Refusing beats queueing: the caller's transport has a deadline
     (ASK_TIMEOUT_MS in the browser), the answer would be generated against a
@@ -2053,7 +2066,7 @@ async def _ask_slot(meeting_id: str):
     try:
         # No await between the test and the acquire, so this cannot interleave.
         if slot.lock.locked():
-            yield False
+            yield "busy"
         else:
             async with slot.lock:
                 lock_key = f"felix_live_assist_ask:{meeting_id}"
@@ -2065,13 +2078,13 @@ async def _ask_slot(meeting_id: str):
                         meeting_id,
                         exc_info=True,
                     )
-                    yield False
+                    yield "unavailable"
                     return
                 if not owns_shared_lock:
-                    yield False
+                    yield "busy"
                     return
                 try:
-                    yield True
+                    yield "acquired"
                 finally:
                     # Shielded: the caller is a request handler FastAPI
                     # cancels when the browser aborts (its ASK_TIMEOUT_MS, or a
@@ -2160,7 +2173,7 @@ async def answer_typed_question(
     return {
         "type": "assist_error",
         "request_id": request_id,
-        "message": "Couldn’t answer that just now — try again.",
+        "message": ASK_UNAVAILABLE_MESSAGE,
     }
 
 

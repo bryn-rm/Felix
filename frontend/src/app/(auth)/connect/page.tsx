@@ -2,6 +2,7 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
+import { loginUrlFor, safeReturnPath } from "@/lib/return-to";
 import { ConnectPageClient } from "./page-client";
 
 type ConnectPageProps = {
@@ -47,6 +48,16 @@ async function isGoogleConnected(accessToken: string): Promise<boolean> {
 }
 
 export default async function ConnectPage({ searchParams }: ConnectPageProps) {
+  // Resolve the destination before either auth guard so every redirect can
+  // carry it. It remains untrusted and is revalidated at each hop.
+  const resolvedParams = (await searchParams) ?? {};
+  const errorParam = resolvedParams.error;
+  const errorCode = Array.isArray(errorParam) ? errorParam[0] : errorParam;
+  const nextParam = resolvedParams.next;
+  const returnTo = safeReturnPath(
+    Array.isArray(nextParam) ? nextParam[0] : nextParam,
+  );
+
   const cookieStore = cookies();
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -71,12 +82,8 @@ export default async function ConnectPage({ searchParams }: ConnectPageProps) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
-    redirect("/login");
+    redirect(loginUrlFor(returnTo));
   }
-
-  const resolvedParams = (await searchParams) ?? {};
-  const errorParam = resolvedParams.error;
-  const errorCode = Array.isArray(errorParam) ? errorParam[0] : errorParam;
 
   // If the backend redirected here with ?error=..., always render the page so
   // the user sees the remediation message — even if a stale google_connections
@@ -86,9 +93,17 @@ export default async function ConnectPage({ searchParams }: ConnectPageProps) {
       data: { session },
     } = await supabase.auth.getSession();
     if (session?.access_token && (await isGoogleConnected(session.access_token))) {
-      redirect("/home");
+      // The last hop of a return-to-where-you-were-going sign-in. Validated
+      // again here — the parameter is now visible in the URL bar, so this is
+      // the point someone would try to bend it into an off-site redirect.
+      redirect(returnTo ?? "/home");
     }
   }
 
-  return <ConnectPageClient initialError={resolveOauthErrorMessage(errorCode ?? null)} />;
+  return (
+    <ConnectPageClient
+      initialError={resolveOauthErrorMessage(errorCode ?? null)}
+      returnTo={returnTo}
+    />
+  );
 }

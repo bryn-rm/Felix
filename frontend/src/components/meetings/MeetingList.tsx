@@ -6,7 +6,11 @@ import { Trash2 } from "lucide-react";
 
 import { isMeetingCaptureSupported } from "@/lib/capture-support";
 import type { Meeting } from "@/lib/types";
-import { STATUS_META, templateLabel } from "@/components/meetings/constants";
+import {
+  liveAssistViewerPath,
+  STATUS_META,
+  templateLabel,
+} from "@/components/meetings/constants";
 
 function whenLabel(m: Meeting): string {
   const raw = m.started_at || m.date || m.created_at;
@@ -32,7 +36,7 @@ function whenLabel(m: Meeting): string {
 function hrefFor(m: Meeting, canCapture: boolean): string {
   if (m.status !== "recording") return `/meetings/${m.id}`;
   if (canCapture || m.source === "manual_notes") return `/meetings/live/${m.id}`;
-  return `/meetings/live/${m.id}/viewer`;
+  return liveAssistViewerPath(m.id);
 }
 
 /**

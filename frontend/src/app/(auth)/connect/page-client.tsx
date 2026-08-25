@@ -21,9 +21,13 @@ const permissions = [
 
 type ConnectPageClientProps = {
   initialError: string | null;
+  returnTo: string | null;
 };
 
-export function ConnectPageClient({ initialError }: ConnectPageClientProps) {
+export function ConnectPageClient({
+  initialError,
+  returnTo,
+}: ConnectPageClientProps) {
   const [loading, setLoading] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
 
@@ -31,7 +35,10 @@ export function ConnectPageClient({ initialError }: ConnectPageClientProps) {
     setLoading(true);
     setRequestError(null);
     try {
-      const data = await api.get<{ auth_url: string }>("/auth/google/connect");
+      const path = returnTo
+        ? `/auth/google/connect?next=${encodeURIComponent(returnTo)}`
+        : "/auth/google/connect";
+      const data = await api.get<{ auth_url: string }>(path);
       window.location.href = data.auth_url;
     } catch (err) {
       setRequestError(err instanceof Error ? err.message : "Something went wrong");

@@ -10,6 +10,8 @@ interface AssistComposerProps {
   askError: string | null;
   interviewMode?: boolean;
   standaloneMode?: boolean;
+  /** Another part of the surface owns the visible pending state. */
+  externalPendingIndicator?: boolean;
   /**
    * Run just before the question goes out — the live page uses it to flush the
    * debounced notes autosave, so an ask about a line typed a second ago isn't
@@ -32,6 +34,7 @@ export function AssistComposer({
   askError,
   interviewMode = false,
   standaloneMode = false,
+  externalPendingIndicator = false,
   onBeforeAsk,
 }: AssistComposerProps) {
   const [question, setQuestion] = useState("");
@@ -89,7 +92,7 @@ export function AssistComposer({
       {askError && !submitting && (
         <p className="mb-2 text-xs text-red-400">{askError}</p>
       )}
-      {busy && (
+      {busy && !externalPendingIndicator && (
         <p role="status" className="mb-2 flex items-center gap-1.5 text-xs text-indigo-300">
           <Loader2 className="h-3 w-3 animate-spin" />
           Asking Felix…
@@ -119,7 +122,7 @@ export function AssistComposer({
           aria-label="Send question"
           className="rounded-lg bg-indigo-600 p-2 text-white transition-colors hover:bg-indigo-500 disabled:opacity-40"
         >
-          {busy ? (
+          {busy && !externalPendingIndicator ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
             <SendHorizonal className="h-4 w-4" />

@@ -1,8 +1,9 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthSync } from "@/components/auth/AuthSync";
+import { connectUrlFor, PATHNAME_HEADER, loginUrlFor } from "@/lib/return-to";
 
 export default async function AppLayout({
   children,
@@ -35,7 +36,12 @@ export default async function AppLayout({
   } = await supabase.auth.getUser();
 
   if (!user) {
-    redirect("/login");
+    // Come back here afterwards. This is what makes a link opened cold on a
+    // second device — a Live Assist viewer URL scanned off a laptop — land on
+    // the meeting it names rather than on /home. The path is validated on the
+    // way out and again on every hop, and grants nothing: the viewer still runs
+    // the same ownership checks for whoever ends up signed in.
+    redirect(loginUrlFor(headers().get(PATHNAME_HEADER)));
   }
 
   const {
@@ -63,7 +69,7 @@ export default async function AppLayout({
     }
   }
   if (!connected) {
-    redirect("/connect");
+    redirect(connectUrlFor(headers().get(PATHNAME_HEADER)));
   }
 
   const displayName =

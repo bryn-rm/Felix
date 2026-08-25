@@ -18,6 +18,7 @@ Covers, per the live-assist plan:
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1880,8 +1881,8 @@ async def test_ask_slot_releases_the_shared_lock_when_cancelled(monkeypatch):
     holding = asyncio.Event()
 
     async def holder():
-        async with las._ask_slot("m-cancel") as acquired:
-            assert acquired
+        async with las._ask_slot("m-cancel") as slot_status:
+            assert slot_status == "acquired"
             holding.set()
             await asyncio.sleep(3600)  # stands in for the model call
 
@@ -2663,3 +2664,136 @@ async def test_shared_ask_lock_refuses_another_instance_before_model_call(monkey
     assert emitted[-1]["type"] == "assist_error"
     assert fake.calls == []
     unlock.assert_not_awaited()
+
+
+async def test_shared_ask_lock_failure_reports_availability_not_contention(monkeypatch):
+    """A broken lock session does not mean another user's ask is running."""
+    _fast_constants(monkeypatch)
+    fake, _, emitted, send_json = _wire_fakes(monkeypatch, responses=[_answer()])
+    monkeypatch.setattr(
+        las.db,
+        "try_advisory_lock",
+        AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+    unlock = AsyncMock()
+    monkeypatch.setattr(las.db, "advisory_unlock", unlock)
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=send_json)
+
+    await watcher._handle_ask("Can this run?", "r-lock-error")
+
+    assert emitted[-1]["type"] == "assist_error"
+    message = emitted[-1]["message"].lower()
+    assert "try again" in message
+    assert "already answering another question" not in message
+    assert fake.calls == []
+    unlock.assert_not_awaited()
+
+
+async def test_unknown_ask_slot_status_fails_closed(monkeypatch):
+    """Only the explicit acquired status may reach model work."""
+    _fast_constants(monkeypatch)
+    fake, _, emitted, send_json = _wire_fakes(monkeypatch, responses=[_answer()])
+
+    @asynccontextmanager
+    async def unexpected_slot(_meeting_id):
+        yield "new-status"
+
+    monkeypatch.setattr(las, "_ask_slot", unexpected_slot)
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=send_json)
+
+    await watcher._handle_ask("Can this run?", "r-unknown-slot")
+
+    assert emitted[-1] == {
+        "type": "assist_error",
+        "request_id": "r-unknown-slot",
+        "message": las.ASK_UNAVAILABLE_MESSAGE,
+    }
+    assert fake.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: saying whose question is in the way
+# ---------------------------------------------------------------------------
+
+
+async def test_a_concurrent_ask_names_the_other_question_in_progress(monkeypatch):
+    """Two devices, one ask slot. Whoever loses has to be told what is actually
+    happening — on a phone showing no pending state of its own, a bare "one
+    question at a time" reads as a scold for something the user didn't do."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_ASKS", 20)
+    _capture_fakes(
+        monkeypatch,
+        responses=[_answer(), _answer("Second", "Also £40.")],
+        ai_delay=0.05,
+    )
+
+    first, second = await asyncio.gather(
+        las.answer_typed_question(
+            user_id="u-1", meeting_id="m-1", question="A?", request_id="r-a"),
+        las.answer_typed_question(
+            user_id="u-1", meeting_id="m-1", question="B?", request_id="r-b"),
+    )
+
+    refused = first if first["type"] == "assist_error" else second
+    assert refused["type"] == "assist_error"
+    message = refused["message"].lower()
+    assert "already answering another question" in message
+    assert "try again" in message
+
+
+async def test_the_refusal_reaches_both_transports_identically(monkeypatch):
+    """The laptop's socket ask and the phone's REST ask share one slot, so
+    either can be the one refused — and the message must not depend on which."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "MAX_ASKS", 20)
+    _capture_fakes(
+        monkeypatch,
+        responses=[_answer(), _answer("Second", "Also £40.")],
+        ai_delay=0.05,
+    )
+    emitted: list[dict] = []
+
+    async def send_json(payload):
+        emitted.append(payload)
+
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=send_json)
+    await watcher.start(run_loop=False)
+    try:
+        _, phone = await asyncio.gather(
+            watcher._handle_ask("Laptop question?", "r-ws"),
+            las.answer_typed_question(
+                user_id="u-1", meeting_id="m-1",
+                question="Phone question?", request_id="r-rest"),
+        )
+    finally:
+        await watcher.aclose()
+
+    payloads = [p for p in emitted + [phone] if p.get("type") == "assist_error"]
+    assert len(payloads) == 1
+    assert "already answering another question" in payloads[0]["message"].lower()
+
+
+async def test_the_burst_backstop_keeps_its_own_wording(monkeypatch):
+    """The 1s cooldown is a different condition from a genuinely concurrent ask,
+    and must not be relabelled as one — nothing is running for the user to wait
+    on, so "try again once it finishes" would be a lie."""
+    _fast_constants(monkeypatch)
+    monkeypatch.setattr(las, "ASK_MIN_INTERVAL_S", 600.0)
+    fake, rows, _ = _capture_fakes(monkeypatch, responses=[_answer()])
+    emitted: list[dict] = []
+
+    async def send_json(payload):
+        emitted.append(payload)
+
+    watcher = LiveAssistWatcher(user_id="u-1", meeting_id="m-1", send_json=send_json)
+    await watcher.start(run_loop=False)
+    rows.append({"source": "ask", "created_at": datetime.now(timezone.utc)})
+    try:
+        await watcher._handle_ask("Too soon?", "r-cooldown")
+    finally:
+        await watcher.aclose()
+
+    assert emitted[-1]["type"] == "assist_error"
+    assert "already answering another question" not in emitted[-1]["message"].lower()
+    assert fake.calls == []

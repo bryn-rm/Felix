@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { rememberReturnPath } from "@/lib/return-to";
 
 // Public link to the external access-request form (Tally/Google Form/etc.). When
 // unset the "Request access" link is hidden entirely — fail closed, never render a
@@ -50,6 +51,10 @@ export default function LoginPage() {
   async function handleSignIn() {
     setLoading(true);
     setError(null);
+    // Carried in a cookie, not in `redirectTo` — that URL has to keep matching
+    // the Supabase allow-list exactly. Read from the URL at click time so a
+    // ?next= added by the app layout survives a refresh of this page.
+    rememberReturnPath(new URLSearchParams(window.location.search).get("next"));
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
