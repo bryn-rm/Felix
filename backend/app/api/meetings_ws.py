@@ -146,7 +146,7 @@ class _SocketWriter:
 
 
 class _CaptureHeartbeat:
-    """Persist capture-socket liveness so any Cloud Run instance can read it.
+    """Persist capture-socket liveness so any backend process can read it.
 
     A connection token makes takeover safe: an older socket's late heartbeat or
     cleanup cannot overwrite/clear the newer connection's state.
@@ -298,7 +298,7 @@ async def _run_capture(
 
     # This belongs to the capture socket rather than Live Assist: liveness must
     # remain accurate when the assist flag is off, watcher startup fails, or a
-    # viewer poll lands on another Cloud Run instance.
+    # viewer poll is served by another process.
     heartbeat = _CaptureHeartbeat(user_id, meeting_id)
     await heartbeat.attach()
 

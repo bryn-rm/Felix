@@ -696,7 +696,7 @@ def test_live_view_is_a_pure_read_and_never_touches_capture(client, monkeypatch)
 def test_live_view_reports_whether_the_capturing_device_is_attached(client, monkeypatch):
     """`status` can't answer this: a dropped socket leaves the row 'recording'.
     The signal comes from the capture-owned database heartbeat, so it is shared
-    across Cloud Run instances and independent of assist watcher startup."""
+    through PostgreSQL and independent of assist watcher startup."""
     from unittest.mock import AsyncMock
 
     from app.api import meetings as meetings_api

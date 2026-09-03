@@ -375,8 +375,8 @@ async def get_live_assist_view(
         "meeting": meeting,
         "items": [item_to_wire(r) for r in rows],
         # Capture-owned, database-backed heartbeat state. Unlike the old local
-        # watcher registry this remains accurate when the viewer poll reaches a
-        # different Cloud Run instance or assist watcher startup failed.
+        # watcher registry this remains accurate independently of which process
+        # serves the viewer poll or whether assist watcher startup failed.
         "capture_attached": capture_attached,
     }
 

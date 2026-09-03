@@ -2651,7 +2651,7 @@ async def test_an_answer_is_not_persisted_into_a_meeting_that_ended(monkeypatch)
 
 
 async def test_shared_ask_lock_refuses_another_instance_before_model_call(monkeypatch):
-    """False from PostgreSQL means another Cloud Run instance owns the ask."""
+    """False from PostgreSQL means another process owns the ask."""
     _fast_constants(monkeypatch)
     fake, _, emitted, send_json = _wire_fakes(monkeypatch, responses=[_answer()])
     monkeypatch.setattr(las.db, "try_advisory_lock", AsyncMock(return_value=False))

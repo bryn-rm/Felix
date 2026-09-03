@@ -23,7 +23,7 @@ meeting coach — the gate, the prompt, and the acceptance thresholds all bias
 toward showing nothing.
 
 Ownership: exactly ONE watcher per meeting. A PostgreSQL advisory lock enforces
-this across Cloud Run instances; the module-level ``_watchers`` registry keeps
+this across backend processes; the module-level ``_watchers`` registry keeps
 last-writer-wins semantics for reconnects/second tabs within one instance. The
 watcher's lifetime is the WS connection's: suggestions are useless with no
 client attached, and a dropped socket must stop spend.
@@ -52,8 +52,8 @@ the meeting's ask slot is held, every persisted item is folded back in, so each
 transport spends the same MAX_ASKS budget and answers against the same
 conversation regardless of which device or instance wrote it.
 
-Exactly one ask runs per meeting at a time, across transports and Cloud Run
-instances: ``_handle_ask`` takes a process-local fast-fail slot plus a shared
+Exactly one ask runs per meeting at a time, across transports and backend
+processes: ``_handle_ask`` takes a process-local fast-fail slot plus a shared
 PostgreSQL advisory lock, and refuses rather than queues when another ask holds
 either one.
 
@@ -1216,9 +1216,9 @@ class LiveAssistWatcher:
         Every transport lands here: the capture WebSocket via the run loop, and
         REST (a manual session's ask box, the phone viewer on a captured
         meeting) via ``answer_typed_question``. The meeting's local + database
-        ask slot stops a phone ask and a laptop ask — even on different Cloud
-        Run instances — from both reaching the model. Whoever gets there second
-        is refused rather than queued.
+        ask slot stops a phone ask and a laptop ask — even when different
+        backend processes handle them — from both reaching the model. Whoever
+        gets there second is refused rather than queued.
         """
         async with _ask_slot(self.meeting_id) as slot_status:
             if slot_status != "acquired":
@@ -2186,7 +2186,7 @@ async def maybe_start_watcher(
 ) -> LiveAssistWatcher | None:
     """Start a watcher for this connection, closing any previous one for the
     same meeting in this process. A meeting-scoped PostgreSQL advisory lock
-    prevents another Cloud Run instance from starting a second inference loop.
+    prevents another backend process from starting a second inference loop.
     Returns None when the feature is off or another instance owns the watcher."""
     if not await _assist_enabled(user_id):
         return None

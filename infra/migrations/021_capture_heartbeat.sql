@@ -1,7 +1,7 @@
 -- ============================================================
 -- Migration 021 — Shared capture-socket liveness
 -- ============================================================
--- The viewer may poll a different Cloud Run instance from the capture
+-- The viewer may be served by a different backend process from the capture
 -- WebSocket, so process-local watcher state cannot describe attachment.
 -- A per-connection token prevents an older socket from clearing a newer
 -- connection's heartbeat during reconnect/takeover.
