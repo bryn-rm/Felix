@@ -10,7 +10,7 @@ Felix is an AI chief of staff for Gmail, Google Calendar, and meetings. It triag
 
 ## How it is built
 
-The browser app is Next.js 14 with Supabase Auth. A FastAPI backend owns business logic, per-user Google OAuth credentials, Gmail/Calendar/Speech integrations, Anthropic model calls, ElevenLabs speech, scheduled work, and direct access to Supabase PostgreSQL. User-owned data is isolated by explicit `user_id` scoping plus PostgreSQL Row Level Security.
+The browser app is Next.js 14 with Supabase Auth. A FastAPI backend owns business logic, per-user Google OAuth credentials, Gmail/Calendar/Speech integrations, Anthropic smart-model and OpenAI fast-model calls, ElevenLabs speech, scheduled work, and direct access to Supabase PostgreSQL. User-owned data is isolated by explicit `user_id` scoping plus PostgreSQL Row Level Security.
 
 For the detailed subsystem, database, WebSocket, deployment, and multi-instance reference, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Contributors and coding agents must also follow [`CLAUDE.md`](CLAUDE.md).
 
@@ -20,8 +20,7 @@ For the detailed subsystem, database, WebSocket, deployment, and multi-instance 
 - Python 3.12
 - A Supabase project
 - A Google Cloud project with Gmail, Calendar, and Speech-to-Text APIs enabled
-- Anthropic and ElevenLabs API credentials
-- Optional: an OpenAI API key for semantic episode embeddings; memory falls back to non-vector retrieval without it
+- Anthropic, OpenAI, and ElevenLabs API credentials (OpenAI is optional only when using a Claude fast model)
 
 ## Setup
 
@@ -49,7 +48,7 @@ Use a Supabase **session-mode** database URL on port 5432. The backend's cross-i
 cp .env.example backend/.env
 ```
 
-Fill every required backend value documented in `.env.example`. Generate fresh secrets where indicated. If semantic embeddings are wanted, also set `OPENAI_API_KEY`; it is optional and intentionally not part of validated startup settings.
+Fill every required backend value documented in `.env.example`. Generate fresh secrets where indicated. The default fast model is `AI_MODEL_FAST=gpt-5.6-luna`, which requires `OPENAI_API_KEY` at startup. Keep `ANTHROPIC_API_KEY` for the smart model. OpenAI also supplies best-effort semantic episode embeddings. To use Haiku instead, set `AI_MODEL_FAST=claude-haiku-4-5-20251001`; OpenAI then becomes optional.
 
 Create `frontend/.env.local`:
 

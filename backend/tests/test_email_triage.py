@@ -20,10 +20,15 @@ def ai_svc() -> AIService:
     return AIService()
 
 
+@pytest.fixture(autouse=True)
+def stub_telemetry(monkeypatch):
+    monkeypatch.setattr("app.db.insert", AsyncMock(return_value={"id": "call-1"}))
+
+
 def _claude_response(text: str) -> MagicMock:
     """Build a mock Anthropic Messages response with the given content text."""
     resp = MagicMock()
-    resp.content = [MagicMock(text=text)]
+    resp.content = [MagicMock(type="text", text=text)]
     return resp
 
 

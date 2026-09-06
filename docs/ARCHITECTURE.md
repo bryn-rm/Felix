@@ -32,9 +32,9 @@ Gmail remains the mail system of record. Felix mirrors selected inbound and sent
 
 - Supabase provides Auth and PostgreSQL. The code also uploads generated briefing audio to a Supabase Storage bucket named `felix-audio` and requests public URLs. **TODO: verify** that the production bucket exists and that its public-access policy is intentional.
 - Google provides Gmail, Calendar, OAuth user information, and Speech-to-Text V2.
-- Anthropic models provide triage, extraction, drafting, conversational tool use, meeting prep and summaries, session/memory distillation, and Live Assist inference. Smart and fast model IDs are deployment configuration.
+- Anthropic provides the smart model for drafting, conversational tool use, meeting prep/summaries, and Live Assist answers. `AI_MODEL_FAST` defaults to OpenAI `gpt-5.6-luna` for triage, routing, extraction, session/memory distillation, and Live Assist watch. `ai_service.call_fast` routes Luna through Responses and `claude-*` models through Anthropic; adding another provider requires code.
 - ElevenLabs provides streaming speech for voice responses and generated briefing audio.
-- OpenAI's embeddings endpoint is optional. Without `OPENAI_API_KEY`, episodes can still be stored and retrieval falls back to non-vector signals.
+- OpenAI's embeddings endpoint remains best-effort. `OPENAI_API_KEY` is required at startup when Luna is the fast model; with a Claude fast model it is optional and retrieval can fall back to non-vector signals.
 
 ## Subsystem map
 
@@ -138,6 +138,10 @@ Quota is separate from observability but metered from the same table. `check_mon
 
 Offline quality evaluation is separate from the functional tests. `evals/assist_benchmark.py` holds annotated meeting scenarios, and `tests/test_assist_eval.py` replays them through the real `CandidateGate`, watch prompt, and acceptance gate with the database and socket bypassed, scoring intervention precision, opportunity recall, groundedness, and redundancy. It is marked `assist_eval`, excluded from the default run, and requires a real API key because it makes live model calls.
 
+Fast calls share a bounded adapter with explicit text, usage, and truncation/refusal handling. Luna uses Responses with `reasoning.effort=none`, `store=false`, and strict schemas for JSON features; application parsing and acceptance gates still apply. The adapter uses the existing `httpx` dependency and retries transport/429/5xx failures at most twice within the total call deadline. Quota weights are 0.2/1.2 for Luna, 2/10 for Sonnet 5, and 1/5 for Haiku (input/output). Older Sonnet models retain 3/15. The existing unscaled `NUMERIC` column stores fractional units; no migration is needed. These are quota estimates, not exact provider invoices, and existing historical rows are not repriced.
+
+To compare fast models, run `AI_MODEL_FAST=gpt-5.6-luna python -m pytest -m assist_eval -s` and `AI_MODEL_FAST=claude-haiku-4-5-20251001 python -m pytest -m assist_eval -s` from `backend` with real provider keys. Intervention precision must reach 0.85; a skipped run is not quality evidence.
+
 **Connections and gotchas.** `ai_calls`, `eval_runs`, and `admin_audit` are operational tables, not user-facing product data: `ai_calls` is service-role only, and the admin aggregates are intentionally cross-user. That is why `tests/test_user_id_discipline.py` — which otherwise requires `user_id` in every raw SQL string under `app/api/**` — carries named exemptions for those specific admin queries. Those exemptions are the audited boundary of the rule, not a general escape hatch. Telemetry writes are best-effort and must never fail the user-facing call they describe.
 
 ## Frontend architecture and major surfaces
@@ -199,7 +203,7 @@ Multiple Railway replicas are therefore a future architecture step, not an avail
 
 Backend development settings come from `backend/.env`, normally copied from the repository `.env.example`. Frontend public settings live in `frontend/.env.local`. Only `NEXT_PUBLIC_*` values belong in browser bundles; Supabase service credentials, Google secrets and tokens, AI provider keys, the token-encryption key, and `DATABASE_URL` remain backend-only.
 
-`backend/app/config.py` defines required backend settings and defaults. Anthropic smart/fast model IDs are configurable. `FELIX_VOICE_CATALOG` is JSON parsed into the allowlisted voice selector. `OPENAI_API_KEY` is an optional lookup inside `memory_service.py` rather than a required startup setting.
+`backend/app/config.py` defines required backend settings and defaults. `ANTHROPIC_MODEL_SMART` remains Anthropic-only. Set Railway's backend `AI_MODEL_FAST=gpt-5.6-luna` and `OPENAI_API_KEY` to switch fast calls, retaining `ANTHROPIC_API_KEY` for smart calls. Redeploy the adapter code before switching. `ANTHROPIC_MODEL_FAST` is a legacy fallback alias; `AI_MODEL_FAST` takes precedence when both are present, so the old variable can be removed after rollout. Roll back with `AI_MODEL_FAST=claude-haiku-4-5-20251001`. Startup rejects an unsupported fast model or missing provider key. `FELIX_VOICE_CATALOG` is JSON parsed into the allowlisted voice selector.
 
 Environment variables describe deployment-wide credentials, provider/model defaults, origins, quotas, and limits. User-selected product behavior is stored in the per-user `settings` row.
 

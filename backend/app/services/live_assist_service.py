@@ -1008,7 +1008,7 @@ class LiveAssistWatcher:
         started = time.monotonic()
         result = await self._json_ai_call(
             feature=watch_feature,
-            model=settings.ANTHROPIC_MODEL_FAST,
+            model=settings.AI_MODEL_FAST,
             max_tokens=350,
             prompt=prompt,
         )
@@ -1047,7 +1047,7 @@ class LiveAssistWatcher:
             usefulness_score=float(card.get("usefulness_score") or 0.0),
             trigger_type=trigger,
             request_id=None,
-            model=settings.ANTHROPIC_MODEL_FAST,
+            model=settings.AI_MODEL_FAST,
             metadata={
                 "window_segments": window_segments,
                 "latency_ms": latency_ms,
@@ -1681,7 +1681,7 @@ class LiveAssistWatcher:
     async def _json_ai_call(
         self, *, feature: str, model: str, max_tokens: int, prompt: str
     ) -> dict | None:
-        """One JSON-out Anthropic call with the mandatory ai_calls logging.
+        """One JSON-out model call with the mandatory ai_calls logging.
         Any failure (API error, unparseable output, CALL_TIMEOUT_S elapsed)
         returns None — never a broken card. Sets _last_call_truncated /
         _last_call_timed_out so a caller can tell "ran out of room mid-answer"
@@ -1701,23 +1701,38 @@ class LiveAssistWatcher:
         self._last_call_timed_out = False
         self._last_call_parse_error = False
         try:
-            response = await asyncio.wait_for(
-                _ai.client.messages.create(
+            if feature in ("live_assist_watch", "live_assist_interview_watch"):
+                call = _ai.call_fast(
+                    feature=feature, model=model, max_tokens=max_tokens,
+                    system=LIVE_ASSIST_SYSTEM,
+                    messages=[{"role": "user", "content": prompt}],
+                    timeout=CALL_TIMEOUT_S,
+                )
+            else:
+                call = _ai.client.messages.create(
                     model=model,
                     max_tokens=max_tokens,
                     **_ai.thinking_kwarg(model),
                     system=LIVE_ASSIST_SYSTEM,
                     messages=[{"role": "user", "content": prompt}],
                     timeout=CALL_TIMEOUT_S,
-                ),
-                CALL_TIMEOUT_S,
-            )
+                )
+            response = await asyncio.wait_for(call, CALL_TIMEOUT_S)
             self._last_call_truncated = (
                 getattr(response, "stop_reason", None) == "max_tokens"
             )
+            if isinstance(response, _ai.FastResponse) and response.error:
+                success = False
+                parse_error = True
+                self._last_call_parse_error = True
+                error_message = response.error
+                return None
             try:
                 result = json.loads(
-                    _ai._strip_markdown_fences(response.content[0].text)
+                    _ai._strip_markdown_fences(
+                        response.text if isinstance(response, _ai.FastResponse)
+                        else response.content[0].text
+                    )
                 )
                 if isinstance(result, dict):
                     return result

@@ -563,7 +563,7 @@ async def test_high_signal_final_produces_card(monkeypatch):
     assert row["source"] == "proactive"
     assert row["trigger_type"] == "question"
     assert row["usefulness_score"] == 0.9
-    assert row["prompt_version"] == "v1"
+    assert row["prompt_version"] == "v2"
     assert row["transcript_ts"] == 12.5
     assert row["metadata"]["window_segments"] >= 1
     assert "latency_ms" in row["metadata"]
@@ -997,7 +997,7 @@ async def test_interview_watch_triages_then_solves_complete_question(monkeypatch
         await watcher.aclose()
 
     assert [call["model"] for call in fake.calls] == [
-        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.AI_MODEL_FAST,
         las.settings.ANTHROPIC_MODEL_SMART,
     ]
     assert inserted[0]["source"] == "proactive"
@@ -1034,7 +1034,7 @@ async def test_explicit_candidate_mode_solves_other_participant_prompt(monkeypat
         await watcher.aclose()
 
     assert [call["model"] for call in fake.calls] == [
-        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.AI_MODEL_FAST,
         las.settings.ANTHROPIC_MODEL_SMART,
     ]
     assert inserted[0]["question"] == "Implement an LRU cache"
@@ -1079,7 +1079,7 @@ async def test_candidate_prompt_after_user_turn_is_still_solved(monkeypatch):
         await watcher.aclose()
 
     assert [call["model"] for call in fake.calls] == [
-        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.AI_MODEL_FAST,
         las.settings.ANTHROPIC_MODEL_SMART,
     ]
     assert inserted[0]["question"] == "Implement an LRU cache"
@@ -1125,7 +1125,7 @@ async def test_explicit_candidate_mode_never_solves_own_direct_prompt(monkeypatc
         await watcher.aclose()
 
     assert [call["model"] for call in fake.calls] == [
-        las.settings.ANTHROPIC_MODEL_FAST
+        las.settings.AI_MODEL_FAST
     ]
     assert inserted == [] and emitted == []
 
@@ -1149,7 +1149,7 @@ async def test_explicit_interviewer_mode_does_not_use_candidate_solve(monkeypatc
 
     assert watcher._gate.interview is False
     assert [call["model"] for call in fake.calls] == [
-        las.settings.ANTHROPIC_MODEL_FAST
+        las.settings.AI_MODEL_FAST
     ]
     assert "memory augmentation, not a meeting coach" in (
         fake.calls[0]["messages"][0]["content"]
@@ -1176,7 +1176,7 @@ async def test_explicit_general_is_not_promoted_by_interview_template(monkeypatc
 
     assert watcher._gate.interview is False
     assert [call["model"] for call in fake.calls] == [
-        las.settings.ANTHROPIC_MODEL_FAST
+        las.settings.AI_MODEL_FAST
     ]
     assert "live interview" not in fake.calls[0]["messages"][0]["content"]
     assert inserted == [] and emitted == []
@@ -1246,8 +1246,8 @@ async def test_incomplete_interview_question_is_reconsidered(monkeypatch):
         await watcher.aclose()
 
     assert [c["model"] for c in fake.calls] == [
-        las.settings.ANTHROPIC_MODEL_FAST,
-        las.settings.ANTHROPIC_MODEL_FAST,
+        las.settings.AI_MODEL_FAST,
+        las.settings.AI_MODEL_FAST,
         las.settings.ANTHROPIC_MODEL_SMART,
     ]
     assert inserted[0]["question"] == (
@@ -1300,7 +1300,7 @@ async def test_user_own_interview_question_is_not_solved(monkeypatch):
         await watcher.aclose()
 
     # Triage ran; the expensive solve did not.
-    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert [c["model"] for c in fake.calls] == [las.settings.AI_MODEL_FAST]
     assert inserted == [] and emitted == []
     # The prompt has to give the model what it needs to attribute the question.
     prompt = fake.calls[0]["messages"][0]["content"]
@@ -1324,7 +1324,7 @@ async def test_interview_solve_needs_the_other_party_on_the_transcript(monkeypat
     finally:
         await watcher.aclose()
 
-    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert [c["model"] for c in fake.calls] == [las.settings.AI_MODEL_FAST]
     assert inserted == [] and emitted == []
 
 
@@ -1350,7 +1350,7 @@ async def test_unattributed_interview_question_falls_back_to_the_card(monkeypatc
     finally:
         await watcher.aclose()
 
-    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert [c["model"] for c in fake.calls] == [las.settings.AI_MODEL_FAST]
     assert inserted[0]["kind"] == "context"
 
 
@@ -1376,7 +1376,7 @@ async def test_proactive_solve_rechecks_budget_before_spending(monkeypatch):
     finally:
         await watcher.aclose()
 
-    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert [c["model"] for c in fake.calls] == [las.settings.AI_MODEL_FAST]
     assert inserted == []
     assert emitted == [{"type": "assist_error", "request_id": None,
                         "message": "over budget"}]
@@ -1534,7 +1534,7 @@ async def test_solved_question_dedupe_survives_reconnect(monkeypatch):
     finally:
         await watcher.aclose()
 
-    assert [c["model"] for c in fake.calls] == [las.settings.ANTHROPIC_MODEL_FAST]
+    assert [c["model"] for c in fake.calls] == [las.settings.AI_MODEL_FAST]
     assert inserted == [] and emitted == []
 
 

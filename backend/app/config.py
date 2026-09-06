@@ -1,3 +1,4 @@
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -14,7 +15,32 @@ class Settings(BaseSettings):
     # AI
     ANTHROPIC_API_KEY: str
     ANTHROPIC_MODEL_SMART: str = "claude-sonnet-5"
-    ANTHROPIC_MODEL_FAST: str = "claude-haiku-4-5-20251001"
+    OPENAI_API_KEY: str = ""
+    AI_MODEL_FAST: str = Field(
+        default="gpt-5.6-luna",
+        validation_alias=AliasChoices("AI_MODEL_FAST", "ANTHROPIC_MODEL_FAST"),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_shadowed_fast_alias(cls, values):
+        # Env + dotenv can supply both aliases. Pydantic otherwise treats the
+        # unused legacy key as an extra setting and rejects startup.
+        if isinstance(values, dict) and "AI_MODEL_FAST" in values and "ANTHROPIC_MODEL_FAST" in values:
+            values = dict(values)
+            values.pop("ANTHROPIC_MODEL_FAST")
+        return values
+
+    @model_validator(mode="after")
+    def validate_ai_provider(self):
+        if not self.ANTHROPIC_API_KEY.strip():
+            raise ValueError("ANTHROPIC_API_KEY is required for the smart model")
+        if self.AI_MODEL_FAST.startswith("gpt-5.6-luna"):
+            if not self.OPENAI_API_KEY.strip():
+                raise ValueError("OPENAI_API_KEY is required when AI_MODEL_FAST uses Luna")
+        elif not self.AI_MODEL_FAST.startswith("claude-"):
+            raise ValueError("AI_MODEL_FAST must be gpt-5.6-luna or a claude-* model")
+        return self
 
     # ElevenLabs
     ELEVENLABS_API_KEY: str

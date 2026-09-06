@@ -3,8 +3,8 @@ Offline live-assist quality benchmark — run explicitly with:
 
     cd backend && python -m pytest -m assist_eval -s
 
-Requires a REAL ANTHROPIC_API_KEY in the environment (skips on the test stub).
-Costs real Haiku calls (one per gate-passed evaluation — roughly 15-25 calls
+Requires a real key for AI_MODEL_FAST's provider (skips on test stubs).
+Costs real model calls (one per gate-passed evaluation — roughly 15-25 calls
 per full run).
 
 This measures what the functional tests can't: whether the suggestions are
@@ -45,11 +45,12 @@ ATTRIBUTION_WINDOW = 2
 
 
 def _real_key_available() -> bool:
-    key = settings.ANTHROPIC_API_KEY or ""
-    return key.startswith("sk-ant-")
+    key = (settings.OPENAI_API_KEY if settings.AI_MODEL_FAST.startswith("gpt-")
+           else settings.ANTHROPIC_API_KEY)
+    return bool(key and not key.startswith("test-"))
 
 
-async def _watch_once(client, digest: dict, shown_titles: list[str],
+async def _watch_once(digest: dict, shown_titles: list[str],
                       window: list[tuple[str, str]]) -> dict | None:
     prompt = LIVE_ASSIST_WATCH_PROMPT.format(
         meeting_title="(benchmark)",
@@ -58,16 +59,18 @@ async def _watch_once(client, digest: dict, shown_titles: list[str],
         shown_titles=format_shown_titles(shown_titles),
         transcript_window="\n".join(f"{s}: {t}" for s, t in window) or "(no transcript yet)",
     )
-    response = await client.messages.create(
-        model=settings.ANTHROPIC_MODEL_FAST,
+    response = await las._ai.call_fast(
+        feature="live_assist_watch",
+        model=settings.AI_MODEL_FAST,
         max_tokens=350,
-        # Mirror the production watch call exactly, thinking policy included.
-        **las._ai.thinking_kwarg(settings.ANTHROPIC_MODEL_FAST),
+        timeout=las.CALL_TIMEOUT_S,
         system=LIVE_ASSIST_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
     )
+    if response.error:
+        return None
     try:
-        result = json.loads(las._ai._strip_markdown_fences(response.content[0].text))
+        result = json.loads(las._ai._strip_markdown_fences(response.text))
     except json.JSONDecodeError:
         return None
     card = result.get("card") if isinstance(result, dict) else None
@@ -92,10 +95,7 @@ def _grounded(body: str, source_text: str) -> bool:
 
 async def test_assist_benchmark():
     if not _real_key_available():
-        pytest.skip("assist_eval needs a real ANTHROPIC_API_KEY")
-
-    from anthropic import AsyncAnthropic
-    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=60.0)
+        pytest.skip(f"assist_eval needs a real provider key for {settings.AI_MODEL_FAST}")
 
     shown_total = 0
     true_positives = 0
@@ -125,7 +125,7 @@ async def test_assist_benchmark():
             gate.reset_accumulation()
             watch_calls += 1
 
-            card = await _watch_once(client, scenario["digest"], shown_titles, window)
+            card = await _watch_once(scenario["digest"], shown_titles, window)
             if not card:
                 continue
             kind = str(card.get("kind") or "")

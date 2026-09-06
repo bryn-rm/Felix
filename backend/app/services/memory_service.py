@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -405,13 +404,8 @@ _OPENAI_URL = "https://api.openai.com/v1/embeddings"
 
 
 def _embedding_api_key() -> str | None:
-    """Look up the embedding provider API key.
-
-    Kept as a runtime lookup rather than a Pydantic setting so the memory
-    system can no-op gracefully in environments that haven't provisioned an
-    embedding provider yet.
-    """
-    return os.getenv("OPENAI_API_KEY") or None
+    """Optional for embeddings when the fast model uses Anthropic."""
+    return settings.OPENAI_API_KEY or None
 
 
 async def _generate_embedding(text: str) -> list[float] | None:
@@ -888,7 +882,7 @@ async def prune_low_value_episodes() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Distillation + profile extraction (Claude Haiku)
+# Distillation + profile extraction (fast model)
 #
 # These are the write-side counterparts to the retrieval helpers above. They
 # live here (rather than in ai_service) so the memory layer owns the full
@@ -903,30 +897,25 @@ async def _claude_json(
     max_tokens: int = 600,
     quota_scope: str = "background",
 ) -> dict | None:
-    """Call Haiku, parse JSON, log the call. Returns parsed dict or None.
+    """Call the fast model, parse JSON, log the call. Returns dict or None.
 
     Defaults to ``quota_scope="background"`` — episode distillation and profile
     extraction are always triggered by sync, never by a user action, so they
     must not consume interactive quota.
     """
-    from anthropic import AsyncAnthropic
-
-    from app.services.ai_service import FAST_THINKING, log_ai_call
-
-    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=120.0, max_retries=2)
+    from app.services.ai_service import call_fast, log_ai_call
     started = time.monotonic()
     response = None
     success = True
     parse_error = False
     error_message: str | None = None
     try:
-        response = await client.messages.create(
-            model=settings.ANTHROPIC_MODEL_FAST,
+        response = await call_fast(
+            feature=feature,
             max_tokens=max_tokens,
-            **FAST_THINKING,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = response.content[0].text
+        raw = response.text
         raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
         raw = re.sub(r"\s*```$", "", raw)
         try:
@@ -942,7 +931,7 @@ async def _claude_json(
     finally:
         await log_ai_call(
             feature=feature,
-            model=settings.ANTHROPIC_MODEL_FAST,
+            model=settings.AI_MODEL_FAST,
             response=response,
             started_at=started,
             user_id=user_id,
@@ -965,7 +954,7 @@ async def distil_and_store_episode(
 ) -> dict | None:
     """
     Distil a piece of raw activity into a summary + entities + importance
-    via Claude Haiku, then create the episode (with embedding). Fire-and-
+    via the fast model, then create the episode (with embedding). Fire-and-
     forget safe: swallows exceptions and returns None.
 
     Skipped silently when the distiller judges importance below the floor.

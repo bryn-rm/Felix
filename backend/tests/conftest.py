@@ -14,6 +14,7 @@ _TEST_ENV = {
     "GOOGLE_REDIRECT_URI":   "http://localhost:8000/auth/google/callback",
     "GCP_PROJECT_ID":        "test-gcp-project",
     "ANTHROPIC_API_KEY":     "test-anthropic-key",
+    "OPENAI_API_KEY":        "test-openai-key",
     "ELEVENLABS_API_KEY":    "test-elevenlabs-key",
     "FELIX_VOICE_ID":        "test-voice-id",
     "SUPABASE_URL":          "https://test.supabase.co",
@@ -28,6 +29,18 @@ for _key, _val in _TEST_ENV.items():
     os.environ.setdefault(_key, _val)
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def legacy_provider_for_unit_tests(request, monkeypatch):
+    """Existing behavioral fixtures speak Anthropic; live evals use real config.
+
+    Provider contract tests explicitly select Luna and mock its HTTP transport.
+    """
+    if request.node.get_closest_marker("assist_eval") is None:
+        from app.config import settings
+        monkeypatch.setattr(settings, "AI_MODEL_FAST", "claude-haiku-4-5-20251001")
+        monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
 
 
 # ---------------------------------------------------------------------------

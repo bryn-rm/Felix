@@ -1,9 +1,9 @@
 """
-All Claude API calls live here.
+AI clients and the shared fast-model provider adapter live here.
 
-Models (both configurable — see ANTHROPIC_MODEL_SMART / _FAST):
+Models (configurable — see ANTHROPIC_MODEL_SMART / AI_MODEL_FAST):
   claude-sonnet-5           → drafts, style analysis, meeting notes, briefing
-  claude-haiku-4-5-20251001 → triage, voice intent routing, follow-up detection
+  gpt-5.6-luna             → triage, routing, extraction, Live Assist watch
 
 Every call here disables thinking explicitly — see the thinking policy below.
 
@@ -12,12 +12,15 @@ draft_reply() is an async generator — consume with:
       ...
 """
 
+import asyncio
 import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
+import httpx
 from anthropic import AsyncAnthropic
 
 from app.config import settings
@@ -33,6 +36,7 @@ from app.prompts.sentiment import SENTIMENT_PROMPT
 from app.prompts.style_analysis import STYLE_ANALYSIS_PROMPT
 from app.prompts.triage import TRIAGE_PROMPT
 from app.prompts.voice_intent import VOICE_INTENT_PROMPT
+from app.prompts.fast_schemas import FAST_SCHEMAS
 
 logger = logging.getLogger(__name__)
 
@@ -70,42 +74,151 @@ def thinking_kwarg(model: str) -> dict:
 
 
 SMART_THINKING = thinking_kwarg(settings.ANTHROPIC_MODEL_SMART)
-FAST_THINKING = thinking_kwarg(settings.ANTHROPIC_MODEL_FAST)
+
+
+@dataclass
+class FastUsage:
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass
+class FastResponse:
+    raw_text: str
+    usage: FastUsage | None
+    stop_reason: str | None = None
+    error: str | None = None
+
+    @property
+    def text(self) -> str:
+        # Keep the response (and usage) available to each caller's finally log,
+        # but never let partial/refused output be persisted as a success.
+        if self.error:
+            raise ValueError(self.error)
+        return self.raw_text
+
+
+async def call_fast(
+    *, feature: str, messages: list[dict], max_tokens: int,
+    system: str | None = None, model: str | None = None, timeout: float = 120.0,
+) -> FastResponse:
+    """Bounded text/JSON call; provider differences stop at this seam.
+
+    Uses the existing httpx dependency for Responses. No tools or streaming on
+    this path. The caller owns telemetry and its interactive/background scope.
+    """
+    model = model or settings.AI_MODEL_FAST
+    async with asyncio.timeout(timeout):
+        if model.startswith("claude-"):
+            response = await client.messages.create(
+                model=model, max_tokens=max_tokens, messages=messages,
+                **thinking_kwarg(model), **({"system": system} if system else {}),
+                timeout=timeout,
+            )
+            usage = getattr(response, "usage", None)
+            stop = getattr(response, "stop_reason", None)
+            raw = "".join(block.text for block in response.content
+                          if getattr(block, "type", "text") == "text")
+            error = ("truncated at max_tokens" if stop == "max_tokens" else
+                     "model refused the request" if stop == "refusal" else
+                     "model returned no text" if not raw else None)
+            return FastResponse(raw, FastUsage(usage.input_tokens, usage.output_tokens)
+                                if usage is not None else None, stop, error)
+
+        if not model.startswith("gpt-5.6-luna"):
+            raise ValueError(f"Unsupported fast model: {model}")
+        if not settings.OPENAI_API_KEY.strip():
+            raise ValueError("OPENAI_API_KEY is required for Luna")
+        payload = {
+            "model": model, "input": messages, "max_output_tokens": max_tokens,
+            "reasoning": {"effort": "none"}, "store": False,
+        }
+        if system:
+            payload["instructions"] = system
+        if feature == "profile_extract":
+            payload["instructions"] = (system or "") + (
+                "\nUse null for unknown profile/preferences fields required by the schema."
+            )
+        elif feature == "live_assist_interview_watch":
+            payload["instructions"] = (system or "") + (
+                "\nReturn both schema keys. At most one of card and interview_question "
+                "may be non-null; set both to null for silence."
+            )
+        if feature != "voice_general":
+            payload["text"] = {"format": {
+                "type": "json_schema", "name": feature, "strict": True,
+                "schema": FAST_SCHEMAS[feature],
+            }}
+        async with httpx.AsyncClient(timeout=timeout) as http:
+            for attempt in range(3):
+                try:
+                    result = await http.post(
+                        "https://api.openai.com/v1/responses",
+                        headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
+                        json=payload,
+                    )
+                    if (result.status_code == 429 or result.status_code >= 500) and attempt < 2:
+                        await asyncio.sleep(0.5 * (2 ** attempt))
+                        continue
+                    if result.status_code == 429:
+                        # Preserve inbox_sync's provider-quota circuit breaker
+                        # without including provider-echoed private content.
+                        raise httpx.HTTPStatusError(
+                            "OpenAI rate limit or quota exceeded (HTTP 429)",
+                            request=result.request, response=result,
+                        )
+                    result.raise_for_status()
+                    break
+                except httpx.TransportError:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+            data = result.json()
+        usage = data.get("usage")
+        # Explicitly map Responses usage to Felix's provider-neutral counters.
+        normalized_usage = FastUsage(usage["input_tokens"], usage["output_tokens"]) if usage else None
+        parts = [part for item in data.get("output", []) if item.get("type") == "message"
+                 for part in item.get("content", [])]
+        raw = "".join(part["text"] for part in parts if part.get("type") == "output_text")
+        truncated = (data.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
+        error = ("truncated at max_tokens" if truncated else
+                 "model refused the request" if any(p.get("type") == "refusal" for p in parts) else
+                 f"response status: {data.get('status')}" if data.get("status") != "completed" else
+                 "model returned no text" if not raw else None)
+        return FastResponse(raw, normalized_usage, "max_tokens" if truncated else None, error)
 
 
 # ---------------------------------------------------------------------------
 # ai_calls instrumentation
 #
-# Every Claude call is logged to the ai_calls table for observability
+# Every model call is logged to the ai_calls table for observability
 # (latency, token usage, parse errors, success rates). The helper below is
 # best-effort: a logging failure must never break the user-facing AI call.
 # ---------------------------------------------------------------------------
 
 # Static prompt versions until a real prompt-versioning system lands.
 PROMPT_VERSIONS: dict[str, str] = {
-    "triage":             "v1",
+    "triage":             "v2",
     "draft":              "v1",
     "style_analysis":     "v1",
     "meeting_notes":      "v1",
     "meeting_summary":    "v1",
     "briefing":           "v1",
-    "voice_intent":       "v1",
+    "voice_intent":       "v2",
     "voice_general":      "v1",
-    "follow_up_detect":   "v1",
-    "sentiment":          "v1",
+    "follow_up_detect":   "v2",
+    "sentiment":          "v2",
     "polish_draft":       "v1",
-    "profile_extract":    "v1",
-    "episode_distil":     "v1",
-    "session_summary":    "v1",
+    "profile_extract":    "v2",
+    "episode_distil":     "v2",
+    "session_summary":    "v2",
     "weekly_review":      "v1",
     "meeting_prep":       "v1",
-    "commitment_detect":  "v1",
+    "commitment_detect":  "v2",
     "job_detect":         "v1",
-    # Two watch prompts, two keys: the general prompt is unchanged, so bumping
-    # the interview one must not restamp general cards with a version their
-    # prompt never had (the usefulness eval segments on this field).
-    "live_assist_watch":  "v1",
-    "live_assist_interview_watch": "v1",
+    # Separate watch keys; v2 introduces native schemas on the Luna path.
+    "live_assist_watch":  "v2",
+    "live_assist_interview_watch": "v2",
     "live_assist_ask":    "v2",
     "live_assist_standalone_ask": "v2",
     "live_assist_interview": "v2",
@@ -113,7 +226,7 @@ PROMPT_VERSIONS: dict[str, str] = {
 }
 
 
-# Base system guidance that wraps every Claude call. A per-user memory block
+# Base system guidance that wraps every model call. A per-user memory block
 # is appended dynamically (see _resolve_system).
 _BASE_SYSTEM = (
     "You are Felix, an AI chief of staff. Be precise, match the user's voice, "
@@ -155,7 +268,7 @@ async def _auto_memory(
     """
     If the caller did not pass memory context but a user_id is known, load the
     user-profile prelude (Layer 1 only — no episodic network call) so every
-    Claude surface still gets the profile without touching each caller.
+    AI surface still gets the profile without touching each caller.
     """
     if memory_context is not None:
         return memory_context
@@ -182,6 +295,10 @@ def _estimate_billable_units(model: str, input_tokens: int, output_tokens: int) 
     name = (model or "").lower()
     if "opus" in name:
         return input_tokens * 5 + output_tokens * 25
+    if name.startswith("gpt-5.6-luna"):
+        return input_tokens * 0.2 + output_tokens * 1.2
+    if name.startswith("claude-sonnet-5"):
+        return input_tokens * 2 + output_tokens * 10
     if "sonnet" in name:
         return input_tokens * 3 + output_tokens * 15
     if "haiku" in name:
@@ -213,6 +330,10 @@ async def log_ai_call(
     try:
         from app import db as _db  # local import to break import cycles
 
+        if isinstance(response, FastResponse) and response.error:
+            success = False
+            parse_error = True
+            error_message = response.error
         usage = getattr(response, "usage", None) if response is not None else None
         input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
         output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
@@ -253,7 +374,7 @@ async def log_ai_call(
 class AIService:
 
     # ------------------------------------------------------------------
-    # Triage — Haiku (fast + cheap, called for every incoming email)
+    # Triage — fast model (fast + cheap, called for every incoming email)
     # ------------------------------------------------------------------
 
     async def triage_email(
@@ -276,10 +397,9 @@ class AIService:
         error_message: str | None = None
         try:
             memory_context = await _auto_memory(memory_context, user_id, feature="triage")
-            response = await client.messages.create(
-                model=settings.ANTHROPIC_MODEL_FAST,
+            response = await call_fast(
+                feature="triage",
                 max_tokens=500,
-                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -293,11 +413,11 @@ class AIService:
                 }],
             )
             try:
-                return json.loads(_strip_markdown_fences(response.content[0].text))
+                return json.loads(_strip_markdown_fences(response.text))
             except json.JSONDecodeError as e:
                 parse_error = True
                 error_message = f"JSONDecodeError: {e}"
-                logger.warning("Triage response was not valid JSON: %s", response.content[0].text)
+                logger.warning("Triage response was not valid JSON: %s", response.text)
                 return {
                     "category": "fyi",
                     "urgency": "low",
@@ -313,7 +433,7 @@ class AIService:
         finally:
             await log_ai_call(
                 feature="triage",
-                model=settings.ANTHROPIC_MODEL_FAST,
+                model=settings.AI_MODEL_FAST,
                 response=response,
                 started_at=started,
                 user_id=user_id,
@@ -655,7 +775,7 @@ class AIService:
             )
 
     # ------------------------------------------------------------------
-    # Voice intent routing — Haiku (latency critical)
+    # Voice intent routing — fast model (latency critical)
     # ------------------------------------------------------------------
 
     async def parse_voice_intent(
@@ -672,10 +792,9 @@ class AIService:
         error_message: str | None = None
         try:
             memory_context = await _auto_memory(memory_context, user_id, feature="voice_intent")
-            response = await client.messages.create(
-                model=settings.ANTHROPIC_MODEL_FAST,
-                max_tokens=200,
-                **FAST_THINKING,
+            response = await call_fast(
+                feature="voice_intent",
+                max_tokens=400,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -683,11 +802,11 @@ class AIService:
                 }],
             )
             try:
-                return json.loads(_strip_markdown_fences(response.content[0].text))
+                return json.loads(_strip_markdown_fences(response.text))
             except json.JSONDecodeError as e:
                 parse_error = True
                 error_message = f"JSONDecodeError: {e}"
-                logger.warning("Voice intent response was not valid JSON: %s", response.content[0].text)
+                logger.warning("Voice intent response was not valid JSON: %s", response.text)
                 return {"intent": "general_question", "raw_transcript": transcript}
         except Exception as e:
             success = False
@@ -696,7 +815,7 @@ class AIService:
         finally:
             await log_ai_call(
                 feature="voice_intent",
-                model=settings.ANTHROPIC_MODEL_FAST,
+                model=settings.AI_MODEL_FAST,
                 response=response,
                 started_at=started,
                 user_id=user_id,
@@ -706,7 +825,7 @@ class AIService:
             )
 
     # ------------------------------------------------------------------
-    # General voice question — Haiku (conversational fallback)
+    # General voice question — fast model (conversational fallback)
     # ------------------------------------------------------------------
 
     async def answer_general_voice_question(
@@ -750,17 +869,16 @@ class AIService:
                 "suggest what Felix can do (check emails, calendar, follow-ups, drafts)."
             )
             memory_context = await _auto_memory(memory_context, user_id, feature="voice_general")
-            response = await client.messages.create(
-                model=settings.ANTHROPIC_MODEL_FAST,
+            response = await call_fast(
+                feature="voice_general",
                 max_tokens=300,
-                **FAST_THINKING,
                 **_system_kwarg(memory_context, extra_system=voice_system),
                 messages=[{
                     "role": "user",
                     "content": user_message,
                 }],
             )
-            return response.content[0].text.strip()
+            return response.text.strip()
         except Exception as e:
             success = False
             error_message = f"{type(e).__name__}: {e}"
@@ -768,7 +886,7 @@ class AIService:
         finally:
             await log_ai_call(
                 feature="voice_general",
-                model=settings.ANTHROPIC_MODEL_FAST,
+                model=settings.AI_MODEL_FAST,
                 response=response,
                 started_at=started,
                 user_id=user_id,
@@ -923,7 +1041,7 @@ class AIService:
             )
 
     # ------------------------------------------------------------------
-    # Follow-up detection — Haiku
+    # Follow-up detection — fast model
     # ------------------------------------------------------------------
 
     async def detect_follow_ups(
@@ -941,10 +1059,9 @@ class AIService:
         error_message: str | None = None
         try:
             memory_context = await _auto_memory(memory_context, user_id, feature="follow_up_detect")
-            response = await client.messages.create(
-                model=settings.ANTHROPIC_MODEL_FAST,
+            response = await call_fast(
+                feature="follow_up_detect",
                 max_tokens=300,
-                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -956,7 +1073,7 @@ class AIService:
                 }],
             )
             try:
-                result = json.loads(_strip_markdown_fences(response.content[0].text))
+                result = json.loads(_strip_markdown_fences(response.text))
             except json.JSONDecodeError as e:
                 parse_error = True
                 error_message = f"JSONDecodeError: {e}"
@@ -969,7 +1086,7 @@ class AIService:
         finally:
             await log_ai_call(
                 feature="follow_up_detect",
-                model=settings.ANTHROPIC_MODEL_FAST,
+                model=settings.AI_MODEL_FAST,
                 response=response,
                 started_at=started,
                 user_id=user_id,
@@ -980,7 +1097,7 @@ class AIService:
             )
 
     # ------------------------------------------------------------------
-    # Commitment detection — Haiku
+    # Commitment detection — fast model
     # Bidirectional: pulls promises in both directions from a single email.
     # ------------------------------------------------------------------
 
@@ -1008,10 +1125,9 @@ class AIService:
         error_message: str | None = None
         try:
             memory_context = await _auto_memory(memory_context, user_id, feature="commitment_detect")
-            response = await client.messages.create(
-                model=settings.ANTHROPIC_MODEL_FAST,
+            response = await call_fast(
+                feature="commitment_detect",
                 max_tokens=600,
-                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -1030,7 +1146,7 @@ class AIService:
                 }],
             )
             try:
-                payload = json.loads(_strip_markdown_fences(response.content[0].text))
+                payload = json.loads(_strip_markdown_fences(response.text))
             except json.JSONDecodeError as e:
                 # Re-raise so the inbox-sync caller leaves commitment_scanned_at NULL
                 # and the catch-up sweep retries. Returning [] here previously made
@@ -1073,7 +1189,7 @@ class AIService:
         finally:
             await log_ai_call(
                 feature="commitment_detect",
-                model=settings.ANTHROPIC_MODEL_FAST,
+                model=settings.AI_MODEL_FAST,
                 response=response,
                 started_at=started,
                 user_id=user_id,
@@ -1183,7 +1299,7 @@ class AIService:
             )
 
     # ------------------------------------------------------------------
-    # Sentiment analysis — Haiku
+    # Sentiment analysis — fast model
     # ------------------------------------------------------------------
 
     async def analyse_sentiment(
@@ -1200,10 +1316,9 @@ class AIService:
         error_message: str | None = None
         try:
             memory_context = await _auto_memory(memory_context, user_id, feature="sentiment")
-            response = await client.messages.create(
-                model=settings.ANTHROPIC_MODEL_FAST,
+            response = await call_fast(
+                feature="sentiment",
                 max_tokens=200,
-                **FAST_THINKING,
                 **_system_kwarg(memory_context),
                 messages=[{
                     "role": "user",
@@ -1215,7 +1330,7 @@ class AIService:
                 }],
             )
             try:
-                return json.loads(_strip_markdown_fences(response.content[0].text))
+                return json.loads(_strip_markdown_fences(response.text))
             except json.JSONDecodeError as e:
                 parse_error = True
                 error_message = f"JSONDecodeError: {e}"
@@ -1227,7 +1342,7 @@ class AIService:
         finally:
             await log_ai_call(
                 feature="sentiment",
-                model=settings.ANTHROPIC_MODEL_FAST,
+                model=settings.AI_MODEL_FAST,
                 response=response,
                 started_at=started,
                 user_id=user_id,
