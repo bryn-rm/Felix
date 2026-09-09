@@ -1,8 +1,9 @@
 "use client";
 
-import useSWR from "swr";
+import useSWR, { useSWRConfig } from "swr";
 import { api } from "@/lib/api";
 import type { Commitment } from "@/lib/types";
+import { isProjectKey } from "./useProjects";
 
 export type CommitmentDirection = "owed_by_user" | "owed_to_user" | "all";
 export type CommitmentStatus = "open" | "done" | "dropped" | "rescued";
@@ -24,6 +25,7 @@ export function useCommitments(
   direction: CommitmentDirection = "all",
   status: CommitmentStatus = "open",
 ) {
+  const { mutate: mutateCache } = useSWRConfig();
   const path = buildPath(direction, status);
   const { data, error, isLoading, mutate } = useSWR<ListResponse>(
     path,
@@ -34,6 +36,7 @@ export function useCommitments(
   async function resolve(id: string, status: "done" | "dropped" | "rescued" = "done") {
     await api.post(`/commitments/${id}/resolve`, { status });
     await mutate();
+    await mutateCache(isProjectKey);
   }
 
   return {

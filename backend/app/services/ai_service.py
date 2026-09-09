@@ -214,6 +214,7 @@ PROMPT_VERSIONS: dict[str, str] = {
     "session_summary":    "v2",
     "weekly_review":      "v1",
     "meeting_prep":       "v1",
+    "project_update":     "v3",
     "commitment_detect":  "v2",
     "job_detect":         "v1",
     # Separate watch keys; v2 introduces native schemas on the Luna path.

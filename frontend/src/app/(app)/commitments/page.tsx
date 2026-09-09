@@ -1,10 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Check, Clock, X } from "lucide-react";
 
-import { useCommitments, type CommitmentDirection } from "@/hooks/useCommitments";
+import { useCommitments, type CommitmentDirection, type CommitmentStatus } from "@/hooks/useCommitments";
 import type { Commitment } from "@/lib/types";
+import { AddToProject } from "@/components/projects/AddToProject";
 
 const TABS: { label: string; value: CommitmentDirection }[] = [
   { label: "I owe", value: "owed_by_user" },
@@ -55,7 +57,7 @@ function CommitmentCard({
   }
 
   return (
-    <div className="rounded-lg border border-slate-700/50 bg-slate-800/40 p-4">
+    <div id={`commitment-${c.id}`} className="rounded-lg border border-slate-700/50 bg-slate-800/40 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-xs uppercase tracking-wider text-slate-500">
@@ -78,7 +80,8 @@ function CommitmentCard({
           </div>
         </div>
         <div className="flex shrink-0 flex-col gap-2">
-          <button
+          <AddToProject kind="commitment" sourceId={c.id} />
+          {c.status === "open" && <button
             onClick={() => handle("done")}
             disabled={busy !== null}
             className="flex items-center gap-1 rounded-md bg-emerald-600/80 px-2 py-1 text-xs text-white transition-colors hover:bg-emerald-600 disabled:opacity-50"
@@ -86,8 +89,8 @@ function CommitmentCard({
           >
             <Check className="h-3 w-3" />
             Done
-          </button>
-          <button
+          </button>}
+          {c.status === "open" && <button
             onClick={() => handle("dropped")}
             disabled={busy !== null}
             className="flex items-center gap-1 rounded-md bg-slate-700 px-2 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-600 disabled:opacity-50"
@@ -95,16 +98,34 @@ function CommitmentCard({
           >
             <X className="h-3 w-3" />
             Drop
-          </button>
+          </button>}
+          {c.status !== "open" && <span className="text-xs capitalize text-slate-400">{c.status}</span>}
         </div>
       </div>
     </div>
   );
 }
 
-export default function CommitmentsPage() {
+function CommitmentsContent() {
+  const params = useSearchParams();
   const [tab, setTab] = useState<CommitmentDirection>("owed_by_user");
-  const { commitments, isLoading, error, resolve } = useCommitments(tab, "open");
+  const [status, setStatus] = useState<CommitmentStatus>("open");
+  useEffect(() => {
+    const direction = params.get("direction");
+    if (direction === "all" || direction === "owed_by_user" || direction === "owed_to_user") setTab(direction);
+    const value = params.get("status");
+    if (value === "open" || value === "done" || value === "dropped" || value === "rescued") setStatus(value);
+  }, [params]);
+  const { commitments, isLoading, error, resolve } = useCommitments(tab, status);
+  const scrolledToHash = useRef(false);
+  useEffect(() => {
+    if (scrolledToHash.current || isLoading) return;
+    if (!window.location.hash.startsWith("#commitment-")) return;
+    const target = document.getElementById(window.location.hash.slice(1));
+    if (!target) return;
+    target.scrollIntoView?.({ block: "center" });
+    scrolledToHash.current = true;
+  }, [isLoading, commitments]);
 
   return (
     <div className="flex h-full flex-col gap-4 p-6">
@@ -116,6 +137,11 @@ export default function CommitmentsPage() {
         </p>
       </div>
 
+      <label className="text-sm text-slate-400">Status
+        <select value={status} onChange={(e) => setStatus(e.target.value as CommitmentStatus)} className="ml-2 rounded border border-slate-600 bg-slate-800 px-2 py-1 text-slate-200">
+          <option value="open">Open</option><option value="done">Done</option><option value="dropped">Dropped</option><option value="rescued">Rescued</option>
+        </select>
+      </label>
       <div className="flex w-fit gap-1 rounded-lg border border-slate-700 bg-slate-800/40 p-1">
         {TABS.map(({ label, value }) => {
           const active = tab === value;
@@ -158,7 +184,7 @@ export default function CommitmentsPage() {
         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
           <p className="text-base font-medium text-slate-300">All clear</p>
           <p className="text-sm text-slate-500">
-            {tab === "owed_by_user"
+            {status !== "open" ? "No commitments with this status." : tab === "owed_by_user"
               ? "Nothing you've promised is outstanding."
               : tab === "owed_to_user"
                 ? "Nobody owes you anything that Felix can see."
@@ -176,4 +202,8 @@ export default function CommitmentsPage() {
       )}
     </div>
   );
+}
+
+export default function CommitmentsPage() {
+  return <Suspense fallback={<p className="p-6 text-slate-400">Loading commitments…</p>}><CommitmentsContent /></Suspense>;
 }

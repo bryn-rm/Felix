@@ -15,6 +15,7 @@ import { useMeeting, useMeetings } from "@/hooks/useMeetings";
 import { EnhancedNotes } from "@/components/meetings/EnhancedNotes";
 import { STATUS_META, templateLabel } from "@/components/meetings/constants";
 import type { ActionItem, Meeting } from "@/lib/types";
+import { AddToProject } from "@/components/projects/AddToProject";
 
 interface PageProps {
   params: { id: string };
@@ -131,6 +132,8 @@ export default function MeetingDetailPage({ params }: PageProps) {
             </p>
           </div>
         </div>
+        <div className="flex items-center gap-2">
+        <AddToProject kind="meeting" sourceId={id} />
         <button
           onClick={handleDelete}
           disabled={deleting}
@@ -139,6 +142,7 @@ export default function MeetingDetailPage({ params }: PageProps) {
         >
           <Trash2 className="h-4 w-4" />
         </button>
+        </div>
       </div>
 
       {/* Processing / error states */}

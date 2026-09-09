@@ -11,6 +11,7 @@ import {
   Target,
   Users,
   FileText,
+  Folder,
   Briefcase,
   Radio,
   Settings,
@@ -38,6 +39,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/calendar": "Calendar",
   "/follow-ups": "Follow-ups",
   "/commitments": "Commitments",
+  "/projects": "Projects",
   "/jobs": "Jobs",
   "/meetings": "Meetings",
   "/contacts": "Contacts",
@@ -53,6 +55,7 @@ const MOBILE_NAV = [
   { href: "/calendar", icon: Calendar, label: "Calendar" },
   { href: "/follow-ups", icon: Clock, label: "Follow-ups" },
   { href: "/commitments", icon: Target, label: "Commitments" },
+  { href: "/projects", icon: Folder, label: "Projects" },
   { href: "/contacts", icon: Users, label: "Contacts" },
   { href: "/templates", icon: FileText, label: "Templates" },
   { href: "/settings", icon: Settings, label: "Settings" },
@@ -85,19 +88,19 @@ function ShellInner({ userEmail, displayName, children }: AppShellProps) {
   const pathname = usePathname();
   const { modalOpen } = useVoiceContext();
   // Fail closed: Jobs / Meetings appear in the mobile nav only when their
-  // per-user mode is explicitly enabled. Both slot in after Commitments.
+  // per-user mode is explicitly enabled. Match the desktop order after Projects.
   const { data: settings } = useSWR<UserSettings>("/settings", (url: string) =>
     api.get<UserSettings>(url),
   );
   const mobileNav = [
-    ...MOBILE_NAV.slice(0, 6),
+    ...MOBILE_NAV.slice(0, 7),
     ...(settings?.job_search_mode
       ? [{ href: "/jobs", icon: Briefcase, label: "Jobs" }]
       : []),
     ...(settings?.meeting_capture_mode
       ? [{ href: "/meetings", icon: Radio, label: "Meetings" }]
       : []),
-    ...MOBILE_NAV.slice(6),
+    ...MOBILE_NAV.slice(7),
   ];
 
   const title = getPageTitle(pathname);

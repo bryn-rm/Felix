@@ -26,6 +26,7 @@ import {
   Radio,
   Users,
   FileText,
+  Folder,
   Settings,
   LogOut,
   ChevronsLeft,
@@ -121,6 +122,7 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
       badge: overdueFollowups > 0 ? overdueFollowups : undefined,
     },
     { href: "/commitments", label: "Commitments", icon: Target },
+    { href: "/projects", label: "Projects", icon: Folder },
     ...(jobSearchEnabled
       ? [{ href: "/jobs", label: "Jobs", icon: Briefcase } as NavItem]
       : []),

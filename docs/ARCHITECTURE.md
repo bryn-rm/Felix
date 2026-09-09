@@ -114,6 +114,140 @@ Gmail thread ID is the first automated identity. When activity moves to another 
 
 **Connections and gotchas.** `settings.job_search_mode` is the entry gate for automated scanning and the frontend surface. Positive statuses only advance through saved, applied, phone screen, interview, and offer; terminal accepted/rejected/withdrawn states take precedence. Contact email is intentionally not an identity key because ATS and recruiter addresses change. Source-backed timeline events and suggestions use unique keys so retried scans do not duplicate them. Interview meeting summaries may append notes to a matched job without changing its stage.
 
+### Project Hubs (manual workspace)
+
+**Owns.** Private, manually curated projects with name, description, optional date,
+active/archived status, linked sources, chronological activity, confirmed scope,
+decisions, approvals, milestones, and explicitly generated weekly updates. The routes are
+`/projects` and `/projects/[id]`, with desktop/mobile navigation and an Add to
+project action on email detail, meeting detail, and commitment cards.
+
+**Storage and ownership.** Migration 022 adds `projects`, three typed association
+tables (`project_thread_links`, `project_meeting_links`, `project_commitment_links`),
+`project_email_threads`, and `project_activity`. Composite foreign keys carry
+`user_id` through both project and source ownership. Thread identities are
+registered only after checking locally stored inbound or sent mail; Gmail's
+thread ID groups both mirrors and includes subsequent mirrored replies. This
+small identity table is not a new mail mirror or retrieval system. Meeting and
+commitment links retain a null source reference on deletion, so the UI can show
+an unavailable placeholder. This uses PostgreSQL 15+ column-specific SET NULL.
+
+**API and flow.** `ProjectService` backs authenticated list/create/detail/patch
+routes under `/projects`, `/sources/search`, `/{id}/sources` (link),
+`/{id}/sources/{kind}/{link_id}` (unlink), `/{id}/activity`, and
+`/{id}/threads/{thread_id}` (up to 100 locally stored messages). Search includes
+archived inbound mail and sent-only threads, with pagination. Links use a
+transactional project-row lock and database uniqueness to make concurrent
+requests/retries idempotent. Unlink never deletes a canonical source. Meeting
+search/link/content reads preserve `meeting_capture_mode`; disabled or deleted
+meetings display as unavailable. Commitments are joined live; SWR revalidates
+project data after in-app commitment resolution, on focus, and every 30 seconds.
+Project links to resolved commitments select the matching status in the existing
+commitments page.
+Detail and activity constrain the source catalog to this project's links (and
+historical action references for activity) before grouping mail. PostgreSQL prunes
+unrelated catalog branches for source-kind searches. The Overview requests five
+activity entries; only the Activity tab requests a 50-entry page.
+
+**Activity.** Database triggers record actual project metadata changes and
+link/unlink operations atomically; duplicate links and unchanged metadata do not
+create duplicate activity. Source events are read from currently linked mail,
+meeting dates, and commitment creation/resolution timestamps. They retain their
+original dates and are labelled separately from project actions. Unlinking
+removes those derived source events from the view; durable project action history
+remains. Phase 2 adds scope/record changes and canonical commitment changes to
+that same activity log, without copying source bodies into it.
+
+**Confirmed knowledge.** `ProjectKnowledgeService` owns `/{id}/knowledge`,
+`/{id}/scope`, `/{id}/records`, and explicit meeting-decision review/import routes.
+Migration 023 adds append-only `project_scope_versions`, typed `project_records`,
+`project_record_evidence`, and `project_record_requests`. Scope saves and approval/milestone edits require an
+expected version; project-row locks serialize concurrent mutations. Decisions are
+immutable except for supersession: a replacement atomically marks the old decision
+superseded and retains its text and evidence. Approvals track a title, optional
+owner/deadline, and pending/approved/declined/cancelled status; they send no request
+and grant no external permission. Milestones track a target date and
+planned/done/cancelled status; passing a date never completes them.
+Record creation/import requires a client request UUID. A tenant/project-scoped
+request ledger maps each accepted request and input hash to its record, rejecting
+reuse with different input. Exact manual decision payloads and the same imported
+summary/decision index deduplicate across tabs; a replacement's identity includes
+the decision it supersedes. Retries do not add records or activity.
+
+Evidence references point to canonical linked sources. Importing a meeting
+decision requires user confirmation and pins its summary ID, decision index, and
+text hash. A new summary does not rewrite that reference. Reads recheck ownership,
+current project links, the meeting feature gate, and the pinned decision text.
+If supporting evidence becomes unavailable, the record's text is withheld while
+its history/reference marker remains. Browser roles cannot directly read or write
+records, request receipts, evidence, or generated updates; migration 023 revokes their grants so
+the API's access revalidation cannot be bypassed. Composite foreign keys and
+owner RLS policies provide additional tenant isolation.
+An independent `(user_id, summary_id)` foreign key clears deleted-summary
+references even when meeting deletion has already nulled `meeting_id`; the
+three-column foreign key also enforces that the summary belongs to the meeting.
+
+**Generated updates.** `project_evidence_service.py` deterministically reads only
+the project's confirmed state and currently linked local mail, meetings, summaries,
+commitments, and project actions. It uses at most 80 evidence items, 2,000
+characters per item, and 60,000 serialized evidence characters. Fingerprints cover
+all eligible evidence, including omitted items and full-body hashes. Summary
+overviews, decisions, and action items receive bounded excerpts; transcripts are
+fingerprinted for changes but are not fed directly to the update model. Current
+scope and historical revisions are explicitly distinguished.
+Mail, activity, and summary fingerprints are aggregated in PostgreSQL; only up
+to 80 candidates per set, plus explicitly requested evidence IDs, are returned
+to Python. Saved-update reads fetch content for their bounded input manifest,
+and citation reads request their specific evidence ID. Fingerprints still scan
+all linked rows to detect changes outside the selected context; this is not a
+constant-time change log or a cached authorization decision. User-curated scope,
+records, and source links are still read in full.
+
+`ProjectUpdateService` handles GET/POST `/{id}/update` and GET `/{id}/evidence`.
+Generation is an explicit interactive call using the configured smart model,
+monthly quota gate, rate limit, shared thinking policy, untrusted-data wrapper,
+versioned `project_update` prompt, and `log_ai_call`. A database token with a
+two-minute lease prevents overlapping generation; a 60-second model timeout
+bounds the call. The latest successful request ID can be replayed after transport
+failure. Output is strict JSON with at most 12 claims, validated categories/time
+bases, and 1–4 exact evidence quotations per claim. Citation validation establishes
+source/quote validity, not a deterministic proof that every generated statement
+is entailed. Failed, cancelled, malformed, or changed-input attempts preserve the
+last successful update and never modify confirmed knowledge.
+
+`project_updates` stores generated claims, their full input evidence manifest,
+fingerprint, model/prompt version, and reporting window separately from confirmed
+state. Reads mark an update stale after evidence, association, timezone, model, prompt,
+or local-week changes; if any input evidence is no longer accessible, all prose
+is withheld. Citation previews resolve current evidence through the API. Source
+changes are shown as stale, and users explicitly regenerate.
+Generation builds one input snapshot and one post-call verification snapshot;
+the response reuses the verified snapshot rather than building a third one.
+
+**Weekly semantics and UI.** “What changed this week?” uses the user's settings
+timezone (UTC fallback), local Monday inclusive to next Monday exclusive, capped
+at generation time. Boundaries are localized separately across DST. Emails use
+received/sent time, meetings and their summaries use the original meeting time,
+and decisions use the user's entered local decision date. Recording/linking an
+old item this week is a project action, not a new source event. Milestone dates
+are targets. Canonical commitments use their material-change timestamp, with
+resolution/creation fallback for pre-023 rows. UI labels distinguish current
+context, this week's source events, and this week's project actions. Responsive
+Scope/Decisions/Approvals/Milestones tabs keep confirmed state separate from the
+generated Overview panel; SWR revalidates availability and stale status on focus
+and every 30 seconds. No suggested associations, automatic discovery, shared
+access, background generation, or additional retrieval infrastructure is included.
+
+**Migration verification.** `tests/test_projects.py` and `tests/test_project_knowledge.py` use a separately configured
+`PROJECT_TEST_DATABASE_URL` to create disposable databases for the complete fresh
+schema/migration chain, a populated upgrade, migration reruns, API behavior, real
+concurrent writes, composite foreign keys, and RLS. CI provisions PostgreSQL 16;
+without that explicit test URL, database-backed tests skip. The migration builds
+two supporting unique indexes on existing source tables in 022 and two summary
+indexes in 023; allow for locks on a large deployment. Neither migration backfills
+existing sources or projects. 023 also adds a nullable commitment modification
+timestamp and triggers for material changes, record versions, and activity.
+
 ### Authentication and settings
 
 **Owns.** Felix identity, Google provider authorization, encrypted provider tokens, request authentication, Google-connection status, per-user preferences, and feature gates.
@@ -154,7 +288,7 @@ The filesystem router remains authoritative for exact URLs. Of the non-obvious b
 
 ## Database and Supabase architecture
 
-`infra/schema.sql` is the repository's base schema. The repository then contains ordered migrations `001_phase2_email_fields.sql` through `021_capture_heartbeat.sql`. Those files describe source-controlled intent; they are not proof of the schema deployed in Supabase.
+`infra/schema.sql` is the repository's base schema. The repository then contains ordered migrations `001_phase2_email_fields.sql` through `023_project_knowledge.sql`. Those files describe source-controlled intent; they are not proof of the schema deployed in Supabase.
 
 Most product tables are user-owned and carry `user_id` plus Row Level Security. Operational tables such as AI/memory logs, admin audit, and digest-send deduplication are backend/service-role only. `google_connections` is also backend-only so encrypted provider tokens never reach an authenticated browser. The backend itself connects with a role that bypasses RLS; see [`CLAUDE.md`](../CLAUDE.md) for the tenant-scoping requirements that follow from that design.
 

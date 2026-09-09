@@ -1,6 +1,6 @@
 """Shared timezone helpers."""
 import pytz
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 
 def _resolve(tz_name: str):
@@ -29,3 +29,17 @@ def local_date_of(value: datetime, tz_name: str) -> date:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(_resolve(tz_name)).date()
+
+
+def local_week_window(tz_name: str, now: datetime | None = None) -> tuple[datetime, datetime, str]:
+    """Monday-inclusive / next-Monday-exclusive, localized separately for DST."""
+    tz = _resolve(tz_name)
+    today = local_date_of(now or datetime.now(timezone.utc), tz_name)
+    monday = today - timedelta(days=today.weekday())
+    return (local_midnight_utc(monday, tz_name),
+            local_midnight_utc(monday + timedelta(days=7), tz_name), str(tz))
+
+
+def local_midnight_utc(day: date, tz_name: str) -> datetime:
+    """Convert a user-entered local date to its midnight in UTC."""
+    return _resolve(tz_name).localize(datetime.combine(day, time.min)).astimezone(timezone.utc)

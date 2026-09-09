@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, Archive, MailOpen } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Email } from "@/lib/types";
+import { AddToProject } from "@/components/projects/AddToProject";
 
 interface EmailDetailProps {
   email: Email;
@@ -22,12 +23,12 @@ function formatDateTime(iso: string): string {
 }
 
 /** Detect whether a string looks like HTML. */
-function isHtml(body: string): boolean {
+export function isHtml(body: string): boolean {
   return /<[a-z][\s\S]*>/i.test(body);
 }
 
 /** Inline component that sanitises and injects HTML using DOMPurify. */
-function SafeHtmlBody({ html }: { html: string }) {
+export function SafeHtmlBody({ html }: { html: string }) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -92,7 +93,8 @@ export function EmailDetail({ email }: EmailDetailProps) {
           <ArrowLeft className="h-4 w-4" />
           Back
         </button>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {email.thread_id && <AddToProject kind="email_thread" sourceId={email.thread_id} />}
           <button
             onClick={markRead}
             className="flex items-center gap-1.5 rounded-md border border-slate-600 px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-slate-500 hover:text-slate-100"
