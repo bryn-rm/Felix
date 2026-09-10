@@ -114,7 +114,7 @@ Gmail thread ID is the first automated identity. When activity moves to another 
 
 **Connections and gotchas.** `settings.job_search_mode` is the entry gate for automated scanning and the frontend surface. Positive statuses only advance through saved, applied, phone screen, interview, and offer; terminal accepted/rejected/withdrawn states take precedence. Contact email is intentionally not an identity key because ATS and recruiter addresses change. Source-backed timeline events and suggestions use unique keys so retried scans do not duplicate them. Interview meeting summaries may append notes to a matched job without changing its stage.
 
-### Project Hubs (manual workspace)
+### Project Hubs (user-curated workspace)
 
 **Owns.** Private, manually curated projects with name, description, optional date,
 active/archived status, linked sources, chronological activity, confirmed scope,
@@ -235,10 +235,94 @@ resolution/creation fallback for pre-023 rows. UI labels distinguish current
 context, this week's source events, and this week's project actions. Responsive
 Scope/Decisions/Approvals/Milestones tabs keep confirmed state separate from the
 generated Overview panel; SWR revalidates availability and stale status on focus
-and every 30 seconds. No suggested associations, automatic discovery, shared
-access, background generation, or additional retrieval infrastructure is included.
+and every 30 seconds.
 
-**Migration verification.** `tests/test_projects.py` and `tests/test_project_knowledge.py` use a separately configured
+**Suggested associations (Phase 3).** The Sources tab has an explicit “Find
+related items” action. GET only revalidates saved suggestions; discovery runs
+only on POST `/{id}/suggestions/discover`. `project_suggestion_service.py` reuses
+the canonical Phase 1 source catalog, Phase 2 bounded project evidence, and
+`memory_service.retrieve_episodes` (its existing semantic/entity/recency ranking
+and non-vector fallback). No second search index or background work is added.
+
+Context contains at most 16 current project/scope/decision and linked-source
+items, capped at 12,000 text characters. Up to 32 distinct context terms match
+catalog titles/participants. Memory retrieval contributes up to 18 email source
+IDs. The existing indexed `_search_local_email_cache` also contributes up to
+18 message IDs matching project-name terms in bodies, subjects or participants;
+its live Gmail fallback is never invoked. Memory retrieval supplies its source
+IDs with a three-second deadline; existing producers principally emit email IDs,
+including commitment episodes. Episode summaries are never sent to the model:
+IDs resolve through currently owned canonical inbound/sent threads. Commitments
+from linked meetings or mail are additional database candidates. Meeting gates,
+linked-source exclusion, and project-specific accepted/dismissed exclusions
+apply before selecting at most 18 canonical candidates. Candidate excerpts are
+at most 1,600 characters (latest two email messages, meeting notes/latest summary,
+or commitment text), with capped titles and participants and a 60,000-character
+cap on the serialized model input. Catalog matching can
+scan the user's local metadata, but only this bounded content reaches the model.
+
+The configured `AI_MODEL_FAST` judges the remaining ambiguous associations in
+one batch. Shared participants or a parent meeting alone need not imply the same
+project, so these signals nominate candidates rather than automatically accept
+them. No candidates means no model call or interactive quota use. Native fast
+schemas, the versioned `project_suggestions` prompt, untrusted-data delimiters,
+the monthly interactive quota, and `log_ai_call` are reused. Calls use 2,400
+output tokens, a 40-second timeout and the provider adapter's existing retries;
+the complete discovery has a 75-second deadline and a two-minute database lease.
+At most five results survive a 0.85 internal threshold. Candidate and context text
+use plain field values, serialized once into the model input, so supporting quotes
+retain literal newlines, quotes, and backslashes. Each judgment must have valid
+fields, a known candidate/context ID, and exact supporting quotations. Invalid,
+unsupported, duplicate, and low-confidence entries are discarded individually;
+the five highest-scoring valid unique candidates survive. Quotes validate provenance,
+not semantic entailment; precision still depends on model judgement. Empty results
+are valid; malformed envelopes/refused/failed calls preserve prior suggestions
+and expose a retry. Scores are not shown in UI.
+
+Migration 024 stores one `project_suggestions` row per user/project/canonical
+source, with state, explanation, internal score, model/prompt version, and hashes
+of all context and all batch candidates. It adds discovery lease/replay fields
+to projects without changing `updated_at` or emitting activity. Owner RLS,
+composite project FK, uniqueness and indexes apply; browser table grants are
+revoked because generated prose must pass API access checks. Each list re-resolves
+live inputs in one candidate query and a context-only snapshot, skipping activity,
+transcript fingerprints, and source categories absent from the context manifest.
+Changed or inaccessible input invalidates and clears pending explanations for the
+batch. This intentionally conservative policy can remove other suggestions when
+one batch input changes: all inputs may have influenced the prose. The rows remain
+as invalid markers, and the API/UI expose a persistent stale status with an amber
+rediscovery message instead of claiming there were no matches. Prose is cleared
+because it may quote content whose access was revoked. A successful new discovery
+clears this status, including when it finds no matches.
+
+Before applying validation, list takes the project-row lock and compares the
+observed discovery completion timestamp. If another generation committed, list
+retries against it. This protects both new rows and reused upsert IDs; invalidation
+also targets only the examined pending IDs. Cards use live metadata and at most
+300 preview characters. Reads revalidate on focus/every 30 seconds, hide cached
+cards on errors, and never discover new associations.
+
+Accept/dismiss POST routes use project-row locking. Acceptance invokes the same
+`ProjectService.link_in_transaction` as manual linking, including ownership and
+feature revalidation, uniqueness, activity triggers and normal update staleness.
+An accepted retry cannot recreate a subsequently unlinked association. Dismissal
+requires a revalidated pending card (dismissed retries are idempotent), persists per
+project, clears cached prose, and never edits confirmed knowledge or update
+fingerprints. The UI shows a dismissed count and a Reset dismissed items action;
+its project-locked endpoint removes only dismissed markers, making those sources
+eligible for the next explicit discovery without restoring old prose or generating
+anything. Refresh replaces pending results atomically with upserts;
+accepted/dismissed rows cannot be resurrected by concurrent discovery. The latest
+successful discovery request ID replays without another model call. Suggested
+email threads have a `/{id}/suggestions/{suggestion_id}/thread` preview that checks
+project ownership, pending suggestion identity, and live mail ownership. It returns
+only canonical mail, so it does not repeat generated-prose/context validation on
+each preview poll. Sent-only threads can be inspected before linking. Other source types open
+their existing pages. There is no shared access, automatic linking, scheduled
+discovery, notification, or background generation.
+
+**Migration verification.** `tests/test_projects.py`, `tests/test_project_knowledge.py`,
+`tests/test_project_updates.py`, and `tests/test_project_suggestions.py` use a separately configured
 `PROJECT_TEST_DATABASE_URL` to create disposable databases for the complete fresh
 schema/migration chain, a populated upgrade, migration reruns, API behavior, real
 concurrent writes, composite foreign keys, and RLS. CI provisions PostgreSQL 16;

@@ -53,6 +53,10 @@ FAST_SCHEMAS = {
         urgency=nullable(enum("low", "medium", "high")),
         suggested_follow_up_days=nullable({"type": "integer"}), reason=STRING,
     ),
+    "project_suggestions": obj(suggestions=array(obj(
+        candidate_id=STRING, score=SCORE, explanation=STRING,
+        candidate_quote=STRING, context_id=STRING, context_quote=STRING,
+    ))),
     "commitment_detect": obj(commitments=array(obj(
         direction=enum("owed_by_user", "owed_to_user"), counterparty_email=STRING,
         text=STRING, source_quote=STRING, deadline_iso=OPTIONAL_STRING, confidence=SCORE,

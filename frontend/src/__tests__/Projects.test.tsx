@@ -52,6 +52,7 @@ beforeEach(() => {
   (api.get as jest.Mock).mockImplementation(async (url: string) => {
     if (url === "/settings") return { meeting_capture_mode: meetingsEnabled };
     if (url === "/projects/p1/update") return { update: null, stale: false, withheld: false };
+    if (url === "/projects/p1/suggestions") return { suggestions: [], last_discovered_at: null };
     if (url.startsWith("/projects?")) return { projects: [project] };
     if (url.includes("/sources/search")) return { sources: catalog };
     if (url.includes("/activity")) return { activity: [
@@ -185,6 +186,7 @@ it("shows the canonical commitment status in the project", async () => {
   expect(label.parentElement).toHaveTextContent("0");
   fireEvent.click(screen.getByRole("tab", { name: "Sources" }));
   expect(screen.getByText("Status: done")).toBeInTheDocument();
+  await screen.findByText(/Find related emails/);
 });
 
 it("refreshes project counts when a commitment is resolved elsewhere in the app", async () => {

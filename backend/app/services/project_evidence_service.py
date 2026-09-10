@@ -15,13 +15,23 @@ MAX_TEXT = 2000
 MAX_CHARACTERS = 60000
 
 
-async def bounded_rows(sql, user_id, project_id, week_start, now, evidence_keys, select_candidates, *, candidate_filter="true"):
+async def bounded_rows(sql, user_id, project_id, week_start, now, evidence_keys, select_candidates, *, candidate_filter="true", fingerprint=True):
     """Fingerprint all canonical rows in PostgreSQL; return only bounded content.
 
     Internal queries supply evidence_key/event_at. Requested manifest IDs are
     also returned so selection churn cannot be mistaken for lost authorization.
     Full scans remain necessary to detect edits/deletions without a change log.
     """
+    if not fingerprint:
+        # Association checks need the exact selected texts, not a fingerprint of
+        # all project history. PostgreSQL can push manifest predicates inward.
+        selection = (" OR evidence_key IN (SELECT evidence_key FROM evidence WHERE " + candidate_filter +
+                     " ORDER BY event_at DESC NULLS LAST, evidence_key LIMIT $4)") if select_candidates else ""
+        rows = await db.query(
+            "WITH evidence AS (" + sql + ") SELECT * FROM evidence WHERE evidence_key = ANY($3::text[])" + selection,
+            user_id, project_id, list(evidence_keys), *([MAX_ITEMS] if select_candidates else []),
+        )
+        return rows, None, 0
     rows = await db.query(
         "WITH evidence AS MATERIALIZED (" + sql + "), signature AS ("
         "SELECT count(*) AS total, md5(COALESCE(string_agg(md5(to_jsonb(e)::text || "
@@ -46,12 +56,27 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
-async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), select_candidates=True):
+async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), select_candidates=True, context_only=False):
+    """Build update evidence, or plain association context without history hashes.
+
+    context_only preserves source/access checks while skipping unrelated history
+    and fingerprint work. Its fingerprint is intentionally unavailable.
+    """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    detail = await project_service.detail(user_id, project_id)
-    knowledge = await project_knowledge_service.list(user_id, project_id, detail=detail)
+    def needed(*prefixes):
+        return not context_only or select_candidates or any(k.startswith(prefixes) for k in evidence_keys)
+
+    def text_fields(payload):
+        if context_only:
+            return "\n".join(f"{k}: {v if v is not None else ''}" for k, v in payload.items())
+        return json.dumps(payload, default=str)
+
+    detail = (await project_service.detail(user_id, project_id) if needed("email:", "meeting:", "summary:", "commitment:", "record:")
+              else {"project": await project_service.get(user_id, project_id), "sources": []})
+    knowledge = (await project_knowledge_service.list(user_id, project_id, detail=detail) if needed("scope:", "record:")
+                 else {"scope_history": [], "records": []})
     settings = await db.query_one("SELECT timezone FROM settings WHERE user_id = $1", user_id) or {}
     week_start, week_end, tz = local_week_window(settings.get("timezone"), now)
     items = {}
@@ -70,11 +95,11 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         }
         # Future-dated evidence becoming eligible must stale the prior update,
         # even when no row changes and the local week has not rolled over.
-        if fingerprint:
+        if fingerprint and not context_only:
             signatures[key] = digest([digest(payload), items[key]["recent_event"], items[key]["recent_project_action"]])
 
     project = {k: detail["project"][k] for k in ("name", "description", "target_date", "status")}
-    add("project", project, json.dumps(project, default=str), kind="project", section="Overview", priority=0)
+    add("project", project, text_fields(project), kind="project", section="Overview", priority=0)
     for index, scope in enumerate(knowledge["scope_history"]):
         label = "Current confirmed scope" if index == 0 else "Historical confirmed scope"
         add(f"scope:{scope['id']}", scope, f"{label} revision {scope['version']}: {scope['content'] or '(Scope cleared)'}",
@@ -86,7 +111,7 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         signatures[f"record-state:{record['id']}"] = digest(record)
         if not record["available"]:
             continue
-        text = json.dumps({k: record[k] for k in ("kind", "title", "description", "owner", "status", "event_date", "deadline", "supersedes_id")}, default=str)
+        text = text_fields({k: record[k] for k in ("kind", "title", "description", "owner", "status", "event_date", "deadline", "supersedes_id")})
         add(f"record:{record['id']}", record, text, kind=record["kind"], recorded_at=record["updated_at"],
             occurred_at=local_midnight_utc(record["event_date"], tz)
             if record["kind"] == "decision" else None,
@@ -102,8 +127,8 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         "SELECT 'email:sent:' || e.id, e.sent_at, e.id, e.thread_id, e.subject, array_to_string(e.to_emails, ', '), e.sent_at, left(e.body, 2000), md5(e.body), 'sent' "
         "FROM sent_emails e JOIN project_thread_links l ON l.user_id = e.user_id AND l.thread_id = e.thread_id "
         "WHERE e.user_id = $1 AND l.user_id = $1 AND l.project_id = $2", user_id, project_id,
-        week_start, now, evidence_keys, select_candidates,
-    )
+        week_start, now, evidence_keys, select_candidates, fingerprint=not context_only,
+    ) if needed("email:") else ([], None, 0)
     omitted_rows += omitted
     for message in messages:
         key = f"email:{message['direction']}:{message['id']}"
@@ -114,12 +139,13 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
     meetings = await db.query(
         "SELECT m.id, m.title, m.status, COALESCE(m.started_at, m.date) AS occurred_at, "
         "left(m.user_notes, 2000) AS notes, md5(m.user_notes) AS notes_hash, "
-        "(SELECT md5(COALESCE(string_agg(md5(t.text), '' ORDER BY t.id), '')) FROM meeting_transcript_segments t "
-        "WHERE t.user_id = $1 AND t.meeting_id = m.id) AS transcript_hash "
+        + ("NULL::text AS transcript_hash " if context_only else
+           "(SELECT md5(COALESCE(string_agg(md5(t.text), '' ORDER BY t.id), '')) FROM meeting_transcript_segments t "
+           "WHERE t.user_id = $1 AND t.meeting_id = m.id) AS transcript_hash ") +
         "FROM meetings m JOIN project_meeting_links l ON l.user_id = m.user_id AND l.meeting_id = m.id "
         "WHERE m.user_id = $1 AND l.user_id = $1 AND l.project_id = $2 "
         "AND EXISTS (SELECT 1 FROM settings WHERE user_id = $1 AND meeting_capture_mode IS TRUE)", user_id, project_id,
-    )
+    ) if needed("meeting:", "summary:") else []
     for meeting in meetings:
         add(f"meeting:{meeting['id']}", meeting, f"Meeting: {meeting['title']}\nStatus: {meeting['status']}\nNotes: {meeting['notes'] or '(none)'}",
             kind="meeting", occurred_at=meeting["occurred_at"],
@@ -132,8 +158,8 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         "FROM meeting_summaries s JOIN project_meeting_links l ON l.user_id = s.user_id AND l.meeting_id = s.meeting_id "
         "WHERE s.user_id = $1 AND l.user_id = $1 AND l.project_id = $2 "
         "AND EXISTS (SELECT 1 FROM settings WHERE user_id = $1 AND meeting_capture_mode IS TRUE)", user_id, project_id,
-        week_start, now, evidence_keys, select_candidates, candidate_filter="version_rank = 1",
-    )
+        week_start, now, evidence_keys, select_candidates, candidate_filter="version_rank = 1", fingerprint=not context_only,
+    ) if needed("summary:") else ([], None, 0)
     omitted_rows += omitted
     meeting_map = {m["id"]: m for m in meetings}
     for summary in summaries:
@@ -149,9 +175,9 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         "SELECT c.id, c.text, c.direction, c.status, c.deadline, c.created_at, c.resolved_at, c.project_changed_at "
         "FROM commitments c JOIN project_commitment_links l ON l.user_id = c.user_id AND l.commitment_id = c.id "
         "WHERE c.user_id = $1 AND l.user_id = $1 AND l.project_id = $2", user_id, project_id,
-    )
+    ) if needed("commitment:") else []
     for commitment in commitments:
-        add(f"commitment:{commitment['id']}", commitment, json.dumps(commitment, default=str), kind="commitment",
+        add(f"commitment:{commitment['id']}", commitment, text_fields(commitment), kind="commitment",
             occurred_at=commitment["project_changed_at"] or commitment["resolved_at"] or commitment["created_at"],
             href=f"/commitments?direction=all&status={commitment['status']}#commitment-{commitment['id']}", priority=2)
     # Log entries have no copied source text. Only accessible sources/records
@@ -160,7 +186,7 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         "SELECT 'activity:' || id AS evidence_key, occurred_at AS event_at, id, action, source_kind, details, occurred_at FROM project_activity "
         "WHERE user_id = $1 AND project_id = $2", user_id, project_id,
         week_start, now, evidence_keys, select_candidates,
-    )
+    ) if not context_only else ([], None, 0)
     omitted_rows += omitted
     accessible_sources = {(s["kind"], str(s["source_id"])) for s in detail["sources"] if s["available"]}
     for event in activity:
@@ -182,6 +208,6 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
             continue
         characters += size
         selected.append(payload)
-    return {"items": items, "selected": selected, "fingerprint": digest({"timezone": tz, "evidence": signatures}),
+    return {"items": items, "selected": selected, "fingerprint": None if context_only else digest({"timezone": tz, "evidence": signatures}),
             "week_start": week_start, "week_end": week_end, "timezone": tz, "as_of": now,
             "omitted_count": omitted_rows + len(ordered) - len(selected)}

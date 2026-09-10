@@ -144,51 +144,57 @@ class ProjectService:
         )
 
     async def link(self, user_id, project_id, kind, source_id):
-        key = source_key(kind, source_id)
-        table, column = LINKS[kind]
+        # Reject malformed identities before acquiring a database connection.
+        source_key(kind, source_id)
         pool = await db.get_pool()
         async with pool.acquire() as conn, conn.transaction():
-            # Serialize link/unlink per project, including concurrent retries.
-            project = await conn.fetchrow(
-                "SELECT id FROM projects WHERE user_id = $1 AND id = $2 FOR UPDATE",
-                user_id, project_id,
+            return await self.link_in_transaction(conn, user_id, project_id, kind, source_id)
+
+    async def link_in_transaction(self, conn, user_id, project_id, kind, source_id):
+        """Canonical link path, also used by atomic suggestion acceptance."""
+        key = source_key(kind, source_id)
+        table, column = LINKS[kind]
+        # Serialize link/unlink per project, including concurrent retries.
+        project = await conn.fetchrow(
+            "SELECT id FROM projects WHERE user_id = $1 AND id = $2 FOR UPDATE",
+            user_id, project_id,
+        )
+        if not project:
+            raise HTTPException(404, "Project not found")
+        if kind == "email_thread":
+            owned = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM emails WHERE user_id = $1 AND thread_id = $2) "
+                "OR EXISTS (SELECT 1 FROM sent_emails WHERE user_id = $1 AND thread_id = $2)",
+                user_id, key,
             )
-            if not project:
-                raise HTTPException(404, "Project not found")
-            if kind == "email_thread":
-                owned = await conn.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM emails WHERE user_id = $1 AND thread_id = $2) "
-                    "OR EXISTS (SELECT 1 FROM sent_emails WHERE user_id = $1 AND thread_id = $2)",
-                    user_id, key,
+            if owned:
+                await conn.execute(
+                    "INSERT INTO project_email_threads (user_id, thread_id) VALUES ($1, $2) "
+                    "ON CONFLICT (user_id, thread_id) DO NOTHING", user_id, key,
                 )
-                if owned:
-                    await conn.execute(
-                        "INSERT INTO project_email_threads (user_id, thread_id) VALUES ($1, $2) "
-                        "ON CONFLICT (user_id, thread_id) DO NOTHING", user_id, key,
-                    )
-            else:
-                source_table = "meetings" if kind == "meeting" else "commitments"
-                gate = (
-                    " AND EXISTS (SELECT 1 FROM settings WHERE user_id = $1 AND meeting_capture_mode IS TRUE)"
-                    if kind == "meeting" else ""
-                )
-                owned = await conn.fetchval(
-                    f"SELECT id FROM {source_table} WHERE user_id = $1 AND id = $2" + gate + " FOR KEY SHARE",
-                    user_id, key,
-                )
-            if not owned:
-                raise HTTPException(404, "Source unavailable")
+        else:
+            source_table = "meetings" if kind == "meeting" else "commitments"
+            gate = (
+                " AND EXISTS (SELECT 1 FROM settings WHERE user_id = $1 AND meeting_capture_mode IS TRUE)"
+                if kind == "meeting" else ""
+            )
+            owned = await conn.fetchval(
+                f"SELECT id FROM {source_table} WHERE user_id = $1 AND id = $2" + gate + " FOR KEY SHARE",
+                user_id, key,
+            )
+        if not owned:
+            raise HTTPException(404, "Source unavailable")
+        row = await conn.fetchrow(
+            f"INSERT INTO {table} (user_id, project_id, {column}) VALUES ($1, $2, $3) "
+            f"ON CONFLICT (user_id, project_id, {column}) DO NOTHING RETURNING id",
+            user_id, project_id, key,
+        )
+        if not row:
             row = await conn.fetchrow(
-                f"INSERT INTO {table} (user_id, project_id, {column}) VALUES ($1, $2, $3) "
-                f"ON CONFLICT (user_id, project_id, {column}) DO NOTHING RETURNING id",
+                f"SELECT id FROM {table} WHERE user_id = $1 AND project_id = $2 AND {column} = $3",
                 user_id, project_id, key,
             )
-            if not row:
-                row = await conn.fetchrow(
-                    f"SELECT id FROM {table} WHERE user_id = $1 AND project_id = $2 AND {column} = $3",
-                    user_id, project_id, key,
-                )
-            return {"id": row["id"], "kind": kind}
+        return {"id": row["id"], "kind": kind}
 
     async def unlink(self, user_id, project_id, kind, link_id):
         table, _ = LINKS[kind]

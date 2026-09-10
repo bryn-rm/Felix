@@ -11,6 +11,7 @@ from app.middleware.auth import get_current_user
 from app.services.project_service import project_service
 from app.services.project_knowledge_service import project_knowledge_service
 from app.services.project_update_service import project_update_service
+from app.services.project_suggestion_service import project_suggestion_service
 from app.middleware.rate_limit import limiter
 
 router = APIRouter()
@@ -208,3 +209,39 @@ async def generate_update(project_id: UUID, body: GenerateUpdate, request: Reque
 @router.get("/{project_id}/evidence")
 async def get_evidence(project_id: UUID, key: str = Query(max_length=200), current_user: dict = Depends(get_current_user)):
     return await project_update_service.evidence(current_user["id"], project_id, key)
+
+
+@router.get("/{project_id}/suggestions")
+async def list_suggestions(project_id: UUID, current_user: dict = Depends(get_current_user)):
+    return await project_suggestion_service.list(current_user["id"], project_id)
+
+
+class DiscoverSuggestions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+
+
+@router.post("/{project_id}/suggestions/reset-dismissals")
+async def reset_suggestion_dismissals(project_id: UUID, current_user: dict = Depends(get_current_user)):
+    return await project_suggestion_service.reset_dismissals(current_user["id"], project_id)
+
+
+@router.post("/{project_id}/suggestions/discover")
+@limiter.limit("3/minute")
+async def discover_suggestions(project_id: UUID, body: DiscoverSuggestions, request: Request, current_user: dict = Depends(get_current_user)):
+    return await project_suggestion_service.discover(current_user["id"], project_id, body.request_id, current_user.get("email"))
+
+
+@router.post("/{project_id}/suggestions/{suggestion_id}/accept")
+async def accept_suggestion(project_id: UUID, suggestion_id: UUID, current_user: dict = Depends(get_current_user)):
+    return await project_suggestion_service.resolve(current_user["id"], project_id, suggestion_id, True)
+
+
+@router.post("/{project_id}/suggestions/{suggestion_id}/dismiss")
+async def dismiss_suggestion(project_id: UUID, suggestion_id: UUID, current_user: dict = Depends(get_current_user)):
+    return await project_suggestion_service.resolve(current_user["id"], project_id, suggestion_id, False)
+
+
+@router.get("/{project_id}/suggestions/{suggestion_id}/thread")
+async def suggested_thread(project_id: UUID, suggestion_id: UUID, current_user: dict = Depends(get_current_user)):
+    return {"messages": await project_suggestion_service.thread(current_user["id"], project_id, suggestion_id)}

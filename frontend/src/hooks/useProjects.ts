@@ -24,6 +24,13 @@ export interface SourceCandidate {
   deadline: string | null;
   href: string | null;
 }
+export interface ProjectSuggestion extends SourceCandidate {
+  id: string; explanation: string; preview: string;
+}
+export interface ProjectSuggestionsResult {
+  suggestions: ProjectSuggestion[]; last_discovered_at: string | null;
+  stale: boolean; dismissed_count: number;
+}
 export interface ProjectSource extends Omit<SourceCandidate, "source_id"> {
   id: string;
   source_id: string | null;
@@ -108,10 +115,27 @@ export function useMeetingDecisions(id: string) {
   return useSWR<{ decisions: MeetingDecision[] }>(`/projects/${id}/meeting-decisions`, fetcher);
 }
 
+export function useProjectSuggestions(id: string) {
+  return useSWR<ProjectSuggestionsResult>(`/projects/${id}/suggestions`, fetcher, { refreshInterval: 30_000 });
+}
+
 export function useProjectActions() {
   const { mutate } = useSWRConfig();
   async function refresh() { await mutate(isProjectKey); }
   return {
+    async discoverSources(id: string, request_id: string, signal: AbortSignal) {
+      const result = await api.post<ProjectSuggestionsResult>(`/projects/${id}/suggestions/discover`, { request_id }, { signal });
+      await mutate(`/projects/${id}/suggestions`, result, { revalidate: false });
+    },
+    async resetSuggestionDismissals(id: string) {
+      await api.post(`/projects/${id}/suggestions/reset-dismissals`, {});
+      await mutate(`/projects/${id}/suggestions`);
+    },
+    async resolveSuggestion(id: string, suggestionId: string, action: "accept" | "dismiss") {
+      await api.post(`/projects/${id}/suggestions/${suggestionId}/${action}`, {});
+      if (action === "accept") await refresh();
+      else await mutate(`/projects/${id}/suggestions`);
+    },
     async saveScope(id: string, content: string, expected_version: number) {
       await api.put(`/projects/${id}/scope`, { content, expected_version });
       await refresh();

@@ -11,11 +11,11 @@ interface Message {
   occurred_at: string | null; direction: "inbound" | "sent";
 }
 
-export function ThreadPreview({ projectId, threadId, onClose }: {
-  projectId: string; threadId: string; onClose: () => void;
+export function ThreadPreview({ projectId, threadId, suggestionId, onClose }: {
+  projectId: string; threadId: string; suggestionId?: string; onClose: () => void;
 }) {
   const { data, error, isLoading } = useSWR<{ messages: Message[] }>(
-    `/projects/${projectId}/threads/${encodeURIComponent(threadId)}`, (url: string) => api.get<{ messages: Message[] }>(url),
+    suggestionId ? `/projects/${projectId}/suggestions/${suggestionId}/thread` : `/projects/${projectId}/threads/${encodeURIComponent(threadId)}`, (url: string) => api.get<{ messages: Message[] }>(url),
     { refreshInterval: 30_000 },
   );
   return <ProjectDialog title="Email thread" onClose={onClose}>

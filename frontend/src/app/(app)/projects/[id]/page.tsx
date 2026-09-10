@@ -9,6 +9,7 @@ import { ProjectActivityList } from "@/components/projects/ProjectActivity";
 import { ThreadPreview } from "@/components/projects/ThreadPreview";
 import { projectButton } from "@/components/projects/ProjectDialog";
 import { ProjectKnowledgePanel } from "@/components/projects/ProjectKnowledge";
+import { ProjectSuggestionsPanel } from "@/components/projects/ProjectSuggestions";
 import { ProjectUpdatePanel } from "@/components/projects/ProjectUpdate";
 
 export default function ProjectPage({ params }: { params: { id: string } }) {
@@ -71,6 +72,7 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
       </>}
       {["Scope", "Decisions", "Approvals", "Milestones"].includes(tab) && <ProjectKnowledgePanel key={tab} projectId={id} section={tab} sources={sources} openThread={setThread} targetRecordId={targetRecordId} />}
       {tab === "Sources" && <>
+        <ProjectSuggestionsPanel projectId={id} />
         <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-slate-400">Removing a source only removes its link to this project.</p><button className={projectButton} onClick={() => setAdding(true)}>Add sources</button></div>
         {sources.length === 0 && <p className="text-sm text-slate-400">No sources linked yet.</p>}
         <ul className="space-y-3">{sources.map((source) => <li key={source.id} className="rounded-lg border border-slate-700 bg-slate-800/40 p-4">

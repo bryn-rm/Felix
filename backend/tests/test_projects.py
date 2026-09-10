@@ -54,7 +54,8 @@ async def project_db(monkeypatch, request):
         await conn.execute((ROOT / "infra/schema.sql").read_text())
         migrations = sorted((ROOT / "infra/migrations").glob("*.sql"))
         mode = getattr(request, "param", "upgrade")
-        project_migration = ROOT / ("infra/migrations/023_project_knowledge.sql" if mode.startswith("phase2") else "infra/migrations/022_projects.sql")
+        project_migration = ROOT / ("infra/migrations/024_project_suggestions.sql" if mode.startswith("phase3") else
+                                    "infra/migrations/023_project_knowledge.sql" if mode.startswith("phase2") else "infra/migrations/022_projects.sql")
         for path in migrations:
             if path.name < project_migration.name:
                 await conn.execute(path.read_text())
@@ -77,7 +78,7 @@ async def project_db(monkeypatch, request):
             "VALUES ($1, 'inbound', 'owed_by_user', 'Send launch plan') RETURNING id", USER,
         )
         prior_project = None
-        if mode == "phase2-upgrade":
+        if mode in {"phase2-upgrade", "phase3-upgrade"}:
             prior_project = await conn.fetchval("INSERT INTO projects (user_id, name) VALUES ($1, 'Existing Phase 1 project') RETURNING id", USER)
             await conn.execute("INSERT INTO project_meeting_links (user_id, project_id, meeting_id) VALUES ($1, $2, $3)", USER, prior_project, meeting)
             await conn.execute("UPDATE commitments SET status = 'done', resolved_at = '2026-09-08T15:00:00Z' WHERE user_id = $1 AND id = $2", USER, commitment)

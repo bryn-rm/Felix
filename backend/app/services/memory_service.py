@@ -720,7 +720,7 @@ async def safe_retrieve_context(
         )
     except asyncio.TimeoutError:
         logger.info("Episodic retrieval timed out for user=%s feature=%s", user_id, feature)
-        await _log_memory_op(
+        await log_memory_op(
             user_id=user_id, operation="retrieve", feature=feature,
             episodes_hit=0, latency_ms=int((time.monotonic() - started) * 1000),
             metadata={"timeout": True},
@@ -731,7 +731,7 @@ async def safe_retrieve_context(
         return ""
 
     text = format_episodes_context(episodes)
-    await _log_memory_op(
+    await log_memory_op(
         user_id=user_id, operation="retrieve", feature=feature,
         episodes_hit=len(episodes),
         latency_ms=int((time.monotonic() - started) * 1000),
@@ -801,7 +801,7 @@ async def build_memory_context(
 # Observability
 # ---------------------------------------------------------------------------
 
-async def _log_memory_op(
+async def log_memory_op(
     *,
     user_id: str,
     operation: str,
@@ -995,7 +995,7 @@ async def distil_and_store_episode(
             occurred_at=occurred_at,
         )
         if row:
-            await _log_memory_op(
+            await log_memory_op(
                 user_id=user_id, operation="create_episode",
                 feature=episode_type,
                 metadata={"importance": importance, "source_type": source_type},
