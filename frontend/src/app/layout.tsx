@@ -1,11 +1,10 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import ServiceWorkerRegistrar from "@/components/ServiceWorkerRegistrar";
 import "./globals.css";
 import { Analytics } from "@vercel/analytics/react";
 
 export const metadata: Metadata = {
   title: "Felix",
-  themeColor: "#0f172a",
   manifest: "/manifest.json",
   icons: {
     icon: [
@@ -15,12 +14,15 @@ export const metadata: Metadata = {
   },
 };
 
+export const viewport: Viewport = {
+  themeColor: "#0f172a",
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
       </head>
       <body>
         <ServiceWorkerRegistrar />
