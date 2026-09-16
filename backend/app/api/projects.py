@@ -12,6 +12,7 @@ from app.services.project_service import project_service
 from app.services.project_knowledge_service import project_knowledge_service
 from app.services.project_update_service import project_update_service
 from app.services.project_suggestion_service import project_suggestion_service
+from app.services.project_question_service import project_question_service
 from app.middleware.rate_limit import limiter
 
 router = APIRouter()
@@ -160,6 +161,23 @@ class ImportDecision(BaseModel):
 class GenerateUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: UUID
+
+
+class AskProject(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    request_id: UUID
+    question: str = Field(min_length=1, max_length=2000)
+
+
+@router.get("/{project_id}/ask")
+async def get_project_answer(project_id: UUID, current_user: dict = Depends(get_current_user)):
+    return await project_question_service.get(current_user["id"], project_id)
+
+
+@router.post("/{project_id}/ask")
+@limiter.limit("3/minute")
+async def ask_project(project_id: UUID, body: AskProject, request: Request, current_user: dict = Depends(get_current_user)):
+    return await project_question_service.ask(current_user["id"], project_id, body.request_id, body.question, current_user.get("email"))
 
 
 @router.get("/{project_id}/knowledge")

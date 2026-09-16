@@ -11,6 +11,7 @@ import { projectButton } from "@/components/projects/ProjectDialog";
 import { ProjectKnowledgePanel } from "@/components/projects/ProjectKnowledge";
 import { ProjectSuggestionsPanel } from "@/components/projects/ProjectSuggestions";
 import { ProjectUpdatePanel } from "@/components/projects/ProjectUpdate";
+import { ProjectAskPanel } from "@/components/projects/ProjectAsk";
 
 export default function ProjectPage({ params }: { params: { id: string } }) {
   const { id } = params;
@@ -55,9 +56,10 @@ export default function ProjectPage({ params }: { params: { id: string } }) {
     </div>
     {failure && <p role="alert" className="text-sm text-red-400">{failure}</p>}
     <div role="tablist" aria-label="Project sections" className="flex flex-wrap gap-2 border-b border-slate-700">
-      {["Overview", "Scope", "Decisions", "Approvals", "Milestones", "Sources", "Activity"].map((value) => <button key={value} role="tab" aria-selected={tab === value} aria-controls="project-panel" id={`tab-${value}`} onClick={() => setTab(value)} className={`px-3 py-2 text-sm ${tab === value ? "border-b-2 border-indigo-400 text-white" : "text-slate-400"}`}>{value}</button>)}
+      {["Overview", "Ask", "Scope", "Decisions", "Approvals", "Milestones", "Sources", "Activity"].map((value) => <button key={value} role="tab" aria-selected={tab === value} aria-controls="project-panel" id={`tab-${value}`} onClick={() => setTab(value)} className={`px-3 py-2 text-sm ${tab === value ? "border-b-2 border-indigo-400 text-white" : "text-slate-400"}`}>{value}</button>)}
     </div>
     <section role="tabpanel" id="project-panel" aria-labelledby={`tab-${tab}`} className="space-y-4">
+      {tab === "Ask" && <ProjectAskPanel key={id} projectId={id} navigate={navigate} openThread={setThread} />}
       {tab === "Overview" && <>
         <ProjectUpdatePanel projectId={id} navigate={navigate} openThread={setThread} />
         <p className="whitespace-pre-wrap break-words text-sm text-slate-200">{project.description || "Add a description to explain what this project is about."}</p>

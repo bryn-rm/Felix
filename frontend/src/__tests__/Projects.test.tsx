@@ -52,6 +52,7 @@ beforeEach(() => {
   (api.get as jest.Mock).mockImplementation(async (url: string) => {
     if (url === "/settings") return { meeting_capture_mode: meetingsEnabled };
     if (url === "/projects/p1/update") return { update: null, stale: false, withheld: false };
+    if (url === "/projects/p1/ask") return { answer: null, stale: false, withheld: false };
     if (url === "/projects/p1/suggestions") return { suggestions: [], last_discovered_at: null };
     if (url.startsWith("/projects?")) return { projects: [project] };
     if (url.includes("/sources/search")) return { sources: catalog };
@@ -75,6 +76,14 @@ beforeEach(() => {
   });
   (api.patch as jest.Mock).mockImplementation(async (_, body) => { project = { ...project, ...body }; return { project }; });
   (api.del as jest.Mock).mockImplementation(async () => { sources = []; });
+});
+
+it("opens project questions from the Ask tab without generating an answer", async () => {
+  mount(<ProjectPage params={{ id: "p1" }} />);
+  fireEvent.click(await screen.findByRole("tab", { name: "Ask" }));
+  expect(await screen.findByRole("heading", { name: "Ask this project" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Your question")).toBeInTheDocument();
+  expect(api.post).not.toHaveBeenCalled();
 });
 
 it("creates a project and opens its workspace", async () => {

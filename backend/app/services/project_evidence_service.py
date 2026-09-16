@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -15,32 +16,52 @@ MAX_TEXT = 2000
 MAX_CHARACTERS = 60000
 
 
-async def bounded_rows(sql, user_id, project_id, week_start, now, evidence_keys, select_candidates, *, candidate_filter="true", fingerprint=True):
+def question_terms(question):
+    stopwords = {"a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "does", "for", "from",
+                 "how", "i", "in", "is", "it", "me", "my", "of", "on", "or", "our", "project", "the",
+                 "this", "to", "was", "we", "were", "what", "when", "where", "which", "who", "why", "with"}
+    return list(dict.fromkeys(term for term in re.findall(r"\w{3,}", question.lower()) if term not in stopwords))[:12]
+
+
+async def bounded_rows(sql, user_id, project_id, week_start, now, evidence_keys, select_candidates, *, text_expression, candidate_filter="true", fingerprint=True, search_terms=(), week_scoped=True):
     """Fingerprint all canonical rows in PostgreSQL; return only bounded content.
 
     Internal queries supply evidence_key/event_at. Requested manifest IDs are
     also returned so selection churn cannot be mistaken for lost authorization.
     Full scans remain necessary to detect edits/deletions without a change log.
     """
+    # Project the exact bounded model text once; metadata never participates in
+    # retrieval. Expressions come from the internal queries below, not users.
+    projection = "SELECT source.*, left(" + text_expression + ", 2000) AS evidence_text FROM source"
     if not fingerprint:
         # Association checks need the exact selected texts, not a fingerprint of
         # all project history. PostgreSQL can push manifest predicates inward.
         selection = (" OR evidence_key IN (SELECT evidence_key FROM evidence WHERE " + candidate_filter +
                      " ORDER BY event_at DESC NULLS LAST, evidence_key LIMIT $4)") if select_candidates else ""
         rows = await db.query(
-            "WITH evidence AS (" + sql + ") SELECT * FROM evidence WHERE evidence_key = ANY($3::text[])" + selection,
+            "WITH source AS (" + sql + "), evidence AS (" + projection + ") "
+            "SELECT * FROM evidence WHERE evidence_key = ANY($3::text[])" + selection,
             user_id, project_id, list(evidence_keys), *([MAX_ITEMS] if select_candidates else []),
         )
         return rows, None, 0
+    # Rank before LIMIT so a relevant older source can beat recent unrelated mail.
+    # Normalize word boundaries once per row, then count literal terms like
+    # Python's token intersection below. OFFSET 0 prevents PostgreSQL inlining
+    # the normalization into each term comparison. Repeated words score once.
+    relevance = ("(SELECT count(*) FROM (SELECT ' ' || regexp_replace(lower(evidence_text), "
+                 "'[^[:alnum:]_]+', ' ', 'g') || ' ' AS words OFFSET 0) normalized "
+                 "CROSS JOIN unnest($7::text[]) term WHERE strpos(words, ' ' || term || ' ') > 0) DESC, "
+                 if search_terms else "")
     rows = await db.query(
-        "WITH evidence AS MATERIALIZED (" + sql + "), signature AS ("
+        "WITH source AS MATERIALIZED (" + sql + "), evidence AS NOT MATERIALIZED (" + projection + "), signature AS ("
         "SELECT count(*) AS total, md5(COALESCE(string_agg(md5(to_jsonb(e)::text || "
-        "COALESCE((e.event_at BETWEEN $3 AND $4)::text, 'false')), '' ORDER BY evidence_key), '')) AS fingerprint FROM evidence e) "
+        "CASE WHEN $3::timestamptz IS NULL THEN '' ELSE COALESCE((e.event_at BETWEEN $3 AND $4)::text, 'false') END), '' ORDER BY evidence_key), '')) AS fingerprint FROM source e) "
         "SELECT e.*, s.total AS snapshot_total, s.fingerprint AS snapshot_fingerprint FROM signature s "
         "LEFT JOIN LATERAL (SELECT * FROM evidence WHERE evidence_key = ANY($5::text[]) "
         "OR evidence_key IN (SELECT evidence_key FROM evidence WHERE " + candidate_filter +
-        " ORDER BY event_at DESC NULLS LAST, evidence_key LIMIT $6)) e ON true",
-        user_id, project_id, week_start, now, list(evidence_keys), MAX_ITEMS if select_candidates else 0,
+        " ORDER BY " + relevance + "event_at DESC NULLS LAST, evidence_key LIMIT $6)) e ON true",
+        user_id, project_id, week_start if week_scoped else None, now, list(evidence_keys), MAX_ITEMS if select_candidates else 0,
+        *([list(search_terms)] if search_terms else []),
     )
     signature, total = rows[0]["snapshot_fingerprint"], rows[0]["snapshot_total"]
     result = []
@@ -56,13 +77,16 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
-async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), select_candidates=True, context_only=False):
+async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), select_candidates=True, context_only=False, question="", week_scoped=True):
     """Build update evidence, or plain association context without history hashes.
 
     context_only preserves source/access checks while skipping unrelated history
     and fingerprint work. Its fingerprint is intentionally unavailable.
+    Standalone questions disable week_scoped so time alone neither changes the
+    evidence fingerprint nor adds weekly classification flags to model input.
     """
     now = now or datetime.now(timezone.utc)
+    terms = question_terms(question)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     def needed(*prefixes):
@@ -88,15 +112,17 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         items[key] = {
             "id": key, "text": text[:MAX_TEXT], "kind": kind,
             "occurred_at": occurred_at, "recorded_at": recorded_at,
-            "recent_event": bool(occurred_at and week_start <= occurred_at <= now),
-            "recent_project_action": bool(recorded_at and week_start <= recorded_at <= now),
             "href": href, "section": section, "record_id": record_id, "version": version,
             "content_hash": content_hash or digest(payload), "priority": priority, "candidate": candidate,
         }
+        if week_scoped:
+            items[key]["recent_event"] = bool(occurred_at and week_start <= occurred_at <= now)
+            items[key]["recent_project_action"] = bool(recorded_at and week_start <= recorded_at <= now)
         # Future-dated evidence becoming eligible must stale the prior update,
         # even when no row changes and the local week has not rolled over.
         if fingerprint and not context_only:
-            signatures[key] = digest([digest(payload), items[key]["recent_event"], items[key]["recent_project_action"]])
+            signatures[key] = (digest([digest(payload), items[key]["recent_event"], items[key]["recent_project_action"]])
+                               if week_scoped else digest(payload))
 
     project = {k: detail["project"][k] for k in ("name", "description", "target_date", "status")}
     add("project", project, text_fields(project), kind="project", section="Overview", priority=0)
@@ -127,15 +153,17 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         "SELECT 'email:sent:' || e.id, e.sent_at, e.id, e.thread_id, e.subject, array_to_string(e.to_emails, ', '), e.sent_at, left(e.body, 2000), md5(e.body), 'sent' "
         "FROM sent_emails e JOIN project_thread_links l ON l.user_id = e.user_id AND l.thread_id = e.thread_id "
         "WHERE e.user_id = $1 AND l.user_id = $1 AND l.project_id = $2", user_id, project_id,
-        week_start, now, evidence_keys, select_candidates, fingerprint=not context_only,
+        week_start, now, evidence_keys, select_candidates, fingerprint=not context_only, search_terms=terms,
+        week_scoped=week_scoped,
+        text_expression="concat(direction, ' email: ', COALESCE(subject, 'None'), E'\nParticipant: ', COALESCE(participant, 'None'), E'\n', excerpt)",
     ) if needed("email:") else ([], None, 0)
     omitted_rows += omitted
     for message in messages:
         key = f"email:{message['direction']}:{message['id']}"
-        text = f"{message['direction']} email: {message['subject']}\nParticipant: {message['participant']}\n{message['excerpt'] or ''}"
+        text = message["evidence_text"]
         add(key, message, text, kind="email", occurred_at=message["occurred_at"], section="Sources", record_id=message["thread_id"],
             href=f"/inbox/{quote(message['id'], safe='')}" if message["direction"] == "inbound" else None,
-            priority=3 if message["occurred_at"] and message["occurred_at"] >= week_start else 5, fingerprint=False)
+            priority=3 if week_scoped and message["occurred_at"] and message["occurred_at"] >= week_start else 5, fingerprint=False)
     meetings = await db.query(
         "SELECT m.id, m.title, m.status, COALESCE(m.started_at, m.date) AS occurred_at, "
         "left(m.user_notes, 2000) AS notes, md5(m.user_notes) AS notes_hash, "
@@ -151,14 +179,19 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
             kind="meeting", occurred_at=meeting["occurred_at"],
             href=f"/meetings/{'live/' if meeting['status'] == 'recording' else ''}{meeting['id']}", priority=4)
     summaries, signatures["summaries"], omitted = await bounded_rows(
-        "SELECT 'summary:' || s.id AS evidence_key, s.created_at AS event_at, s.id, s.meeting_id, left(s.tldr, 600) AS tldr, s.created_at, "
+        "SELECT 'summary:' || s.id AS evidence_key, s.created_at AS event_at, s.id, s.meeting_id, m.title AS meeting_title, left(s.tldr, 600) AS tldr, s.created_at, "
         "left(s.decisions::text, 600) AS decisions, left(s.action_items::text, 600) AS action_items, "
         "md5(jsonb_build_array(s.tldr, s.decisions, s.action_items, s.enhanced_notes)::text) AS content_hash, "
         "row_number() OVER (PARTITION BY s.meeting_id ORDER BY s.created_at DESC, s.id DESC) AS version_rank "
         "FROM meeting_summaries s JOIN project_meeting_links l ON l.user_id = s.user_id AND l.meeting_id = s.meeting_id "
+        "JOIN meetings m ON m.user_id = s.user_id AND m.id = s.meeting_id "
         "WHERE s.user_id = $1 AND l.user_id = $1 AND l.project_id = $2 "
         "AND EXISTS (SELECT 1 FROM settings WHERE user_id = $1 AND meeting_capture_mode IS TRUE)", user_id, project_id,
-        week_start, now, evidence_keys, select_candidates, candidate_filter="version_rank = 1", fingerprint=not context_only,
+        week_start, now, evidence_keys, select_candidates, candidate_filter="version_rank = 1", fingerprint=not context_only, search_terms=terms,
+        week_scoped=week_scoped,
+        text_expression="concat('Generated meeting summary: ', left(COALESCE(NULLIF(meeting_title, ''), 'Untitled meeting'), 100), "
+                        "E'\nOverview: ', COALESCE(NULLIF(tldr, ''), '(none)'), E'\nDecisions excerpt: ', COALESCE(decisions, 'None'), "
+                        "E'\nAction items excerpt: ', COALESCE(action_items, 'None'))",
     ) if needed("summary:") else ([], None, 0)
     omitted_rows += omitted
     meeting_map = {m["id"]: m for m in meetings}
@@ -166,9 +199,7 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
         meeting = meeting_map.get(summary["meeting_id"])
         if not meeting:
             continue
-        add(f"summary:{summary['id']}", summary,
-            f"Generated meeting summary: {(meeting['title'] or 'Untitled meeting')[:100]}\nOverview: {summary['tldr'] or '(none)'}"
-            f"\nDecisions excerpt: {summary['decisions']}\nAction items excerpt: {summary['action_items']}",
+        add(f"summary:{summary['id']}", summary, summary["evidence_text"],
             kind="meeting_summary", occurred_at=meeting["occurred_at"], href=f"/meetings/{meeting['id']}",
             version=str(summary["id"]), content_hash=summary["content_hash"], candidate=summary["version_rank"] == 1, fingerprint=False)
     commitments = await db.query(
@@ -185,7 +216,10 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
     activity, signatures["activity"], omitted = await bounded_rows(
         "SELECT 'activity:' || id AS evidence_key, occurred_at AS event_at, id, action, source_kind, details, occurred_at FROM project_activity "
         "WHERE user_id = $1 AND project_id = $2", user_id, project_id,
-        week_start, now, evidence_keys, select_candidates,
+        week_start, now, evidence_keys, select_candidates, search_terms=terms,
+        week_scoped=week_scoped,
+        text_expression="concat('Project action: ', action, E'\nSource kind: ', source_kind, "
+                        "E'\nDetails: ', (details - 'source_id' - 'record_id')::text)",
     ) if not context_only else ([], None, 0)
     omitted_rows += omitted
     accessible_sources = {(s["kind"], str(s["source_id"])) for s in detail["sources"] if s["available"]}
@@ -195,10 +229,18 @@ async def project_snapshot(user_id, project_id, now=None, *, evidence_keys=(), s
             continue
         if info.get("record_id") and f"record:{info['record_id']}" not in items and f"scope:{info['record_id']}" not in items:
             continue
-        add(f"activity:{event['id']}", event, json.dumps(event, default=str), kind="project_action",
-            recorded_at=event["occurred_at"], section="Activity", priority=3 if event["occurred_at"] >= week_start else 6, fingerprint=False)
-    ordered = sorted((item for item in items.values() if item["candidate"]),
-                     key=lambda item: (item["priority"], -(item["recorded_at"] or item["occurred_at"] or now).timestamp(), item["id"]))
+        add(f"activity:{event['id']}", event, event["evidence_text"], kind="project_action",
+            recorded_at=event["occurred_at"], section="Activity", priority=3 if week_scoped and event["occurred_at"] >= week_start else 6, fingerprint=False)
+    def rank(item):
+        standard = (item["priority"], -(item["recorded_at"] or item["occurred_at"] or now).timestamp(), item["id"])
+        if not terms:
+            return standard
+        # Protect confirmed context and commitments from matching discussion.
+        # Relevance can promote older discussion within the remaining band.
+        return (min(item["priority"], 3),
+                -len(set(terms).intersection(re.findall(r"\w+", item["text"].lower()))), *standard)
+
+    ordered = sorted((item for item in items.values() if item["candidate"]), key=rank)
     selected = []
     characters = 2  # JSON array brackets
     for item in ordered:

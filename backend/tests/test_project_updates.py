@@ -110,7 +110,7 @@ async def test_model_boundary_logging_untrusted_data_and_timeouts(monkeypatch, o
     assert entry["success"] == (outcome == "success")
     assert entry["parse_error"] == (outcome in ("invalid", "truncated"))
     assert "private" not in (entry["error_message"] or "")
-    assert updates.ai.PROMPT_VERSIONS["project_update"] == "v3"
+    assert updates.ai.PROMPT_VERSIONS["project_update"] == "v4"
 
 
 def test_naive_week_time_is_utc_not_host_timezone(monkeypatch):

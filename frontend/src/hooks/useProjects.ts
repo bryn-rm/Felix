@@ -84,6 +84,15 @@ export interface ProjectUpdateResult {
   update: { claims: UpdateClaim[]; generated_at: string; week_start: string; week_end: string; timezone: string } | null;
   stale: boolean; withheld: boolean; last_generated_at?: string;
 }
+export interface ProjectAnswerResult {
+  question?: string;
+  answer: {
+    question: string; request_id: string; generated_at: string; omitted_count: number;
+    claims: { kind: "answer" | "conflict"; text: string; citations: UpdateClaim["citations"] }[];
+    unanswered: string[];
+  } | null;
+  stale: boolean; withheld: boolean;
+}
 export interface ProjectEvidence {
   id: string; kind: string; text: string; href: string | null; section: string | null;
   record_id: string | null; occurred_at: string | null; recorded_at: string | null;
@@ -111,6 +120,10 @@ export function useProjectUpdate(id: string) {
   return useSWR<ProjectUpdateResult>(`/projects/${id}/update`, fetcher, { refreshInterval: 30_000 });
 }
 
+export function useProjectAnswer(id: string) {
+  return useSWR<ProjectAnswerResult>(`/projects/${id}/ask`, fetcher, { refreshInterval: 30_000 });
+}
+
 export function useMeetingDecisions(id: string) {
   return useSWR<{ decisions: MeetingDecision[] }>(`/projects/${id}/meeting-decisions`, fetcher);
 }
@@ -123,6 +136,10 @@ export function useProjectActions() {
   const { mutate } = useSWRConfig();
   async function refresh() { await mutate(isProjectKey); }
   return {
+    async askProject(id: string, question: string, request_id: string, signal: AbortSignal) {
+      const result = await api.post<ProjectAnswerResult>(`/projects/${id}/ask`, { question, request_id }, { signal });
+      await mutate(`/projects/${id}/ask`, result, { revalidate: false });
+    },
     async discoverSources(id: string, request_id: string, signal: AbortSignal) {
       const result = await api.post<ProjectSuggestionsResult>(`/projects/${id}/suggestions/discover`, { request_id }, { signal });
       await mutate(`/projects/${id}/suggestions`, result, { revalidate: false });

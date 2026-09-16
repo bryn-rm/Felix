@@ -4,6 +4,8 @@
 
 Felix is an AI chief of staff for Gmail, Google Calendar, and meetings. It triages and searches mail, drafts replies in the user's writing style, tracks follow-ups and commitments, prepares briefings, captures and summarizes meetings, offers optional Live Assist, and can maintain a gated job-application board.
 
+Project Hubs bring linked emails, meetings, commitments, and confirmed decisions together. Open a project's **Ask** tab to ask a standalone question and inspect the sources behind its answer. Felix saves the latest answer, flags conflicting or missing evidence, and rechecks source access when you return.
+
 ![Landing page](docs/screenshots/landing-page.jpeg)
 
 ![Dashboard](docs/screenshots/dashboard.jpeg)

@@ -118,7 +118,8 @@ Gmail thread ID is the first automated identity. When activity moves to another 
 
 **Owns.** Private, manually curated projects with name, description, optional date,
 active/archived status, linked sources, chronological activity, confirmed scope,
-decisions, approvals, milestones, and explicitly generated weekly updates. The routes are
+decisions, approvals, milestones, explicitly generated weekly updates, and cited
+answers to project questions. The routes are
 `/projects` and `/projects/[id]`, with desktop/mobile navigation and an Add to
 project action on email detail, meeting detail, and commitment cards.
 
@@ -197,7 +198,12 @@ fingerprinted for changes but are not fed directly to the update model. Current
 scope and historical revisions are explicitly distinguished.
 Mail, activity, and summary fingerprints are aggregated in PostgreSQL; only up
 to 80 candidates per set, plus explicitly requested evidence IDs, are returned
-to Python. Saved-update reads fetch content for their bounded input manifest,
+to Python. Those three sets also compose their bounded model text in PostgreSQL,
+so question relevance can score exactly the text the model sees; project action
+text omits the internal source and record IDs it is filtered by. That changed the
+update model's input, so `project_update` moved to `v4` and updates saved by an
+earlier version read as stale until regenerated. Saved-update reads fetch
+content for their bounded input manifest,
 and citation reads request their specific evidence ID. Fingerprints still scan
 all linked rows to detect changes outside the selected context; this is not a
 constant-time change log or a cached authorization decision. User-curated scope,
@@ -321,8 +327,57 @@ each preview poll. Sent-only threads can be inspected before linking. Other sour
 their existing pages. There is no shared access, automatic linking, scheduled
 discovery, notification, or background generation.
 
+**Ask this project.** The Ask tab uses GET/POST `/{id}/ask`, backed by
+`ProjectQuestionService`. Each question stands alone (maximum 2,000 characters);
+the latest successful question and answer replace the previous result. It does
+not edit confirmed knowledge or send messages. The shared project snapshot uses
+up to 12 whole-word question keywords (at least three characters) to rank mail,
+summary, and activity excerpts in PostgreSQL before their per-source limits.
+SQL and Python score the same bounded model text, excluding retrieval metadata;
+the SQL relevance pass normalizes word boundaries once per row before counting
+distinct matching terms. Combined ranking keeps project identity, current scope,
+active confirmed records, and
+commitments ahead of discussion; relevance reorders within those priority bands.
+This can retrieve relevant older linked material; it is bounded keyword
+retrieval, not exhaustive semantic search. The existing limits of 80 input items,
+2,000 characters per item, and
+60,000 serialized evidence characters apply. Full transcripts and unlinked
+sources are not searched. Answers disclose omitted items and missing evidence.
+Relevance runs only for question generation, not polling. It still scales with
+linked history, alongside the full fingerprint scan; it is not an indexed search.
+
+An explicit request passes ownership, monthly interactive quota, and a
+three-per-minute rate limit before a smart-model call. The question and evidence
+are separately wrapped as untrusted data. The versioned `project_question`
+prompt distinguishes confirmed records, discussion, conflicting evidence, and
+unknowns. Strict output validation requires known citation IDs and exact quotes
+for every answer/conflict point; this verifies provenance, not semantic
+entailment. A 60-second model timeout and 4,000 output tokens bound inference;
+the complete generation has a 75-second deadline, shorter than its lease.
+Every call uses the shared thinking policy and AI telemetry.
+
+Migration 025 adds the API-only `project_answers` table with owner RLS, a
+composite project FK and a user/project primary key, plus a two-minute generation
+lease on projects. It requires a brief projects table lock and no backfill. The
+latest successful request UUID replays without inference; reusing it for a
+different question is rejected. Replay is deliberately limited to the latest
+answer: after another tab saves a new question, retrying an older request can
+generate again and replace that answer. There is no durable request history.
+Concurrent questions cannot both claim a live lease, expired leases recover,
+and failures preserve the last answer. Before saving, the complete input
+fingerprint is rechecked. Reads revalidate every
+input source, not only citations: unavailable input withholds the answer, while
+changed evidence, timezone, model or prompt marks it stale. Question fingerprints
+and model evidence exclude the weekly update's relative recency flags, so a new
+local week alone does not stale a saved answer. The answer's generation timestamp
+remains its time reference. Withheld results retain the user's question, while
+all generated prose stays hidden. Successful submissions clear the question box.
+The browser polls on focus/every 30 seconds, hides prose and open citations on
+read errors or withholding, and shares the weekly update's live citation preview.
+
 **Migration verification.** `tests/test_projects.py`, `tests/test_project_knowledge.py`,
-`tests/test_project_updates.py`, and `tests/test_project_suggestions.py` use a separately configured
+`tests/test_project_updates.py`, `tests/test_project_suggestions.py`, and
+`tests/test_project_question_storage.py` use a separately configured
 `PROJECT_TEST_DATABASE_URL` to create disposable databases for the complete fresh
 schema/migration chain, a populated upgrade, migration reruns, API behavior, real
 concurrent writes, composite foreign keys, and RLS. CI provisions PostgreSQL 16;
@@ -374,7 +429,7 @@ The filesystem router remains authoritative for exact URLs. Of the non-obvious b
 
 ## Database and Supabase architecture
 
-`infra/schema.sql` is the repository's base schema. The repository then contains ordered migrations `001_phase2_email_fields.sql` through `023_project_knowledge.sql`. Those files describe source-controlled intent; they are not proof of the schema deployed in Supabase.
+`infra/schema.sql` is the repository's base schema. The repository then contains ordered migrations `001_phase2_email_fields.sql` through `025_project_questions.sql`. Those files describe source-controlled intent; they are not proof of the schema deployed in Supabase.
 
 Most product tables are user-owned and carry `user_id` plus Row Level Security. Operational tables such as AI/memory logs, admin audit, and digest-send deduplication are backend/service-role only. `google_connections` is also backend-only so encrypted provider tokens never reach an authenticated browser. The backend itself connects with a role that bypasses RLS; see [`CLAUDE.md`](../CLAUDE.md) for the tenant-scoping requirements that follow from that design.
 
