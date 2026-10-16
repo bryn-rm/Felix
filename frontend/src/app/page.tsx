@@ -4,8 +4,8 @@ import { cookies } from 'next/headers'
 import type { Metadata, Viewport } from 'next'
 import PublicHomepage from '@/components/homepage/PublicHomepage'
 
-const title = 'Felix — The working memory of your work'
-const description = 'Felix carries context across email, meetings, commitments, and Projects. Remember what was discussed, decided, changed, and promised — and bring it into the next conversation.'
+const title = 'Felix — AI assistant for email and meetings'
+const description = 'Felix works with Gmail, Google Calendar, and your meetings to help you draft replies, keep track of decisions, and follow up.'
 // Prefer the canonical company domain; Vercel supplies a production domain by
 // default. Local development must not publish an invented canonical URL.
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || (

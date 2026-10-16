@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 
 const getUser = jest.fn();
 jest.mock("@supabase/ssr", () => ({
@@ -30,11 +30,11 @@ afterEach(() => {
   }
 });
 
-it("serves the public dossier at / and keeps login links on the existing route", async () => {
+it("serves the public homepage at / and keeps login links on the existing route", async () => {
   render(await RootPage());
 
   expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
-    "I read the four hundred. You read the nine.",
+    "Email, meetings, and what comes next.",
   );
   expect(screen.getAllByRole("link", { name: /log in/i })).toHaveLength(2);
   screen.getAllByRole("link", { name: /log in/i }).forEach((link) => {
@@ -49,12 +49,12 @@ it("keeps authenticated visitors going to /home", async () => {
   await expect(RootPage()).rejects.toThrow("NEXT_REDIRECT:/home");
 });
 
-it("uses the existing configured access form in the header and both invitations", async () => {
+it("uses the existing configured access form for the invitation", async () => {
   process.env.NEXT_PUBLIC_REQUEST_ACCESS_URL = "https://example.com/existing-access-form";
   render(await RootPage());
 
   const links = screen.getAllByRole("link", { name: /request access/i });
-  expect(links).toHaveLength(3);
+  expect(links).toHaveLength(1);
   links.forEach((link) => {
     expect(link).toHaveAttribute("href", "https://example.com/existing-access-form");
     expect(link).toHaveAttribute("target", "_blank");
@@ -68,16 +68,7 @@ it("preserves the existing absence of a request link when no form is configured"
   expect(screen.queryByRole("link", { name: /request access/i })).not.toBeInTheDocument();
 });
 
-it("lets visitors trace specimen evidence to the corresponding earlier scene", async () => {
-  render(await RootPage());
-
-  const source = screen.getByRole("link", { name: /source: monday’s email/i });
-  expect(source).toHaveAttribute("href", "#launch-approval");
-  expect(document.getElementById("launch-approval")).toHaveTextContent("Email from Maya");
-  expect(screen.getByText("Illustrative examples throughout", { exact: false })).toBeVisible();
-});
-
-it("provides a focusable skip target and meaningful briefing and list semantics", async () => {
+it("provides a focusable skip target and named content sections", async () => {
   render(await RootPage());
 
   expect(screen.getByRole("link", { name: "Skip to content" })).toHaveAttribute("href", "#main");
@@ -85,19 +76,8 @@ it("provides a focusable skip target and meaningful briefing and list semantics"
   expect(main).toHaveAttribute("tabindex", "-1");
   main.focus();
   expect(main).toHaveFocus();
-  expect(screen.getByRole("region", { name: /the morning\s*page/i })).toBeVisible();
-  expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
-  expect(within(screen.getByRole("list", { name: "Context Felix works with" })).getAllByRole("listitem")).toHaveLength(4);
-  const timeline = screen.getByRole("list", { name: "Website Launch timeline" });
-  expect(timeline).toHaveAttribute("role", "list");
-  expect(within(timeline).getAllByRole("listitem")).toHaveLength(4);
-});
-
-it("styles only the initial letter of I’m as a drop cap", async () => {
-  const { container } = render(await RootPage());
-  const initial = container.querySelector(".dropCap");
-  expect(initial).toHaveTextContent(/^I$/);
-  expect(initial?.parentElement?.textContent).toMatch(/^I’m Felix\./);
+  expect(screen.getByRole("region", { name: "What Felix helps with" })).toBeVisible();
+  expect(screen.getByRole("region", { name: "You review before Felix acts." })).toBeVisible();
 });
 
 it("reserves external arrows and new-tab announcements for request-access links", async () => {

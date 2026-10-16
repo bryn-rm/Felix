@@ -22,25 +22,3 @@ export const archivo = localFont({
   adjustFontFallback: "Arial",
   fallback: ["Arial", "sans-serif"],
 });
-
-export const mono = localFont({
-  src: "./fonts/ibm-plex-mono.woff2",
-  weight: "400",
-  style: "normal",
-  variable: "--font-dossier-mono",
-  display: "swap",
-  preload: true,
-  adjustFontFallback: false,
-  fallback: ["Courier New", "monospace"],
-});
-
-export const caveat = localFont({
-  src: "./fonts/caveat.woff2",
-  weight: "500",
-  style: "normal",
-  variable: "--font-dossier-hand",
-  display: "swap",
-  preload: true,
-  adjustFontFallback: false,
-  fallback: ["cursive"],
-});
