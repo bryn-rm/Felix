@@ -48,6 +48,8 @@ async function redirectFrom(run: () => Promise<unknown>): Promise<string> {
 }
 
 beforeEach(() => {
+  // jsdom lacks the server's AbortSignal.timeout implementation.
+  AbortSignal.timeout = jest.fn(() => new AbortController().signal);
   getUser.mockReset();
   getSession.mockReset();
   headerStore.clear();
@@ -96,6 +98,15 @@ describe("app layout — sending a disconnected user to Google connect", () => {
     expect(await redirectFrom(() => AppLayout({ children: null }))).toBe(
       `/connect?next=${encodeURIComponent(VIEWER)}`,
     );
+  });
+
+  it("keeps Settings accessible when existing Google access has expired", async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({ connected: false, needs_reconnect: true }),
+    });
+    headerStore.set(PATHNAME_HEADER, "/settings");
+    expect(await AppLayout({ children: null })).toBeTruthy();
   });
 });
 
@@ -172,5 +183,22 @@ describe("connect page — the last hop back to the viewer", () => {
     });
 
     expect(page.props.returnTo).toBeNull();
+  });
+
+  it("renders reconnection for expired stored credentials", async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({ connected: false, needs_reconnect: true }),
+    });
+    const page = await ConnectPage({ searchParams: Promise.resolve({ next: VIEWER }) });
+    expect(page.props.returnTo).toBe(VIEWER);
+  });
+
+  it("shows cancelled consent even when a connection row exists", async () => {
+    const page = await ConnectPage({
+      searchParams: Promise.resolve({ error: "google_denied", next: VIEWER }),
+    });
+    expect(page.props.initialError).toMatch(/not granted/);
+    expect(page.props.returnTo).toBe(VIEWER);
   });
 });

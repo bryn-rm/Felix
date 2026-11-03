@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi import HTTPException
+from google.auth.exceptions import RefreshError, TransportError
 
 from app.api import auth as auth_api
 from app.middleware.auth import get_current_user, get_google_credentials
@@ -55,7 +56,7 @@ async def test_google_credentials_not_found_returns_403():
         with pytest.raises(HTTPException) as exc:
             await get_google_credentials("user-without-google")
     assert exc.value.status_code == 403
-    assert "not connected" in exc.value.detail.lower()
+    assert exc.value.detail["code"] == "google_reconnect_required"
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +120,7 @@ async def test_google_callback_returns_to_the_protected_destination():
             },
         ),
         patch("app.api.auth.db.execute", new_callable=AsyncMock),
-        patch("app.api.auth.db.upsert", new_callable=AsyncMock),
+        patch("app.api.auth.db.upsert", new_callable=AsyncMock) as upsert,
         patch("app.api.auth.encrypt_token", side_effect=lambda value: value),
         patch("app.api.auth.httpx.AsyncClient", return_value=client_context),
     ):
@@ -128,3 +129,88 @@ async def test_google_callback_returns_to_the_protected_destination():
         )
 
     assert response.headers["location"] == auth_api._frontend_redirect_url(VIEWER_PATH)
+    assert upsert.call_args.args[1]["needs_reconnect"] is False
+
+
+@pytest.mark.parametrize("needs_reconnect", [False, True])
+async def test_google_status_distinguishes_expired_connection(needs_reconnect):
+    row = {"google_email": "user@example.com", "connected_at": None,
+           "last_sync": None, "needs_reconnect": needs_reconnect}
+    with patch("app.db.query_one", new=AsyncMock(return_value=row)) as query:
+        result = await auth_api.google_connection_status({"id": "user-1"})
+    assert result["connected"] is (not needs_reconnect)
+    assert result["needs_reconnect"] is needs_reconnect
+    assert result["google_email"] == "user@example.com"
+    assert query.call_args.args[1] == "user-1"
+
+
+@pytest.mark.parametrize("failure, expected_status, persisted", [
+    (RefreshError("revoked", {"error": "invalid_grant"}), 403, True),
+    (RefreshError("server error", {"error": "temporarily_unavailable"}, retryable=True), 503, False),
+    (RefreshError("client configuration", {"error": "invalid_client"}), 503, False),
+    (TransportError("connection timeout"), 503, False),
+])
+async def test_refresh_failure_only_marks_revoked_credentials(failure, expected_status, persisted):
+    row = {"access_token": "encrypted-access", "refresh_token": "encrypted-refresh",
+           "token_expiry": datetime.now(timezone.utc) - timedelta(hours=1),
+           "needs_reconnect": False}
+    with (
+        patch("app.db.query_one", new=AsyncMock(return_value=row)),
+        patch("app.db.execute", new_callable=AsyncMock) as execute,
+        patch("app.middleware.auth.decrypt_token", side_effect=lambda token: token),
+        patch("app.middleware.auth.Credentials.refresh", side_effect=failure),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await get_google_credentials("user-1")
+    assert exc.value.status_code == expected_status
+    assert execute.called is persisted
+    if persisted:
+        assert exc.value.detail["code"] == "google_reconnect_required"
+        # A failure from old credentials must not invalidate a newer reconnect.
+        sql, *args = execute.call_args.args
+        assert "user_id = $1" in sql
+        assert "access_token = $2" in sql and "refresh_token = $3" in sql
+        assert args == ["user-1", "encrypted-access", "encrypted-refresh"]
+
+
+async def test_known_revoked_credentials_do_not_retry_google():
+    with (
+        patch("app.db.query_one", new=AsyncMock(return_value={"needs_reconnect": True})),
+        patch("app.middleware.auth.Credentials.refresh") as refresh,
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await get_google_credentials("user-1")
+    assert exc.value.status_code == 403
+    refresh.assert_not_called()
+
+
+async def test_cancelled_google_consent_preserves_return_path_and_credentials():
+    with patch("app.db.upsert", new_callable=AsyncMock) as upsert:
+        response = await auth_api.google_callback(
+            code=None, error="access_denied",
+            state=auth_api._oauth_state("user-1", "nonce-1", VIEWER_PATH),
+        )
+    params = parse_qs(urlsplit(response.headers["location"]).query)
+    assert params == {"error": ["google_denied"], "next": [VIEWER_PATH]}
+    upsert.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["/calendar/events", "/calendar/today"])
+async def test_reconnect_error_survives_production_error_envelope(path):
+    import httpx
+    from app.main import app
+
+    async def identity():
+        return {"id": "user-1"}
+
+    app.dependency_overrides[get_current_user] = identity
+    try:
+        with patch("app.db.query_one", new=AsyncMock(return_value={"needs_reconnect": True})):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get(path)
+        assert response.status_code == 403
+        assert response.json()["code"] == "google_reconnect_required"
+        assert isinstance(response.json()["message"], str)
+        assert "Settings" in response.json()["message"]
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)

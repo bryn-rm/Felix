@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useSWRConfig, type ScopedMutator } from "swr";
 import { supabase } from "@/lib/supabase";
 import { getFreshSession } from "@/lib/auth-session";
+import { clearGoogleDisconnected } from "@/lib/google-connection-status";
 
 const RESUME_REFRESH_SKEW_SECONDS = 120;
 
@@ -14,6 +15,7 @@ function isExpiringSoon(expiresAt: number | undefined): boolean {
 }
 
 export function clearAllSWR(mutate: ScopedMutator): Promise<unknown> {
+  clearGoogleDisconnected();
   return mutate(() => true, undefined, { revalidate: false });
 }
 

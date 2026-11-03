@@ -51,7 +51,7 @@ export class ApiError extends Error {
 
 export interface ApiOptions {
   /**
-   * Suppress the global 401→/login and 403→/connect navigation for this
+   * Suppress the global 401→/login navigation and Google reconnect signal for this
    * call. Use when the caller is responsible for its own auth-error
    * recovery (e.g. an SWR hook with a retry policy that wants to retry
    * transient 403s before giving up). Errors are still thrown as normal.
@@ -119,15 +119,17 @@ async function request<T>(
 
   if (!res.ok) {
     let message = res.statusText;
+    let code: string | undefined;
     try {
       const json = await res.json();
-      message = json?.detail ?? json?.message ?? message;
+      code = json?.code ?? json?.detail?.code;
+      message = json?.detail?.message ?? json?.detail ?? json?.message ?? message;
     } catch {
       // keep statusText
     }
     inboxDebug("api:status", { path, status: res.status });
     const err = new ApiError(res.status, message);
-    if (res.status === 403 && !options?.skipAuthRedirect) {
+    if (res.status === 403 && code === "google_reconnect_required" && !options?.skipAuthRedirect) {
       markGoogleDisconnected();
     } else if (!options?.skipAuthRedirect) {
       redirectForAuthStatus(res.status);
@@ -135,11 +137,19 @@ async function request<T>(
     throw err;
   }
 
-  clearGoogleDisconnected();
-
   // 204 No Content
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  const data = await res.json();
+  // A successful Felix request says nothing about Google authorization.
+  // Only the dedicated status response can resolve a reconnect warning.
+  if (path === "/auth/google/status") {
+    if (data.needs_reconnect === true || data.connected === false) {
+      markGoogleDisconnected();
+    } else if (data.connected === true) {
+      clearGoogleDisconnected();
+    }
+  }
+  return data as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,21 +184,21 @@ export const api = {
 
     if (!res.ok) {
       let message = res.statusText;
+      let code: string | undefined;
       try {
         const json = await res.json();
-        message = json?.detail ?? json?.message ?? message;
+        code = json?.code ?? json?.detail?.code;
+        message = json?.detail?.message ?? json?.detail ?? json?.message ?? message;
       } catch {
         // keep statusText
       }
-      if (res.status === 403) {
+      if (res.status === 403 && code === "google_reconnect_required") {
         markGoogleDisconnected();
       } else {
         redirectForAuthStatus(res.status);
       }
       throw new ApiError(res.status, message);
     }
-
-    clearGoogleDisconnected();
 
     if (!res.body) {
       throw new ApiError(500, "No response body for streaming draft");

@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 import jwt as pyjwt
 from cryptography.fernet import Fernet
 from fastapi import Depends, Header, HTTPException
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from supabase import Client, create_client
@@ -178,21 +179,28 @@ async def get_current_user(authorization: str = Header(...)) -> dict:
 # Google credential loading + auto-refresh
 # ---------------------------------------------------------------------------
 
+def _google_reconnect_required() -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail={
+            "code": "google_reconnect_required",
+            "message": "Google access is unavailable. Please reconnect Google in Settings.",
+        },
+    )
+
+
 async def get_google_credentials(user_id: str) -> Credentials:
     """
     Load this user's Google OAuth tokens from google_connections, decrypt them,
     refresh if expired, persist the new token, and return Credentials.
 
-    Raises HTTP 403 if the user hasn't connected their Google account yet.
+    Raises HTTP 403 for missing/revoked grants, 503 for refresh service failures.
     """
     row = await db.query_one(
         "SELECT * FROM google_connections WHERE user_id = $1", user_id
     )
-    if not row:
-        raise HTTPException(
-            status_code=403,
-            detail="Google account not connected. Visit /auth/google/connect to link it.",
-        )
+    if not row or row.get("needs_reconnect"):
+        raise _google_reconnect_required()
 
     # Parse stored expiry (TIMESTAMPTZ comes back as datetime from asyncpg, or as an
     # ISO string from older inserts). Pass it to Credentials so .expired works correctly.
@@ -226,8 +234,7 @@ async def get_google_credentials(user_id: str) -> Credentials:
         expiry=expiry,
     )
 
-    if creds.expired and creds.refresh_token:
-        original_refresh_token = creds.refresh_token
+    if (expiry is None or creds.expired) and creds.refresh_token:
         # creds.refresh() is a synchronous blocking HTTP call — run in a thread.
         try:
             await asyncio.to_thread(creds.refresh, Request())
@@ -235,19 +242,33 @@ async def get_google_credentials(user_id: str) -> Credentials:
             logger.warning(
                 "Google token refresh failed for user %s: %s", user_id, exc
             )
-            raise HTTPException(
-                status_code=403,
-                detail="Google access has expired. Please reconnect your account at /settings.",
+            # Only invalid_grant proves this user's grant needs new consent.
+            # Transport, provider and client-configuration failures are service
+            # errors, not a reason to discard the user's connection.
+            revoked = isinstance(exc, RefreshError) and any(
+                isinstance(arg, dict) and arg.get("error") == "invalid_grant"
+                for arg in exc.args
             )
-        update_data: dict = {
-            "user_id": user_id,
-            "access_token": encrypt_token(creds.token),
-            "token_expiry": creds.expiry if creds.expiry else None,
-        }
-        # Google may rotate the refresh token; persist the new one if it changed.
-        if creds.refresh_token and creds.refresh_token != original_refresh_token:
-            update_data["refresh_token"] = encrypt_token(creds.refresh_token)
-        await db.update("google_connections", update_data)
+            if revoked:
+                await db.execute(
+                    "UPDATE google_connections SET needs_reconnect = TRUE "
+                    "WHERE user_id = $1 AND access_token = $2 AND refresh_token = $3",
+                    user_id, row["access_token"], row["refresh_token"],
+                )
+                raise _google_reconnect_required() from exc
+            raise HTTPException(
+                status_code=503,
+                detail="Google access could not be refreshed right now. Please try again shortly.",
+            ) from exc
+        # Compare the loaded credentials so an older refresh cannot overwrite
+        # a successful reconnect (or recreate an explicitly disconnected row).
+        await db.execute(
+            "UPDATE google_connections SET access_token = $4, refresh_token = $5, "
+            "token_expiry = $6 WHERE user_id = $1 AND access_token = $2 AND refresh_token = $3",
+            user_id, row["access_token"], row["refresh_token"],
+            encrypt_token(creds.token), encrypt_token(creds.refresh_token),
+            creds.expiry.replace(tzinfo=timezone.utc) if creds.expiry else None,
+        )
 
     return creds
 

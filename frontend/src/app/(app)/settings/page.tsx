@@ -20,6 +20,8 @@ import {
 import { api, ApiError } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
 import { clearAllSWR } from "@/components/auth/AuthSync";
+import { GoogleReconnectButton } from "@/components/auth/GoogleReconnectButton";
+import { useGoogleDisconnected } from "@/lib/google-connection-status";
 import type {
   Settings,
   MeetingPrepMode,
@@ -338,6 +340,7 @@ const MEETING_PREP_MODES: { value: MeetingPrepMode; label: string; hint: string 
 
 interface GoogleStatus {
   connected: boolean;
+  needs_reconnect?: boolean;
   google_email?: string;
 }
 
@@ -395,6 +398,7 @@ function parseWindows(raw: string): { ok: true; value: string[] } | { ok: false;
 export default function SettingsPage() {
   const router = useRouter();
   const { mutate } = useSWRConfig();
+  const googleDisconnected = useGoogleDisconnected();
 
   // ---- Remote data ----
   const {
@@ -1049,7 +1053,15 @@ export default function SettingsPage() {
             Section 3 — Gmail Connection
         ================================================================ */}
         <Section title="Gmail Connection">
-          {googleStatus?.connected ? (
+          {googleStatus?.needs_reconnect || (googleStatus?.connected && googleDisconnected) ? (
+            <div className="flex items-center justify-between gap-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+              <div>
+                <p className="text-sm font-medium text-amber-100">Google access expired — reconnect required</p>
+                {googleStatus.google_email && <p className="text-xs text-slate-400">{googleStatus.google_email}</p>}
+              </div>
+              <GoogleReconnectButton />
+            </div>
+          ) : googleStatus?.connected ? (
             <div className="flex items-center justify-between gap-4 rounded-lg border border-slate-700/50 bg-slate-800/40 px-4 py-3">
               <div className="flex items-center gap-2">
                 <span className="h-2 w-2 rounded-full bg-emerald-500" />
@@ -1353,7 +1365,7 @@ export default function SettingsPage() {
               </div>
               <button
                 onClick={handleDisconnect}
-                disabled={disconnecting || !googleStatus?.connected}
+                disabled={disconnecting || (!googleStatus?.connected && !googleStatus?.needs_reconnect)}
                 className="flex shrink-0 items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-sm text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-40"
               >
                 {disconnecting ? (

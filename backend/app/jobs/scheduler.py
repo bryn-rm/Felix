@@ -72,7 +72,8 @@ async def get_active_users() -> list[dict]:
     return await db.query(
         "SELECT s.user_id, s.timezone, s.briefing_time, s.digest_mode, s.digest_times "
         "FROM settings s "
-        "JOIN google_connections g USING (user_id)"
+        "JOIN google_connections g USING (user_id) "
+        "WHERE NOT g.needs_reconnect"
     )
 
 

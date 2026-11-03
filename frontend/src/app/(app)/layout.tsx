@@ -48,9 +48,9 @@ export default async function AppLayout({
     data: { session },
   } = await supabase.auth.getSession();
 
-  // Fail closed: only an explicit {connected: true} passes. Any non-OK response
-  // or network error bounces to /connect so users never land on /home without
-  // Gmail access. redirect() throws, so keep it outside the try/catch.
+  // Existing users with an expired grant retain access to Settings and their
+  // saved data; the shell offers reconnection. New users still connect first.
+  // redirect() throws, so keep it outside the try/catch.
   const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "";
   let connected = false;
   if (session?.access_token) {
@@ -61,8 +61,8 @@ export default async function AppLayout({
         signal: AbortSignal.timeout(8000),
       });
       if (res.ok) {
-        const status = (await res.json()) as { connected?: boolean };
-        connected = status.connected === true;
+        const status = (await res.json()) as { connected?: boolean; needs_reconnect?: boolean };
+        connected = status.connected === true || status.needs_reconnect === true;
       }
     } catch {
       connected = false;

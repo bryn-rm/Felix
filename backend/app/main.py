@@ -86,8 +86,13 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     detail = exc.detail
-    # exc.detail can be any JSON-serialisable value; coerce to a single string.
-    if isinstance(detail, str):
+    code = None
+    # Preserve explicit machine codes while keeping the public error envelope.
+    if isinstance(detail, dict) and isinstance(detail.get("message"), str):
+        message = detail["message"]
+        if isinstance(detail.get("code"), str):
+            code = detail["code"]
+    elif isinstance(detail, str):
         message = detail
     elif detail is None:
         message = "Error"
@@ -95,7 +100,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
         message = str(detail)
     return JSONResponse(
         status_code=exc.status_code,
-        content=error_envelope(exc.status_code, message),
+        content=error_envelope(exc.status_code, message, code=code),
         headers=getattr(exc, "headers", None),
     )
 

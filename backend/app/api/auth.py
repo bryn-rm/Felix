@@ -371,6 +371,7 @@ async def google_callback(
                 "refresh_token": encrypt_token(refresh_token),
                 "token_expiry": token_expiry,
                 "connected_at": datetime.now(timezone.utc),
+                "needs_reconnect": False,
             },
             conflict_columns=["user_id"],
         )
@@ -408,15 +409,17 @@ async def google_callback(
 
 @router.get("/google/status")
 async def google_connection_status(current_user: dict = Depends(get_current_user)):
-    """Return whether this user has a connected Google account."""
+    """Report stored grant health without making a Google call on every page load."""
     row = await db.query_one(
-        "SELECT google_email, connected_at, last_sync FROM google_connections WHERE user_id = $1",
+        "SELECT google_email, connected_at, last_sync, needs_reconnect "
+        "FROM google_connections WHERE user_id = $1",
         current_user["id"],
     )
     if not row:
-        return {"connected": False}
+        return {"connected": False, "needs_reconnect": False}
     return {
-        "connected": True,
+        "connected": not row["needs_reconnect"],
+        "needs_reconnect": row["needs_reconnect"],
         "google_email": row["google_email"],
         "connected_at": row["connected_at"],
         "last_sync": row["last_sync"],

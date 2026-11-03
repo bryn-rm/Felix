@@ -25,7 +25,7 @@ jest.mock("@/lib/google-connection-status", () => ({
 
 import { supabase } from "@/lib/supabase";
 import { api, ApiError } from "@/lib/api";
-import { markGoogleDisconnected } from "@/lib/google-connection-status";
+import { clearGoogleDisconnected, markGoogleDisconnected } from "@/lib/google-connection-status";
 
 const futureExpiry = () => Math.floor(Date.now() / 1000) + 3600;
 const expiredExpiry = () => Math.floor(Date.now() / 1000) - 60;
@@ -169,12 +169,47 @@ describe("api.get", () => {
     expect((caught as ApiError).status).toBe(500);
   });
 
-  it("marks Google disconnected on an ordinary 403 response", async () => {
-    mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: "Forbidden" }));
+  it("marks Google disconnected on a Google reconnect error", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: {
+      code: "google_reconnect_required", message: "Reconnect Google",
+    } }));
 
     await expect(api.get("/google-protected")).rejects.toMatchObject({ status: 403 });
 
     expect(markGoogleDisconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat an unrelated forbidden response as Google expiry", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: "Forbidden" }));
+    await expect(api.get("/protected")).rejects.toMatchObject({ status: 403 });
+    expect(markGoogleDisconnected).not.toHaveBeenCalled();
+  });
+
+  it("recognizes the production error envelope", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(403, {
+      code: "google_reconnect_required", message: "Reconnect Google",
+    }));
+    await expect(api.get("/calendar/events")).rejects.toMatchObject({ message: "Reconnect Google" });
+    expect(markGoogleDisconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the Google warning after unrelated successful requests", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(200, { ok: true }));
+    await api.get("/settings");
+    expect(clearGoogleDisconnected).not.toHaveBeenCalled();
+  });
+
+  it("clears the warning only when connection status confirms recovery", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(200, { connected: true, needs_reconnect: false }));
+    await api.get("/auth/google/status");
+    expect(clearGoogleDisconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the warning from persisted expired status", async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(200, { connected: false, needs_reconnect: true }));
+    await api.get("/auth/google/status");
+    expect(markGoogleDisconnected).toHaveBeenCalledTimes(1);
+    expect(clearGoogleDisconnected).not.toHaveBeenCalled();
   });
 
   it("does not mark Google disconnected when auth redirects are skipped", async () => {
@@ -190,7 +225,9 @@ describe("api.get", () => {
 
 describe("api.streamDraft", () => {
   it("marks Google disconnected on a 403 response", async () => {
-    mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: "Google not connected" }));
+    mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: {
+      code: "google_reconnect_required", message: "Google not connected",
+    } }));
 
     await expect(api.streamDraft("email-1")).rejects.toMatchObject({ status: 403 });
 
