@@ -5,16 +5,28 @@
 @tailwind utilities;
 
 :root {
+  /* Brand primitives shared by the public pages and the dark application. */
+  --felix-indigo-rgb: 79 70 229;
+  --felix-indigo-hover-rgb: 67 56 202;
+  --felix-periwinkle-rgb: 165 180 252;
+  --felix-amber-rgb: 251 191 36;
+  --felix-ivory: #faf8f3;
+  --felix-lavender: #eef2ff;
+  --felix-ink: #17213b;
+  --felix-ink-muted: #526078;
+  --felix-rule: #d6dbea;
   --felix-bg-deep: #080f1e;
   --felix-bg-panel: #0d1526;
-  --felix-accent: #6366f1;
-  --felix-accent-dim: #4f46e5;
+  --felix-accent: rgb(var(--felix-indigo-rgb));
+  --felix-accent-dim: rgb(var(--felix-indigo-hover-rgb));
+  --felix-accent-light: rgb(var(--felix-periwinkle-rgb));
+  --felix-warm: rgb(var(--felix-amber-rgb));
   --felix-text-bright: #f0f4ff;
   --felix-text-heading: #e8edf8;
-  --felix-text-muted: #6b7fa3;
-  --felix-text-dim: #3d4f6b;
-  --felix-text-ghost: #2d3a52;
-  --felix-text-footer: #1e2d45;
+  --felix-text-muted: #a3b1cc;
+  --felix-text-dim: #94a3b8;
+  --felix-text-ghost: #94a3b8;
+  --felix-text-footer: #94a3b8;
   --felix-border: rgba(255, 255, 255, 0.04);
 }
 

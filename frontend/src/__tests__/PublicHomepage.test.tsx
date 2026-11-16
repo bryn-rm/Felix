@@ -34,7 +34,7 @@ it("serves the public homepage at / and keeps login links on the existing route"
   render(await RootPage());
 
   expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
-    "Email, meetings, and what comes next.",
+    "The context that matters, all in one place.",
   );
   expect(screen.getAllByRole("link", { name: /log in/i })).toHaveLength(2);
   screen.getAllByRole("link", { name: /log in/i }).forEach((link) => {
@@ -108,7 +108,7 @@ describe("public homepage metadata", () => {
     }
   });
 
-  it("uses the company origin for canonical and social URLs, with a cream light viewport", () => {
+  it("uses the company origin for canonical and social URLs, with a navy viewport matching the masthead", () => {
     process.env.NEXT_PUBLIC_SITE_URL = "https://company.example";
     process.env.VERCEL_PROJECT_PRODUCTION_URL = "production.vercel.app";
     jest.isolateModules(() => {
@@ -123,7 +123,7 @@ describe("public homepage metadata", () => {
         images: [{ url: "https://company.example/icon-512.png", width: 512, height: 512, alt: "Felix" }],
       });
       expect(metadata.twitter).toMatchObject({ card: "summary", title: metadata.title, description: metadata.description });
-      expect(viewport).toEqual({ themeColor: "#f4f1ea", colorScheme: "light" });
+      expect(viewport).toEqual({ themeColor: "#080f1e", colorScheme: "light" });
     });
   });
 

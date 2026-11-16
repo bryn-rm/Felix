@@ -6,16 +6,18 @@ export default function PublicHomepage({ requestAccessUrl }: { requestAccessUrl?
   return (
     <div className={`${styles.page} ${newsreader.variable} ${archivo.variable}`}>
       <a className={styles.skipLink} href="#main">Skip to content</a>
-      <div className={styles.sheet}>
-        <header className={styles.header}>
+      <div className={styles.masthead}>
+        <header className={`${styles.header} ${styles.sheet}`}>
           <Link href="/" className={styles.wordmark} aria-label="Felix homepage">Felix</Link>
           <Link href="/login" className={styles.loginLink}>Log in</Link>
         </header>
+      </div>
 
-        <main id="main" tabIndex={-1}>
-          <section className={styles.hero} aria-labelledby="hero-title">
+      <main id="main" tabIndex={-1}>
+        <div className={styles.heroBand}>
+          <section className={`${styles.hero} ${styles.sheet}`} aria-labelledby="hero-title">
             <p className={styles.eyebrow}>AI assistant · Private beta</p>
-            <h1 id="hero-title" className={styles.headline}>Email, meetings,<br />{" "}and what comes next.</h1>
+            <h1 id="hero-title" className={styles.headline}>The context that matters,<br />{" "}<span className={styles.headlineAccent}>all in one place.</span></h1>
             <p className={styles.intro}>
               Felix works with Gmail, Google Calendar, and your meetings to help
               you draft replies, keep track of decisions, and follow up.
@@ -31,7 +33,8 @@ export default function PublicHomepage({ requestAccessUrl }: { requestAccessUrl?
               )}
             </div>
           </section>
-
+        </div>
+        <div className={styles.sheet}>
           <section className={styles.features} aria-labelledby="features-title">
             <h2 id="features-title">What Felix helps with</h2>
             <dl className={styles.featureList}>
@@ -55,13 +58,13 @@ export default function PublicHomepage({ requestAccessUrl }: { requestAccessUrl?
             <p>Sending emails and creating calendar events require your approval.
               You can disconnect your Google account at any time.</p>
           </section>
-        </main>
+        </div>
+      </main>
 
-        <footer className={styles.footer}>
-          <span>© Felix 2026</span>
-          <span>Private beta</span>
-        </footer>
-      </div>
+      <footer className={`${styles.footer} ${styles.sheet}`}>
+        <span>© Felix 2026</span>
+        <span>Private beta</span>
+      </footer>
     </div>
   );
 }

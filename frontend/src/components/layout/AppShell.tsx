@@ -107,13 +107,13 @@ function ShellInner({ userEmail, displayName, children }: AppShellProps) {
   const avatarText = initials(displayName, userEmail);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#080f1e] text-slate-100">
+    <div className="flex h-screen overflow-hidden bg-felix-deep text-slate-100">
       {/* Desktop collapsible sidebar */}
       <Sidebar userEmail={userEmail} displayName={displayName} />
 
       {/* Main area */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.04] bg-[#080f1e] px-4">
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-white/[0.04] bg-felix-deep px-4">
           <div className="flex items-center gap-3">
             <h1 className="text-base font-semibold text-slate-100">{title}</h1>
           </div>
@@ -127,7 +127,7 @@ function ShellInner({ userEmail, displayName, children }: AppShellProps) {
             </button>
 
             <div
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-600 text-xs font-bold text-white"
+              className="flex h-8 w-8 items-center justify-center rounded-full bg-felix-accent text-xs font-bold text-white"
               title={displayName ?? userEmail}
             >
               {avatarText}
@@ -143,7 +143,7 @@ function ShellInner({ userEmail, displayName, children }: AppShellProps) {
 
       {/* Mobile bottom nav bar — icons only, scrolls horizontally if cramped */}
       <nav
-        className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around overflow-x-auto border-t border-white/[0.04] bg-[#0d1526] py-2 md:hidden"
+        className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around overflow-x-auto border-t border-white/[0.04] bg-felix-panel py-2 md:hidden"
         aria-label="Mobile navigation"
       >
         {mobileNav.map(({ href, icon: Icon, label }) => {
@@ -154,7 +154,7 @@ function ShellInner({ userEmail, displayName, children }: AppShellProps) {
               href={href}
               className={[
                 "flex shrink-0 flex-col items-center justify-center px-3 py-1 transition-colors",
-                active ? "text-indigo-400" : "text-slate-500",
+                active ? "text-felix-accent-light" : "text-slate-500",
               ].join(" ")}
               aria-label={label}
             >

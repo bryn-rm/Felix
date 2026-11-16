@@ -148,7 +148,7 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
       onMouseLeave={handleMouseLeave}
       style={{ width: expanded ? 240 : 56 }}
       className={[
-        "hidden md:flex md:flex-col h-full shrink-0 bg-[#0d1526] border-r border-white/[0.04]",
+        "hidden md:flex md:flex-col h-full shrink-0 bg-felix-panel border-r border-white/[0.04]",
         "transition-[width] duration-200 ease-out overflow-hidden",
       ].join(" ")}
       aria-label="Primary navigation"
@@ -199,7 +199,7 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
                 "group relative flex items-center h-10 rounded-md text-sm font-medium",
                 "transition-colors",
                 active
-                  ? "bg-indigo-600/20 text-slate-100"
+                  ? "bg-felix-accent/20 text-slate-100"
                   : "text-slate-400 hover:bg-slate-700/40 hover:text-slate-100",
               ].join(" ")}
             >
@@ -211,17 +211,17 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
               )}
               {badge !== undefined &&
                 (expanded ? (
-                  <span className="mr-2 rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+                  <span className="mr-2 rounded-full bg-felix-accent px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
                     {badge > 99 ? "99+" : badge}
                   </span>
                 ) : (
                   <span
-                    className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-indigo-500 ring-2 ring-[#0d1526]"
+                    className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-indigo-500 ring-2 ring-felix-panel"
                     aria-label={`${badge} unread`}
                   />
                 ))}
               {active && (
-                <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-indigo-400" />
+                <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-felix-accent-light" />
               )}
             </Link>
           );
@@ -232,7 +232,7 @@ export function Sidebar({ userEmail, displayName }: SidebarProps) {
       <div className="shrink-0 border-t border-white/[0.04] p-2">
         <div className="flex items-center h-10 gap-2">
           <div
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-[11px] font-bold text-white"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-felix-accent text-[11px] font-bold text-white"
             title={displayName ?? userEmail}
           >
             {initials}

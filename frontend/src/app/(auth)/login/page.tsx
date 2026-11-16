@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { rememberReturnPath } from "@/lib/return-to";
+import { archivo, newsreader } from "@/components/homepage/fonts";
+import styles from "./Login.module.css";
 
 // Public link to the external access-request form (Tally/Google Form/etc.). When
 // unset the "Request access" link is hidden entirely — fail closed, never render a
@@ -68,40 +70,12 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="min-h-screen flex flex-col lg:flex-row">
+    <main className={`${styles.page} ${archivo.variable} ${newsreader.variable} min-h-screen flex flex-col lg:flex-row`}>
       {/* ── LEFT PANEL ── */}
       <div
-        className="relative flex flex-col justify-center px-8 py-16 lg:py-0 lg:px-20 lg:w-[55%] overflow-hidden"
+        className={`${styles.story} relative flex flex-col justify-center px-8 py-16 lg:py-0 lg:px-20 lg:w-[55%] overflow-hidden`}
         style={{ backgroundColor: "var(--felix-bg-deep)" }}
       >
-        {/* Animated mesh gradient */}
-        <div
-          className="pointer-events-none absolute inset-0"
-          style={{ opacity: 0.15 }}
-        >
-          <div
-            className="absolute w-[800px] h-[800px] rounded-full"
-            style={{
-              top: "-20%",
-              left: "-10%",
-              background:
-                "radial-gradient(circle, #4f46e5 0%, #1e1b4b 40%, transparent 70%)",
-              animation: "meshMove 20s ease-in-out infinite",
-            }}
-          />
-          <div
-            className="absolute w-[600px] h-[600px] rounded-full"
-            style={{
-              bottom: "-15%",
-              right: "-5%",
-              background:
-                "radial-gradient(circle, #3730a3 0%, #0c1445 40%, transparent 70%)",
-              animation: "meshMove 20s ease-in-out infinite reverse",
-              animationDelay: "-7s",
-            }}
-          />
-        </div>
-
         <div className="relative z-10 max-w-xl">
           {/* Logo + wordmark */}
           <div className="flex items-center gap-3.5 mb-14 felix-fade-up felix-delay-0">
@@ -110,12 +84,12 @@ export default function LoginPage() {
               alt="Felix icon"
               width={52}
               height={52}
-              className="rounded-xl shadow-lg shadow-indigo-500/20 flex-shrink-0"
+              className="rounded-xl flex-shrink-0"
             />
             <span
               className="text-[2rem] tracking-tight leading-none"
               style={{
-                fontFamily: "'Instrument Serif', serif",
+                fontFamily: "var(--font-dossier-serif)",
                 color: "var(--felix-text-bright)",
               }}
             >
@@ -127,16 +101,16 @@ export default function LoginPage() {
           <h1
             className="mb-6 felix-fade-up felix-delay-1"
             style={{
-              fontFamily: "'Instrument Serif', serif",
+              fontFamily: "var(--font-dossier-serif)",
               fontSize: "clamp(2.8rem, 5vw, 4.5rem)",
               lineHeight: 1.05,
               color: "var(--felix-text-bright)",
               letterSpacing: "-0.02em",
             }}
           >
-            Your inbox,
+            The context that matters,
             <br />
-            under control.
+            {" "}<span className={styles.headlineAccent}>all in one place.</span>
           </h1>
 
           {/* Subtext */}
@@ -178,8 +152,7 @@ export default function LoginPage() {
 
           {/* Bottom stamp */}
           <p
-            className="mt-20 text-xs tracking-wide felix-fade-up felix-delay-4"
-            style={{ color: "var(--felix-text-ghost)" }}
+            className={`${styles.stamp} mt-20 text-xs tracking-wide felix-fade-up felix-delay-4`}
           >
             Invite only · Private by design
           </p>
@@ -188,7 +161,7 @@ export default function LoginPage() {
 
       {/* ── RIGHT PANEL ── */}
       <div
-        className="flex items-center justify-center px-8 py-16 lg:py-0 lg:w-[45%]"
+        className={`${styles.signIn} flex items-center justify-center px-8 py-16 lg:py-0 lg:w-[45%]`}
         style={{ backgroundColor: "var(--felix-bg-panel)" }}
       >
         <div className="w-full max-w-sm felix-fade-up felix-delay-5">
@@ -219,7 +192,7 @@ export default function LoginPage() {
           />
 
           {error && (
-            <p className="mb-6 rounded-lg bg-red-900/40 border border-red-700/50 px-4 py-3 text-sm text-red-300">
+            <p className="mb-6 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-800">
               {error}
             </p>
           )}
@@ -228,7 +201,7 @@ export default function LoginPage() {
           <button
             onClick={handleSignIn}
             disabled={loading}
-            className="felix-google-btn flex items-center justify-center gap-3 w-full rounded-xl bg-white disabled:opacity-60 disabled:cursor-wait"
+            className={`${styles.googleButton} flex items-center justify-center gap-3 w-full rounded-xl bg-white disabled:opacity-60 disabled:cursor-wait`}
             style={{ padding: "14px 20px" }}
           >
             <svg width="20" height="20" viewBox="0 0 18 18" aria-hidden>
@@ -251,7 +224,7 @@ export default function LoginPage() {
             </svg>
             <span
               style={{
-                color: "#1a1a2e",
+                color: "var(--felix-text-bright)",
                 fontSize: "15px",
                 fontWeight: 500,
               }}
@@ -265,12 +238,6 @@ export default function LoginPage() {
             className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 mt-6"
             style={{ color: "var(--felix-text-dim)", fontSize: "12px" }}
           >
-            <span className="flex items-center gap-1.5">
-              <span style={{ fontSize: "11px" }}>🔒</span> End-to-end encrypted
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span style={{ fontSize: "11px" }}>👁</span> Read permissions only
-            </span>
             <span className="flex items-center gap-1.5">
               <span style={{ fontSize: "11px" }}>✕</span> Cancel anytime
             </span>
